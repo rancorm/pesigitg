@@ -1,0 +1,21 @@
+[package]
+name = "pesigitg-daemon"
+version = "0.1.0"
+edition = "2021"
+description = "A QUIC-aware load balancer"
+
+[[bin]]
+name = "pesigitgd"
+path = "src/main.rs"
+
+[dependencies]
+pesigitg-common = { path = "../pesigitg-common", features = ["std"] }
+
+log = "0.4"
+nix = { version = "0.29", features = ["fs", "process", "signal"] }
+pico-args = "0.5"
+signal-hook = "0.3"
+syslog = "7"
+
+[build-dependencies]
+chrono = "0.4"

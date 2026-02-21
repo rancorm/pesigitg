@@ -1,0 +1,11 @@
+[package]
+name = "pesigitg-common"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = []
+std = [] # gates std-dependent code
+
+[dependencies]
+# no_std-compatible dependencies only here
