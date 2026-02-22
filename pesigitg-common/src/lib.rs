@@ -5,6 +5,4 @@ pub const DEFAULT_INTF: &str = "eth0";
 pub const PID_FILE: &str = "/var/run/pesigitgd.pid";
 pub const PROC_NAME: &str = "pesigitgd";
 
-#[cfg(feature = "std")]
-pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 

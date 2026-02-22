@@ -3,6 +3,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process;
 
+use anyhow::{bail, Result};
 use nix::fcntl::{Flock, FlockArg};
 
 pub struct PidFile {
@@ -11,7 +12,7 @@ pub struct PidFile {
 }
 
 impl PidFile {
-    pub fn create(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn create(path: &Path) -> Result<Self> {
         let mut file = File::options()
             .create(true)
             .truncate(true)
@@ -21,7 +22,7 @@ impl PidFile {
 
         let lock = match Flock::lock(file.try_clone()?, FlockArg::LockExclusiveNonblock) {
             Ok(lock) => lock,
-            Err(_) => return Err("another instance is already running (PID file locked)".into()),
+            Err(_) => bail!("another instance is already running (PID file locked)"),
         };
 
         write!(file, "{}", process::id())?;

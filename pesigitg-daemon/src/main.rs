@@ -11,12 +11,12 @@ use sd_notify::NotifyState;
 use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
 use signal_hook::iterator::Signals;
 
+use anyhow::{anyhow, bail, Result};
 use pesigitg_common::{
     DEFAULT_INTF,
     DEFAULT_PORT,
     PID_FILE,
     PROC_NAME,
-    Result
 };
 
 use pidfile::PidFile;
@@ -74,7 +74,7 @@ fn parse_args() -> Result<Args> {
     // --help / -h
     if pargs.contains(["-h", "--help"]) {
         println!(
-            "{} {}\n\n\
+            "{0} {1}\n\n\
             A QUIC-aware load balancer\n\n\
             Usage: {0} [OPTIONS]\n\n\
             Options:\n  \
@@ -103,7 +103,7 @@ fn parse_args() -> Result<Args> {
     // Check for unexpected arguments
     let remaining = pargs.finish();
     if !remaining.is_empty() {
-        return Err(format!("Unknown arguments: {:?}", remaining).into());
+        bail!("Unknown arguments: {:?}", remaining);
     }
 
     // If config file provided, use it as base
@@ -176,10 +176,11 @@ fn init_logging() -> Result<()> {
     };
 
     let logger = syslog::unix(formatter)
-        .map_err(|e| format!("failed to connect to syslog: {}", e))?;
+        .map_err(|e| anyhow!("failed to connect to syslog: {}", e))?;
 
     log::set_boxed_logger(Box::new(syslog::BasicLogger::new(logger)))
-        .map(|()| log::set_max_level(log::LevelFilter::Info))?;
+        .map_err(|e| anyhow!(e))?;
+    log::set_max_level(log::LevelFilter::Info);
 
     Ok(())
 }
