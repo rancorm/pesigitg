@@ -2,8 +2,12 @@ mod pidfile;
 
 use std::path::PathBuf;
 
+use std::thread;
+use std::time::Duration;
+
 use log::{error, info};
 use nix::unistd::{chdir, close, dup2, fork, setsid, ForkResult};
+use sd_notify::NotifyState;
 use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
 use signal_hook::iterator::Signals;
 
@@ -72,7 +76,7 @@ fn parse_args() -> Result<Args> {
         println!(
             "{} {}\n\n\
             A QUIC-aware load balancer\n\n\
-            Usage: {} [OPTIONS]\n\n\
+            Usage: {0} [OPTIONS]\n\n\
             Options:\n  \
             -p, --port <PORT>         Port to listen on (repeatable)\n  \
             -i, --interface <NAME>    Network interface [default: {DEFAULT_INTF}]\n  \
@@ -80,7 +84,7 @@ fn parse_args() -> Result<Args> {
             -q, --queues <NUM>        Number of NIC queues [default: 1]\n  \
             -f, --foreground          Run in foreground (don't daemonize)\n  \
             -V, --version             Print version\
-        ", PROC_NAME, env!("CARGO_PKG_VERSION"), PROC_NAME);
+        ", PROC_NAME, env!("CARGO_PKG_VERSION"));
 
         std::process::exit(0);
     }
@@ -183,16 +187,18 @@ fn init_logging() -> Result<()> {
 fn reload_config(args: &mut Args) {
     let Some(ref path) = args.config else {
         info!("SIGHUP received but no config file specified; ignoring");
-        
+
         return;
     };
+
+    let _ = sd_notify::notify(false, &[NotifyState::Reloading]);
 
     match parse_config(path) {
         Ok(fc) => {
             args.ports = fc.ports;
             args.interface = fc.interface;
             args.queues = fc.queues;
-            
+
             info!(
                 "config reloaded: interface='{}', ports={:?}, queues={}",
                 args.interface, args.ports, args.queues
@@ -202,27 +208,40 @@ fn reload_config(args: &mut Args) {
             error!("failed to reload config: {}; keeping current settings", e);
         }
     }
+
+    let _ = sd_notify::notify(false, &[
+        NotifyState::Ready,
+        NotifyState::Status(&format!(
+            "listening on {} ports {:?}", args.interface, args.ports
+        )),
+    ]);
+}
+
+fn running_under_systemd() -> bool {
+    std::env::var_os("INVOCATION_ID").is_some()
 }
 
 fn main() -> Result<()> {
     let mut args = parse_args()?;
 
-    // To be, or not to be a deamon.
-    if !args.foreground {
+    // To be, or not to be a daemon.
+    if !args.foreground && !running_under_systemd() {
         daemonize()?;
     }
 
-    // Setup syslog
-    if let Err(e) = init_logging() {
-        if args.foreground {
-            eprintln!("failed to initialize syslog: {}", e);
-        }
-
-        return Err(e);
+    // Setup logging: stderr in foreground mode (journald captures it), syslog otherwise
+    if args.foreground {
+        env_logger::init();
+    } else {
+        init_logging()?;
     }
 
-    // PID file and signal hooks
-    let _pidfile = PidFile::create(PID_FILE.as_ref())?;
+    // PID file (unnecessary under systemd) and signal hooks
+    let _pidfile = if !running_under_systemd() {
+        Some(PidFile::create(PID_FILE.as_ref())?)
+    } else {
+        None
+    };
     let mut signals = Signals::new([SIGINT, SIGTERM, SIGHUP])?;
 
     info!("PID: {}", std::process::id());
@@ -231,17 +250,30 @@ fn main() -> Result<()> {
         args.interface, args.ports, args.queues
     );
 
-    // Catch signals forever
-    for sig in signals.forever() {
-        match sig {
-            SIGHUP => reload_config(&mut args),
-            SIGINT | SIGTERM => {
-                info!("received signal {}, shutting down", sig);
-                break;
-            }
-            _ => unreachable!(),
-        }
-    }
+    // Notify systemd that we're ready with a status string
+    let _ = sd_notify::notify(false, &[
+        NotifyState::Ready,
+        NotifyState::Status(&format!(
+            "listening on {} ports {:?}", args.interface, args.ports
+        )),
+    ]);
 
-    Ok(())
+    // Poll for signals with a timeout to allow watchdog keepalives
+    loop {
+        for sig in signals.pending() {
+            match sig {
+                SIGHUP => reload_config(&mut args),
+                SIGINT | SIGTERM => {
+                    let _ = sd_notify::notify(false, &[NotifyState::Stopping]);
+                    info!("received signal {}, shutting down", sig);
+
+                    return Ok(());
+                }
+                _ => unreachable!(),
+            }
+        }
+
+        let _ = sd_notify::notify(false, &[NotifyState::Watchdog]);
+        thread::sleep(Duration::from_secs(5));
+    }
 }

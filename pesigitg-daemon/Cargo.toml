@@ -11,9 +11,11 @@ path = "src/main.rs"
 [dependencies]
 pesigitg-common = { path = "../pesigitg-common", features = ["std"] }
 
+env_logger = "0.11"
 log = "0.4"
 nix = { version = "0.29", features = ["fs", "process", "signal"] }
 pico-args = "0.5"
+sd-notify = "0.4"
 signal-hook = "0.3"
 syslog = "7"
 
