@@ -7,7 +7,7 @@ use std::thread;
 use std::time::Duration;
 
 use log::{error, warn, info};
-use nix::unistd::{chdir, close, dup2, fork, setsid, ForkResult};
+use nix::unistd::{chdir, dup2_stdin, dup2_stdout, dup2_stderr, fork, setsid, ForkResult};
 use sd_notify::NotifyState;
 use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
 use signal_hook::iterator::Signals;
@@ -191,14 +191,10 @@ fn daemonize() -> Result<()> {
         nix::fcntl::OFlag::O_RDWR,
         nix::sys::stat::Mode::empty(),
     )?;
-    
-    dup2(devnull, 0)?;
-    dup2(devnull, 1)?;
-    dup2(devnull, 2)?;
-    
-    if devnull > 2 {
-        close(devnull)?;
-    }
+ 
+    dup2_stdin(&devnull)?;
+    dup2_stdout(&devnull)?;
+    dup2_stderr(&devnull)?;
 
     Ok(())
 }
