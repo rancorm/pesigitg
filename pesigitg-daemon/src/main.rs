@@ -1,7 +1,6 @@
 mod pidfile;
 
 use std::path::PathBuf;
-
 use std::thread;
 use std::time::Duration;
 
@@ -10,8 +9,8 @@ use nix::unistd::{chdir, close, dup2, fork, setsid, ForkResult};
 use sd_notify::NotifyState;
 use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
 use signal_hook::iterator::Signals;
-
 use anyhow::{anyhow, bail, Result};
+
 use pesigitg_common::{
     DEFAULT_INTF,
     DEFAULT_PORT,
@@ -218,6 +217,12 @@ fn reload_config(args: &mut Args) {
     ]);
 }
 
+fn num_cores() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+}
+
 fn running_under_systemd() -> bool {
     std::env::var_os("INVOCATION_ID").is_some()
 }
@@ -238,14 +243,20 @@ fn main() -> Result<()> {
     }
 
     // PID file (unnecessary under systemd) and signal hooks
-    let _pidfile = if !running_under_systemd() {
+    let pidfile = if !running_under_systemd() {
         Some(PidFile::create(PID_FILE.as_ref())?)
     } else {
         None
     };
+
     let mut signals = Signals::new([SIGINT, SIGTERM, SIGHUP])?;
 
     info!("PID: {}", std::process::id());
+    if let Some(ref pidfile) = pidfile {
+        info!("PID file: {}", pidfile.path().display());
+    }
+    
+    info!("number of cores: {}", num_cores());
     info!(
         "starting on interface '{}', ports: {:?}, queues: {}",
         args.interface, args.ports, args.queues
@@ -255,7 +266,8 @@ fn main() -> Result<()> {
     let _ = sd_notify::notify(false, &[
         NotifyState::Ready,
         NotifyState::Status(&format!(
-            "listening on {} ports {:?}", args.interface, args.ports
+            "listening on {} ports {:?}, queues: {}", 
+            args.interface, args.ports, args.queues
         )),
     ]);
 

@@ -12,6 +12,10 @@ pub struct PidFile {
 }
 
 impl PidFile {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
     pub fn create(path: &Path) -> Result<Self> {
         let mut file = File::options()
             .create(true)
