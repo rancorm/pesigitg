@@ -20,6 +20,7 @@ sd-notify = "0.4"
 signal-hook = "0.3"
 syslog = "7"
 libc = "0.2"
+bytesize = "2.3"
 
 [build-dependencies]
 chrono = "0.4"

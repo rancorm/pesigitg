@@ -12,12 +12,14 @@ use sd_notify::NotifyState;
 use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
 use signal_hook::iterator::Signals;
 use anyhow::{anyhow, bail, Result};
+use bytesize::ByteSize;
 
 use pesigitg_common::{
     DEFAULT_INTF,
     DEFAULT_PORT,
     PID_FILE,
     PROC_NAME,
+    MAX_CONFIG_SIZE,
     current_pid,
     exit
 };
@@ -62,6 +64,14 @@ struct Ifreq {
 
 
 fn parse_config(path: &PathBuf) -> Result<FileConfig> {
+    let size = std::fs::metadata(path)?.len();
+
+    if size > MAX_CONFIG_SIZE {
+        let byte_size = ByteSize::b(size);
+
+        bail!("config file exceeds {} limit ({} bytes)", size, byte_size);
+    }
+    
     let content = std::fs::read_to_string(path)?;
     let mut ports = Vec::new();
     let mut interface = DEFAULT_INTF.to_string();
