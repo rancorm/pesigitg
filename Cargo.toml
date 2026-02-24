@@ -3,8 +3,8 @@ resolver = "2"
 members = ["pesigitg-daemon", "pesigitg-common"]
 
 [profile.release]
-opt-level = "z"
-lto = true
-codegen-units = 1
-panic = "abort"
-strip = true
+opt-level = 3
+lto = true        # link-time optimization across crates
+codegen-units = 1 # slower compile, but better optimization
+panic = "abort"   # no unwinding overhead in the fast path
+strip = true      # smaller binary, slight startup benefit
