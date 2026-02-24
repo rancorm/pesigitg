@@ -19,6 +19,7 @@ pico-args = "0.5"
 sd-notify = "0.4"
 signal-hook = "0.3"
 syslog = "7"
+libc = "0.2"
 
 [build-dependencies]
 chrono = "0.4"

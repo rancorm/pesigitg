@@ -1,10 +1,12 @@
 mod pidfile;
 
+use std::ffi::CString;
+use libc::{ioctl, socket, AF_INET, SOCK_DGRAM, c_char};
 use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
 
-use log::{error, info};
+use log::{error, warn, info};
 use nix::unistd::{chdir, close, dup2, fork, setsid, ForkResult};
 use sd_notify::NotifyState;
 use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
@@ -33,6 +35,29 @@ struct FileConfig {
     interface: String,
     queues: u16,
 }
+
+const ETHTOOL_GCHANNELS: u32 = 0x0000003c;
+const SIOCETHTOOL: libc::c_ulong = 0x8946;
+
+#[repr(C)]
+struct EthtoolChannels {
+    cmd: u32,
+    max_rx: u32,
+    max_tx: u32,
+    max_other: u32,
+    max_combined: u32,
+    rx_count: u32,
+    tx_count: u32,
+    other_count: u32,
+    combined_count: u32,   
+}
+
+#[repr(C)]
+struct Ifreq {
+    ifr_name: [c_char; 16],
+    ifr_data: *mut EthtoolChannels,
+}
+
 
 fn parse_config(path: &PathBuf) -> Result<FileConfig> {
     let content = std::fs::read_to_string(path)?;
@@ -217,6 +242,39 @@ fn reload_config(args: &mut Args) {
     ]);
 }
 
+fn get_hw_queues(interface: &str) -> std::io::Result<(u32, u32)> {
+    let fd = unsafe { socket(AF_INET, SOCK_DGRAM, 0) };
+
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+
+    let mut channels = EthtoolChannels {
+        cmd: ETHTOOL_GCHANNELS,
+        ..unsafe { std::mem::zeroed() }
+    };
+
+    let mut ifr: Ifreq = unsafe { std::mem::zeroed() };
+    let name = CString::new(interface).unwrap();
+    let name_bytes = name.as_bytes_with_nul();
+    
+    ifr.ifr_name[..name_bytes.len()]
+        .copy_from_slice(unsafe { &*(name_bytes as *const [u8] as *const [c_char]) });
+    ifr.ifr_data = &mut channels;
+
+    let ret = unsafe { ioctl(fd, SIOCETHTOOL as _, &mut ifr) };
+    
+    unsafe { libc::close(fd) };
+
+    if ret < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+
+    // combined_count means each queue handles both RX and TX
+    // If combined > 0, that's your queue count; otherwise use rx/tx separately
+    Ok((channels.combined_count, channels.max_combined))
+}
+
 fn num_cores() -> usize {
     std::thread::available_parallelism()
         .map(|n| n.get())
@@ -251,7 +309,9 @@ fn main() -> Result<()> {
 
     let mut signals = Signals::new([SIGINT, SIGTERM, SIGHUP])?;
 
+    // Output details
     info!("PID: {}", std::process::id());
+
     if let Some(ref pidfile) = pidfile {
         info!("PID file: {}", pidfile.path().display());
     }
@@ -261,6 +321,24 @@ fn main() -> Result<()> {
         "starting on interface '{}', ports: {:?}, queues: {}",
         args.interface, args.ports, args.queues
     );
+
+    match get_hw_queues(&args.interface) {
+        Ok((current, max)) => {
+            info!("current combined queues: {}", current);
+            info!("max. combined queues: {}", max);
+
+            // Warn about thread queue coverage
+            if u32::from(args.queues) < current {
+                warn!("spawn {0} AF_XDP threads for full queue coverage (--queues {0})", current);
+            }
+        }
+        Err(e) => {
+            error!("failed to query {}: {}", args.interface, e);
+            error!("(requires root or CAP_NET_ADMIN)");
+
+            std::process::exit(1);
+        }
+    }
 
     // Notify systemd that we're ready with a status string
     let _ = sd_notify::notify(false, &[
