@@ -18,6 +18,8 @@ use pesigitg_common::{
     DEFAULT_PORT,
     PID_FILE,
     PROC_NAME,
+    current_pid,
+    exit
 };
 
 use pidfile::PidFile;
@@ -92,7 +94,7 @@ fn parse_args() -> Result<Args> {
         println!("{}", env!("RUSTC_VERSION"));
         println!("platform: {}", env!("TARGET"));
 
-        std::process::exit(0);
+        exit!();
     }
 
     // --help / -h
@@ -110,7 +112,7 @@ fn parse_args() -> Result<Args> {
             -V, --version             Print version\
         ", PROC_NAME, env!("CARGO_PKG_VERSION"));
 
-        std::process::exit(0);
+        exit!();
     }
 
     let foreground = pargs.contains(["-f", "--foreground"]);
@@ -127,7 +129,7 @@ fn parse_args() -> Result<Args> {
     // Check for unexpected arguments
     let remaining = pargs.finish();
     if !remaining.is_empty() {
-        bail!("Unknown arguments: {:?}", remaining);
+        bail!("unknown arguments: {:?}", remaining);
     }
 
     // If config file provided, use it as base
@@ -158,7 +160,7 @@ fn parse_args() -> Result<Args> {
 fn daemonize() -> Result<()> {
     // First fork: parent exits, child continues
     match unsafe { fork() }? {
-        ForkResult::Parent { .. } => std::process::exit(0),
+        ForkResult::Parent { .. } => exit!(),
         ForkResult::Child => {}
     }
 
@@ -167,7 +169,7 @@ fn daemonize() -> Result<()> {
 
     // Second fork: session leader exits, grandchild can never acquire a terminal
     match unsafe { fork() }? {
-        ForkResult::Parent { .. } => std::process::exit(0),
+        ForkResult::Parent { .. } => exit!(),
         ForkResult::Child => {}
     }
 
@@ -196,7 +198,7 @@ fn init_logging() -> Result<()> {
         facility: syslog::Facility::LOG_DAEMON,
         hostname: None,
         process: PROC_NAME.into(),
-        pid: std::process::id(),
+        pid: current_pid(),
     };
 
     let logger = syslog::unix(formatter)
@@ -310,7 +312,7 @@ fn main() -> Result<()> {
     let mut signals = Signals::new([SIGINT, SIGTERM, SIGHUP])?;
 
     // Output details
-    info!("PID: {}", std::process::id());
+    info!("PID: {}", current_pid());
 
     if let Some(ref pidfile) = pidfile {
         info!("PID file: {}", pidfile.path().display());
@@ -335,8 +337,8 @@ fn main() -> Result<()> {
         Err(e) => {
             error!("failed to query {}: {}", args.interface, e);
             error!("(requires root or CAP_NET_ADMIN)");
-
-            std::process::exit(1);
+            
+            exit!(1);
         }
     }
 
