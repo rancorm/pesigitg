@@ -294,6 +294,61 @@ fn running_under_systemd() -> bool {
     std::env::var_os("INVOCATION_ID").is_some()
 }
 
+struct ThreadConfig {
+    queue_id: u32,
+    core_id: usize,
+}
+
+fn plan_threads(interface: &str, max_threads: Option<u32>) -> Vec<ThreadConfig> {
+    let (queue_count, _) = get_hw_queues(interface).unwrap_or((1, 1));
+    let numa_cores = select_cores(interface, queue_count);
+    
+    let count = match max_threads {
+        Some(max) => queue_count.min(max),
+        None => queue_count,
+    };
+
+    (0..count)
+        .map(|i| ThreadConfig {
+            queue_id: i,
+            core_id: numa_cores[i as usize],
+        })
+        .collect()
+}
+
+fn select_cores(interface: &str, queue_count: u32) -> Vec<usize> {
+    // Prefer cores on the same NUMA node as the NIC
+    // Read from /sys/class/net/<interface>/device/numa_node
+    // Then pick cores from that node
+
+    let nic_numa = std::fs::read_to_string(format!("/sys/class/net/{}/device/numa_node", interface))
+        .ok()
+        .and_then(|s| s.trim().parse::<i32>().ok())
+        .unwrap_or(0);
+
+    let mut local_cores = Vec::new();
+    let mut remote_cores = Vec::new();
+
+    for cpu in 0..num_cores() {
+        let path = format!("/sys/devices/system/cpu/cpu{}/topology/physical_package_id", cpu);
+        let numa = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| s.trim().parse::<i32>().ok())
+            .unwrap_or(0);
+
+        if numa == nic_numa {
+            local_cores.push(cpu);
+        } else {
+            remote_cores.push(cpu);
+        }
+    }
+
+    // Prefer NUMA-local cores, fall back to remote
+    local_cores.extend(remote_cores);
+    local_cores.truncate(queue_count as usize);
+    local_cores
+}
+
 fn main() -> Result<()> {
     let mut args = parse_args()?;
 
@@ -347,6 +402,13 @@ fn main() -> Result<()> {
             
             exit!(1);
         }
+    }
+
+    // Threads
+    let threads = plan_threads(&args.interface, Some(args.queues));
+    
+    for t in &threads {
+        info!("thread: queue={}, core={}", t.queue_id, t.core_id);
     }
 
     // Notify systemd that we're ready with a status string
