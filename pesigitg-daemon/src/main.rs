@@ -17,9 +17,11 @@ use bytesize::ByteSize;
 use pesigitg_common::{
     DEFAULT_INTF,
     DEFAULT_PORT,
+    DEFAULT_QUEUES,
     PID_FILE,
     PROC_NAME,
     MAX_CONFIG_SIZE,
+    MAX_QUEUES,
     TAGLINE,
     current_pid,
     exit
@@ -30,7 +32,7 @@ use pidfile::PidFile;
 struct Args {
     ports: Vec<u16>,
     interface: String,
-    queues: u16,
+    queues: u32,
     config: Option<PathBuf>,
     foreground: bool,
 }
@@ -38,7 +40,7 @@ struct Args {
 struct FileConfig {
     ports: Vec<u16>,
     interface: String,
-    queues: u16,
+    queues: u32,
 }
 
 const ETHTOOL_GCHANNELS: u32 = 0x0000003c;
@@ -54,7 +56,7 @@ struct EthtoolChannels {
     rx_count: u32,
     tx_count: u32,
     other_count: u32,
-    combined_count: u32,   
+    combined_count: u32, 
 }
 
 #[repr(C)]
@@ -76,7 +78,7 @@ fn parse_config(path: &PathBuf) -> Result<FileConfig> {
     let content = std::fs::read_to_string(path)?;
     let mut ports = Vec::new();
     let mut interface = DEFAULT_INTF.to_string();
-    let mut queues: u16 = 1;
+    let mut queues: u32 = DEFAULT_QUEUES;
 
     for line in content.lines() {
         let line = line.trim();
@@ -87,7 +89,13 @@ fn parse_config(path: &PathBuf) -> Result<FileConfig> {
             match k.trim() {
                 "port" => ports.push(v.trim().parse::<u16>()?),
                 "interface" => interface = v.trim().to_string(),
-                "queues" => queues = v.trim().parse::<u16>()?,
+                "queues" => {
+                    let q = v.trim().parse::<u32>()?;
+                    if q == 0 || q > MAX_QUEUES {
+                        bail!("queues must be between 1 and {}", MAX_QUEUES);
+                    }
+                    queues = q;
+                }
                 _ => {}
             }
         }
@@ -129,7 +137,7 @@ fn parse_args() -> Result<Args> {
     let foreground = pargs.contains(["-f", "--foreground"]);
     let config: Option<PathBuf> = pargs.opt_value_from_str(["-c", "--config"])?;
     let interface: Option<String> = pargs.opt_value_from_str(["-i", "--interface"])?;
-    let queues: Option<u16> = pargs.opt_value_from_str(["-q", "--queues"])?;
+    let queues: Option<u32> = pargs.opt_value_from_str(["-q", "--queues"])?;
 
     // Collect all -p / --port values
     let mut ports = Vec::new();
@@ -149,6 +157,14 @@ fn parse_args() -> Result<Args> {
     }).transpose()?;
 
     // CLI -> config file -> defaults
+    let queues = queues
+        .or(file_config.as_ref().map(|fc| fc.queues))
+        .unwrap_or(DEFAULT_QUEUES);
+    if queues == 0 || queues > MAX_QUEUES {
+        bail!("--queues must be between 1 and {}", MAX_QUEUES);
+    }
+
+    // Build arguments struct
     Ok(Args {
         ports: if !ports.is_empty() {
             ports
@@ -160,9 +176,7 @@ fn parse_args() -> Result<Args> {
         interface: interface
             .or(file_config.as_ref().map(|fc| fc.interface.clone()))
             .unwrap_or_else(|| DEFAULT_INTF.into()),
-        queues: queues
-            .or(file_config.as_ref().map(|fc| fc.queues))
-            .unwrap_or(1),
+        queues,
         config,
         foreground,
     })
@@ -392,7 +406,7 @@ fn main() -> Result<()> {
             info!("max. combined queues: {}", max);
 
             // Warn about thread queue coverage
-            if u32::from(args.queues) < current {
+            if args.queues < current {
                 warn!("spawn {0} AF_XDP threads for full queue coverage (--queues {0})", current);
             }
         }
