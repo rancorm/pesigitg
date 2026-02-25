@@ -2,7 +2,7 @@
 name = "pesigitg-daemon"
 version = "0.1.0"
 edition = "2021"
-description = "A QUIC-aware load balancer"
+description = "A high-performance QUIC-aware load balancer, using eBPF and AF_XDP for kernel-bypass packet forwarding."
 
 [[bin]]
 name = "pesigitgd"

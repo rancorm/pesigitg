@@ -20,6 +20,7 @@ use pesigitg_common::{
     PID_FILE,
     PROC_NAME,
     MAX_CONFIG_SIZE,
+    TAGLINE,
     current_pid,
     exit
 };
@@ -110,8 +111,8 @@ fn parse_args() -> Result<Args> {
     // --help / -h
     if pargs.contains(["-h", "--help"]) {
         println!(
-            "{0} {1}\n\n\
-            A QUIC-aware load balancer\n\n\
+            "{0} {2}\n\n\
+            {1}\n\n\
             Usage: {0} [OPTIONS]\n\n\
             Options:\n  \
             -p, --port <PORT>         Port to listen on (repeatable)\n  \
@@ -120,7 +121,7 @@ fn parse_args() -> Result<Args> {
             -q, --queues <NUM>        Number of NIC queues [default: 1]\n  \
             -f, --foreground          Run in foreground (don't daemonize)\n  \
             -V, --version             Print version\
-        ", PROC_NAME, env!("CARGO_PKG_VERSION"));
+        ", PROC_NAME, TAGLINE, env!("CARGO_PKG_VERSION"));
 
         exit!();
     }
