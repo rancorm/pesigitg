@@ -363,6 +363,17 @@ fn select_cores(interface: &str, queue_count: u32) -> Vec<usize> {
     local_cores
 }
 
+fn is_aes_available() -> bool {
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    {
+        std::is_x86_feature_detected!("aes")
+    }
+    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+    {
+        false
+    }
+}
+
 fn main() -> Result<()> {
     let mut args = parse_args()?;
 
@@ -393,7 +404,21 @@ fn main() -> Result<()> {
     if let Some(ref pidfile) = pidfile {
         info!("PID file: {}", pidfile.path().display());
     }
-    
+
+    // AES-NI instruction set availability. AES-NI was introduced with
+    // Westmere in 2010, so anything from the last ~15 years has it.
+    // 
+    // Few notable exceptions:
+    //  - Early Atom Celeron/Pentium processors
+    //  - Some Xeon Phi models
+    //  - BIOS/firmware disabling (rare)
+    if is_aes_available() {
+        info!("AES-NI available");
+    } else {
+        error!("AES-NI not available - try again please");
+        bail!("AES-NI not available - try again please");
+    }
+
     info!("number of cores: {}", num_cores());
     info!(
         "starting on interface '{}', ports: {:?}, queues: {}",
