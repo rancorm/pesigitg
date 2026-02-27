@@ -402,7 +402,7 @@ fn main() -> Result<()> {
     info!("PID: {}", current_pid());
 
     if let Some(ref pidfile) = pidfile {
-        info!("PID file: {}", pidfile.path().display());
+        info!("PID file: {}", pidfile);
     }
 
     // AES-NI instruction set availability. AES-NI was introduced with

@@ -1,10 +1,12 @@
+use std::fmt;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process;
 
 use anyhow::{bail, Result};
 use nix::fcntl::{Flock, FlockArg};
+
+use pesigitg_common::current_pid;
 
 pub struct PidFile {
     path: PathBuf,
@@ -12,10 +14,6 @@ pub struct PidFile {
 }
 
 impl PidFile {
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
     pub fn create(path: &Path) -> Result<Self> {
         let mut file = File::options()
             .create(true)
@@ -29,7 +27,7 @@ impl PidFile {
             Err(_) => bail!("another instance is already running (PID file locked)"),
         };
 
-        write!(file, "{}", process::id())?;
+        write!(file, "{}", current_pid())?;
 
         Ok(PidFile {
             path: path.to_path_buf(),
@@ -38,8 +36,15 @@ impl PidFile {
     }
 }
 
+impl fmt::Display for PidFile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.path.display())
+    }
+}
+
 impl Drop for PidFile {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.path);
     }
 }
+
