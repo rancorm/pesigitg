@@ -53,3 +53,7 @@ address = "10.0.1.11:433"
 [[servers]]
 id = "000003"
 address = "10.0.1.12:433"
+
+[[servers]]
+id = "000004"
+address = "[2001:db8::1]:443"
