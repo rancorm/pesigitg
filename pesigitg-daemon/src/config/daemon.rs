@@ -5,6 +5,7 @@ use bytesize::ByteSize;
 
 use pesigitg_common::{DEFAULT_INTF, DEFAULT_QUEUES, MAX_CONFIG_SIZE, MAX_QUEUES};
 
+#[derive(Debug, Clone)]
 pub struct FileConfig {
     pub ports: Vec<u16>,
     pub interface: String,
@@ -47,4 +48,150 @@ pub fn parse_config(path: &PathBuf) -> Result<FileConfig> {
     }
 
     Ok(FileConfig { ports, interface, queues })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn create_with_typical_values() {
+        let config = FileConfig {
+            ports: vec![443, 8443],
+            interface: "eth0".to_string(),
+            queues: 4,
+        };
+        
+        assert_eq!(config.ports, vec![443, 8443]);
+        assert_eq!(config.interface, "eth0");
+        assert_eq!(config.queues, 4);
+    }
+
+    #[test]
+    fn single_port() {
+        let config = FileConfig {
+            ports: vec![443],
+            interface: "enp1s0f0".to_string(),
+            queues: 1,
+        };
+        
+        assert_eq!(config.ports.len(), 1);
+        assert_eq!(config.ports[0], 443);
+    }
+
+    #[test]
+    fn empty_ports() {
+        let config = FileConfig {
+            ports: vec![],
+            interface: "lo".to_string(),
+            queues: 0,
+        };
+        
+        assert!(config.ports.is_empty());
+    }
+
+    #[test]
+    fn many_ports() {
+        let ports: Vec<u16> = (1000..=1100).collect();
+        let config = FileConfig {
+            ports: ports.clone(),
+            interface: "eth0".to_string(),
+            queues: 8,
+        };
+        
+        assert_eq!(config.ports.len(), 101);
+        assert_eq!(config.ports, ports);
+    }
+
+    #[test]
+    fn port_boundary_values() {
+        let config = FileConfig {
+            ports: vec![0, 1, 80, 443, 65535],
+            interface: "eth0".to_string(),
+            queues: 1,
+        };
+        
+        assert_eq!(*config.ports.first().unwrap(), 0);
+        assert_eq!(*config.ports.last().unwrap(), 65535);
+    }
+
+    #[test]
+    fn interface_names() {
+        for name in ["eth0", "enp1s0f0", "ens3", "lo", "veth0@if2"] {
+            let config = FileConfig {
+                ports: vec![443],
+                interface: name.to_string(),
+                queues: 1,
+            };
+            
+            assert_eq!(config.interface, name);
+        }
+    }
+
+    #[test]
+    fn high_queue_count() {
+        let config = FileConfig {
+            ports: vec![443],
+            interface: "eth0".to_string(),
+            queues: 128,
+        };
+        
+        assert_eq!(config.queues, 128);
+    }
+
+    #[test]
+    fn clone_produces_independent_copy() {
+        let config = FileConfig {
+            ports: vec![443, 8443],
+            interface: "eth0".to_string(),
+            queues: 4,
+        };
+        
+        let mut cloned = config.clone();
+        
+        cloned.ports.push(9443);
+        cloned.interface = "eth1".to_string();
+        cloned.queues = 8;
+
+        // Original is unaffected
+        assert_eq!(config.ports, vec![443, 8443]);
+        assert_eq!(config.interface, "eth0");
+        assert_eq!(config.queues, 4);
+
+        // Clone has new values
+        assert_eq!(cloned.ports, vec![443, 8443, 9443]);
+        assert_eq!(cloned.interface, "eth1");
+        assert_eq!(cloned.queues, 8);
+    }
+
+    #[test]
+    fn debug_format_contains_fields() {
+        let config = FileConfig {
+            ports: vec![443],
+            interface: "eth0".to_string(),
+            queues: 4,
+        };
+        
+        let debug = format!("{:?}", config);
+        
+        assert!(debug.contains("443"));
+        assert!(debug.contains("eth0"));
+        assert!(debug.contains("4"));
+        assert!(debug.contains("FileConfig"));
+    }
+
+    #[test]
+    fn debug_format_alternate() {
+        let config = FileConfig {
+            ports: vec![443],
+            interface: "eth0".to_string(),
+            queues: 2,
+        };
+        
+        let pretty = format!("{:#?}", config);
+        
+        // Pretty-printed debug spans multiple lines
+        assert!(pretty.contains('\n'));
+        assert!(pretty.contains("FileConfig"));
+    }
 }
