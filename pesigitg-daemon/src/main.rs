@@ -16,7 +16,7 @@ use anyhow::{anyhow, bail, Result};
 use pesigitg_common::{PID_FILE, PROC_NAME, DEFAULT_ROUTE_CONFIG, current_pid, exit};
 
 use args::{Args, parse_args};
-use config::daemon::parse_config;
+use config::daemon::FileConfig;
 use config::route::RouteConfig;
 use pidfile::PidFile;
 
@@ -102,7 +102,7 @@ fn reload_config(args: &mut Args) {
 
     let _ = sd_notify::notify(false, &[NotifyState::Reloading]);
 
-    match parse_config(path) {
+    match FileConfig::from_file(path) {
         Ok(fc) => {
             args.ports = fc.ports;
             args.interface = fc.interface;

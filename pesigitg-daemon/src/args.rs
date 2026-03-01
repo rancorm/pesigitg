@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use anyhow::{bail, Result};
 use pesigitg_common::{DEFAULT_INTF, DEFAULT_PORT, DEFAULT_QUEUES, MAX_QUEUES, PROC_NAME, TAGLINE, exit};
 
-use crate::config::daemon::parse_config;
+use crate::config::daemon::FileConfig;
 
 pub struct Args {
     pub ports: Vec<u16>,
@@ -65,7 +65,7 @@ pub fn parse_args() -> Result<Args> {
 
     // If config file provided, use it as base
     let file_config = config.as_ref().map(|path| {
-        parse_config(path)
+        FileConfig::from_file(path)
     }).transpose()?;
 
     // CLI -> config file -> defaults
