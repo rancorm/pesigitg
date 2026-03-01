@@ -1,9 +1,9 @@
+mod args;
 mod config;
 mod pidfile;
 
 use std::ffi::CString;
 use libc::{ioctl, socket, AF_INET, SOCK_DGRAM, c_char};
-use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
 
@@ -13,37 +13,11 @@ use sd_notify::NotifyState;
 use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
 use signal_hook::iterator::Signals;
 use anyhow::{anyhow, bail, Result};
-use bytesize::ByteSize;
+use pesigitg_common::{PID_FILE, PROC_NAME, current_pid, exit};
 
-use pesigitg_common::{
-    DEFAULT_INTF,
-    DEFAULT_PORT,
-    DEFAULT_QUEUES,
-    PID_FILE,
-    PROC_NAME,
-    MAX_CONFIG_SIZE,
-    MAX_QUEUES,
-    TAGLINE,
-    current_pid,
-    exit
-};
-
+use args::{Args, parse_args};
 use config::daemon::parse_config;
 use pidfile::PidFile;
-
-struct Args {
-    ports: Vec<u16>,
-    interface: String,
-    queues: u32,
-    config: Option<PathBuf>,
-    foreground: bool,
-}
-
-struct FileConfig {
-    ports: Vec<u16>,
-    interface: String,
-    queues: u32,
-}
 
 const ETHTOOL_GCHANNELS: u32 = 0x0000003c;
 const SIOCETHTOOL: libc::c_ulong = 0x8946;
@@ -67,122 +41,6 @@ struct Ifreq {
     ifr_data: *mut EthtoolChannels,
 }
 
-
-fn parse_config(path: &PathBuf) -> Result<FileConfig> {
-    let size = std::fs::metadata(path)?.len();
-
-    if size > MAX_CONFIG_SIZE {
-        let byte_size = ByteSize::b(size);
-
-        bail!("config file exceeds {} limit ({} bytes)", size, byte_size);
-    }
-    
-    let content = std::fs::read_to_string(path)?;
-    let mut ports = Vec::new();
-    let mut interface = DEFAULT_INTF.to_string();
-    let mut queues: u32 = DEFAULT_QUEUES;
-
-    for line in content.lines() {
-        let line = line.trim();
-
-        if line.is_empty() || line.starts_with('#') { continue; }
-
-        if let Some((k, v)) = line.split_once('=') {
-            match k.trim() {
-                "port" => ports.push(v.trim().parse::<u16>()?),
-                "interface" => interface = v.trim().to_string(),
-                "queues" => {
-                    let q = v.trim().parse::<u32>()?;
-                    if q == 0 || q > MAX_QUEUES {
-                        bail!("queues must be between 1 and {}", MAX_QUEUES);
-                    }
-                    queues = q;
-                }
-                _ => {}
-            }
-        }
-    }
-
-    Ok(FileConfig { ports, interface, queues })
-}
-
-fn parse_args() -> Result<Args> {
-    let mut pargs = pico_args::Arguments::from_env();
-
-    // --version / -V
-    if pargs.contains(["-V", "--version"]) {
-        println!("{} {} ({})", PROC_NAME, env!("CARGO_PKG_VERSION"), env!("BUILD_DATE"));
-        println!("{}", env!("RUSTC_VERSION"));
-        println!("platform: {}", env!("TARGET"));
-
-        exit!();
-    }
-
-    // --help / -h
-    if pargs.contains(["-h", "--help"]) {
-        println!(
-            "{0} {2}\n\n\
-            {1}\n\n\
-            Usage: {0} [OPTIONS]\n\n\
-            Options:\n  \
-            -p, --port <PORT>         Port to listen on (repeatable)\n  \
-            -i, --interface <NAME>    Network interface [default: {DEFAULT_INTF}]\n  \
-            -c, --config <PATH>       Config file path\n  \
-            -q, --queues <NUM>        Number of NIC queues [default: 1]\n  \
-            -f, --foreground          Run in foreground (don't daemonize)\n  \
-            -V, --version             Print version\
-        ", PROC_NAME, TAGLINE, env!("CARGO_PKG_VERSION"));
-
-        exit!();
-    }
-
-    let foreground = pargs.contains(["-f", "--foreground"]);
-    let config: Option<PathBuf> = pargs.opt_value_from_str(["-c", "--config"])?;
-    let interface: Option<String> = pargs.opt_value_from_str(["-i", "--interface"])?;
-    let queues: Option<u32> = pargs.opt_value_from_str(["-q", "--queues"])?;
-
-    // Collect all -p / --port values
-    let mut ports = Vec::new();
-    while let Some(port) = pargs.opt_value_from_str::<_, u16>(["-p", "--port"])? {
-        ports.push(port);
-    }
-
-    // Check for unexpected arguments
-    let remaining = pargs.finish();
-    if !remaining.is_empty() {
-        bail!("unknown arguments: {:?}", remaining);
-    }
-
-    // If config file provided, use it as base
-    let file_config = config.as_ref().map(|path| {
-        parse_config(path)
-    }).transpose()?;
-
-    // CLI -> config file -> defaults
-    let queues = queues
-        .or(file_config.as_ref().map(|fc| fc.queues))
-        .unwrap_or(DEFAULT_QUEUES);
-    if queues == 0 || queues > MAX_QUEUES {
-        bail!("--queues must be between 1 and {}", MAX_QUEUES);
-    }
-
-    // Build arguments struct
-    Ok(Args {
-        ports: if !ports.is_empty() {
-            ports
-        } else if let Some(ref fc) = file_config {
-            fc.ports.clone()
-        } else {
-            vec![DEFAULT_PORT]
-        },
-        interface: interface
-            .or(file_config.as_ref().map(|fc| fc.interface.clone()))
-            .unwrap_or_else(|| DEFAULT_INTF.into()),
-        queues,
-        config,
-        foreground,
-    })
-}
 
 fn daemonize() -> Result<()> {
     // First fork: parent exits, child continues

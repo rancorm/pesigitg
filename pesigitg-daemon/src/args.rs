@@ -1,0 +1,92 @@
+use std::path::PathBuf;
+
+use anyhow::{bail, Result};
+use pesigitg_common::{DEFAULT_INTF, DEFAULT_PORT, DEFAULT_QUEUES, MAX_QUEUES, PROC_NAME, TAGLINE, exit};
+
+use crate::config::daemon::parse_config;
+
+pub struct Args {
+    pub ports: Vec<u16>,
+    pub interface: String,
+    pub queues: u32,
+    pub config: Option<PathBuf>,
+    pub foreground: bool,
+}
+
+pub fn parse_args() -> Result<Args> {
+    let mut pargs = pico_args::Arguments::from_env();
+
+    // --version / -V
+    if pargs.contains(["-V", "--version"]) {
+        println!("{} {} ({})", PROC_NAME, env!("CARGO_PKG_VERSION"), env!("BUILD_DATE"));
+        println!("{}", env!("RUSTC_VERSION"));
+        println!("platform: {}", env!("TARGET"));
+
+        exit!();
+    }
+
+    // --help / -h
+    if pargs.contains(["-h", "--help"]) {
+        println!(
+            "{0} {2}\n\n\
+            {1}\n\n\
+            Usage: {0} [OPTIONS]\n\n\
+            Options:\n  \
+            -p, --port <PORT>         Port to listen on (repeatable)\n  \
+            -i, --interface <NAME>    Network interface [default: {DEFAULT_INTF}]\n  \
+            -c, --config <PATH>       Config file path\n  \
+            -q, --queues <NUM>        Number of NIC queues [default: 1]\n  \
+            -f, --foreground          Run in foreground (don't daemonize)\n  \
+            -V, --version             Print version\
+        ", PROC_NAME, TAGLINE, env!("CARGO_PKG_VERSION"));
+
+        exit!();
+    }
+
+    let foreground = pargs.contains(["-f", "--foreground"]);
+    let config: Option<PathBuf> = pargs.opt_value_from_str(["-c", "--config"])?;
+    let interface: Option<String> = pargs.opt_value_from_str(["-i", "--interface"])?;
+    let queues: Option<u32> = pargs.opt_value_from_str(["-q", "--queues"])?;
+
+    // Collect all -p / --port values
+    let mut ports = Vec::new();
+    while let Some(port) = pargs.opt_value_from_str::<_, u16>(["-p", "--port"])? {
+        ports.push(port);
+    }
+
+    // Check for unexpected arguments
+    let remaining = pargs.finish();
+    if !remaining.is_empty() {
+        bail!("unknown arguments: {:?}", remaining);
+    }
+
+    // If config file provided, use it as base
+    let file_config = config.as_ref().map(|path| {
+        parse_config(path)
+    }).transpose()?;
+
+    // CLI -> config file -> defaults
+    let queues = queues
+        .or(file_config.as_ref().map(|fc| fc.queues))
+        .unwrap_or(DEFAULT_QUEUES);
+    if queues == 0 || queues > MAX_QUEUES {
+        bail!("--queues must be between 1 and {}", MAX_QUEUES);
+    }
+
+    // Build arguments struct
+    Ok(Args {
+        ports: if !ports.is_empty() {
+            ports
+        } else if let Some(ref fc) = file_config {
+            fc.ports.clone()
+        } else {
+            vec![DEFAULT_PORT]
+        },
+        interface: interface
+            .or(file_config.as_ref().map(|fc| fc.interface.clone()))
+            .unwrap_or_else(|| DEFAULT_INTF.into()),
+        queues,
+        config,
+        foreground,
+    })
+}
