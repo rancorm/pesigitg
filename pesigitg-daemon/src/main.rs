@@ -1,3 +1,4 @@
+mod config;
 mod pidfile;
 
 use std::ffi::CString;
@@ -27,6 +28,7 @@ use pesigitg_common::{
     exit
 };
 
+use config::daemon::parse_config;
 use pidfile::PidFile;
 
 struct Args {
