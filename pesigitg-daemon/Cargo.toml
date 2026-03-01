@@ -21,6 +21,8 @@ signal-hook = "0.4"
 syslog = "7"
 libc = "0.2"
 bytesize = "2.3"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
 
 [build-dependencies]
 chrono = "0.4"

@@ -13,10 +13,11 @@ use sd_notify::NotifyState;
 use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
 use signal_hook::iterator::Signals;
 use anyhow::{anyhow, bail, Result};
-use pesigitg_common::{PID_FILE, PROC_NAME, current_pid, exit};
+use pesigitg_common::{PID_FILE, PROC_NAME, DEFAULT_ROUTE_CONFIG, current_pid, exit};
 
 use args::{Args, parse_args};
 use config::daemon::parse_config;
+use config::route::RouteConfig;
 use pidfile::PidFile;
 
 const ETHTOOL_GCHANNELS: u32 = 0x0000003c;
@@ -303,12 +304,24 @@ fn main() -> Result<()> {
         }
     }
 
+    //
+
     // Threads
     let threads = plan_threads(&args.interface, Some(args.queues));
     
     for t in &threads {
         info!("thread: queue={}, core={}", t.queue_id, t.core_id);
     }
+
+    // Route config
+    let route_config = match &args.routeconfig {
+        Some(path) => RouteConfig::from_file(path),
+        None => RouteConfig::from_file(DEFAULT_ROUTE_CONFIG),
+    }
+    .map_err(|e| anyhow!("failed to load route config: {}", e))?;
+
+    info!("Loaded route config: {}", route_config.path.display());
+    info!("{}", route_config);
 
     // Notify systemd that we're ready with a status string
     let _ = sd_notify::notify(false, &[

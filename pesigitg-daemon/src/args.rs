@@ -10,6 +10,7 @@ pub struct Args {
     pub interface: String,
     pub queues: u32,
     pub config: Option<PathBuf>,
+    pub routeconfig: Option<PathBuf>,
     pub foreground: bool,
 }
 
@@ -34,7 +35,8 @@ pub fn parse_args() -> Result<Args> {
             Options:\n  \
             -p, --port <PORT>         Port to listen on (repeatable)\n  \
             -i, --interface <NAME>    Network interface [default: {DEFAULT_INTF}]\n  \
-            -c, --config <PATH>       Config file path\n  \
+            -c, --config <PATH>       Daemon config file path\n  \
+            --route-config <PATH>     Route config file path\n  \
             -q, --queues <NUM>        Number of NIC queues [default: 1]\n  \
             -f, --foreground          Run in foreground (don't daemonize)\n  \
             -V, --version             Print version\
@@ -43,6 +45,7 @@ pub fn parse_args() -> Result<Args> {
         exit!();
     }
 
+    let routeconfig: Option<PathBuf> = pargs.opt_value_from_str("--route-config")?;
     let foreground = pargs.contains(["-f", "--foreground"]);
     let config: Option<PathBuf> = pargs.opt_value_from_str(["-c", "--config"])?;
     let interface: Option<String> = pargs.opt_value_from_str(["-i", "--interface"])?;
@@ -87,6 +90,7 @@ pub fn parse_args() -> Result<Args> {
             .unwrap_or_else(|| DEFAULT_INTF.into()),
         queues,
         config,
+        routeconfig,
         foreground,
     })
 }

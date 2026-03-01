@@ -3,6 +3,7 @@
 pub const DEFAULT_PORT: u16 = 443;
 pub const DEFAULT_INTF: &str = "eth0";
 pub const DEFAULT_QUEUES: u32 = 1;
+pub const DEFAULT_ROUTE_CONFIG: &str = "/etc/pesigitg/lb.toml";
 pub const PID_FILE: &str = "/var/run/pesigitgd.pid";
 pub const PROC_NAME: &str = "pesigitgd";
 pub const MAX_CONFIG_SIZE: u64 = 1_000_000;
