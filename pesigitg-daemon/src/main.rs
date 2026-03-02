@@ -1,6 +1,7 @@
 mod args;
 mod config;
 mod pidfile;
+mod utils;
 
 use std::ffi::CString;
 use libc::{ioctl, socket, AF_INET, SOCK_DGRAM, c_char};
@@ -19,6 +20,7 @@ use args::{Args, parse_args};
 use config::daemon::FileConfig;
 use config::route::RouteConfig;
 use pidfile::PidFile;
+use utils::{is_aes_available, num_cores, running_under_systemd};
 
 const ETHTOOL_GCHANNELS: u32 = 0x0000003c;
 const SIOCETHTOOL: libc::c_ulong = 0x8946;
@@ -159,15 +161,6 @@ fn get_hw_queues(interface: &str) -> std::io::Result<(u32, u32)> {
     Ok((channels.combined_count, channels.max_combined))
 }
 
-fn num_cores() -> usize {
-    std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1)
-}
-
-fn running_under_systemd() -> bool {
-    std::env::var_os("INVOCATION_ID").is_some()
-}
 
 struct ThreadConfig {
     queue_id: u32,
@@ -222,17 +215,6 @@ fn select_cores(interface: &str, queue_count: u32) -> Vec<usize> {
     local_cores.extend(remote_cores);
     local_cores.truncate(queue_count as usize);
     local_cores
-}
-
-fn is_aes_available() -> bool {
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    {
-        std::is_x86_feature_detected!("aes")
-    }
-    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
-    {
-        false
-    }
 }
 
 fn main() -> Result<()> {
