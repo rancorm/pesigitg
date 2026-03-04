@@ -212,33 +212,51 @@ fn parse_hex_key(hex: &str) -> Result<[u8; 16], RouteConfigError> {
     let bytes = hex_decode(hex).map_err(|e| {
         RouteConfigError::Validation(format!("invalid hex key: {e}"))
     })?;
+
     if bytes.len() != 16 {
         return Err(RouteConfigError::Validation(format!(
             "key must be exactly 16 bytes (128 bits), got {} bytes",
             bytes.len(),
         )));
     }
+    
     let mut key = [0u8; 16];
     key.copy_from_slice(&bytes);
+    
     Ok(key)
 }
 
 /// Parse a colon-separated MAC address string (e.g. `"aa:bb:cc:dd:ee:01"`).
 fn parse_mac(s: &str) -> Result<[u8; 6], String> {
     let parts: Vec<&str> = s.split(':').collect();
+    
     if parts.len() != 6 {
         return Err(format!("expected 6 colon-separated octets, got {}", parts.len()));
     }
+    
     let mut mac = [0u8; 6];
+    
     for (i, part) in parts.iter().enumerate() {
         mac[i] = u8::from_str_radix(part, 16)
             .map_err(|_| format!("invalid hex octet '{}' at position {i}", part))?;
     }
+    
     Ok(mac)
 }
 
 /// Parse a single `[[servers]]` entry.
 fn parse_server(raw: &RawServer, expected_id_len: u8) -> Result<Server, RouteConfigError> {
+    let expected_hex_len = expected_id_len as usize * 2;
+
+    if raw.id.trim().len() != expected_hex_len {
+        return Err(RouteConfigError::Validation(format!(
+            "server id '{}' has {} hex chars, expected {} (server_id_length * 2)",
+            raw.id,
+            raw.id.trim().len(),
+            expected_hex_len,
+        )));
+    }
+
     let id = hex_decode(&raw.id).map_err(|e| {
         RouteConfigError::Validation(format!(
             "invalid hex server id '{}': {e}",
@@ -271,9 +289,11 @@ fn parse_server(raw: &RawServer, expected_id_len: u8) -> Result<Server, RouteCon
 /// Minimal hex decoder (no external dependency).
 fn hex_decode(s: &str) -> Result<Vec<u8>, String> {
     let s = s.trim();
+
     if s.len() % 2 != 0 {
         return Err("odd number of hex characters".into());
     }
+    
     (0..s.len())
         .step_by(2)
         .map(|i| {
@@ -416,7 +436,7 @@ id = "0001"
 address = "10.0.1.10"
 "#;
         let err = RouteConfig::from_str(toml).unwrap_err();
-        assert!(err.to_string().contains("2 bytes, expected 3"));
+        assert!(err.to_string().contains("server_id_length * 2"));
     }
 
     #[test]
@@ -429,6 +449,22 @@ key = "0102030405"
 "#;
         let err = RouteConfig::from_str(toml).unwrap_err();
         assert!(err.to_string().contains("16 bytes"));
+    }
+
+    #[test]
+    fn reject_server_id_hex_length_mismatch() {
+        // server_id_length = 3 expects 6 hex chars; "01020304" is 8
+        let toml = r#"
+config_id = 0
+server_id_length = 3
+nonce_length = 4
+
+[[servers]]
+id = "01020304"
+address = "10.0.1.10"
+"#;
+        let err = RouteConfig::from_str(toml).unwrap_err();
+        assert!(err.to_string().contains("server_id_length * 2"));
     }
 
     #[test]
