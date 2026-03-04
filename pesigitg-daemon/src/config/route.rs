@@ -5,7 +5,7 @@
 //! (single-pass AES-ECB vs four-pass block cipher) from field lengths.
 
 use std::fmt;
-use std::net::SocketAddr;
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
@@ -37,8 +37,10 @@ pub enum Encryption {
 pub struct Server {
     /// Raw server ID bytes (length == `RouteConfig::server_id_length`).
     pub id: Vec<u8>,
-    /// Socket address to forward packets to.
-    pub address: SocketAddr,
+    /// IP address to forward packets to.
+    pub address: IpAddr,
+    /// MAC address of the server (optional).
+    pub mac: Option<[u8; 6]>,
 }
 
 #[derive(Debug)]
@@ -88,6 +90,7 @@ struct RawConfig {
 struct RawServer {
     id: String,
     address: String,
+    mac: Option<String>,
 }
 
 impl RouteConfig {
@@ -220,6 +223,20 @@ fn parse_hex_key(hex: &str) -> Result<[u8; 16], RouteConfigError> {
     Ok(key)
 }
 
+/// Parse a colon-separated MAC address string (e.g. `"aa:bb:cc:dd:ee:01"`).
+fn parse_mac(s: &str) -> Result<[u8; 6], String> {
+    let parts: Vec<&str> = s.split(':').collect();
+    if parts.len() != 6 {
+        return Err(format!("expected 6 colon-separated octets, got {}", parts.len()));
+    }
+    let mut mac = [0u8; 6];
+    for (i, part) in parts.iter().enumerate() {
+        mac[i] = u8::from_str_radix(part, 16)
+            .map_err(|_| format!("invalid hex octet '{}' at position {i}", part))?;
+    }
+    Ok(mac)
+}
+
 /// Parse a single `[[servers]]` entry.
 fn parse_server(raw: &RawServer, expected_id_len: u8) -> Result<Server, RouteConfigError> {
     let id = hex_decode(&raw.id).map_err(|e| {
@@ -237,14 +254,18 @@ fn parse_server(raw: &RawServer, expected_id_len: u8) -> Result<Server, RouteCon
         )));
     }
 
-    let address: SocketAddr = raw.address.parse().map_err(|e| {
+    let address: IpAddr = raw.address.parse().map_err(|e| {
         RouteConfigError::Validation(format!(
             "invalid server address '{}': {e}",
             raw.address,
         ))
     })?;
 
-    Ok(Server { id, address })
+    let mac = raw.mac.as_deref().map(parse_mac).transpose().map_err(|e| {
+        RouteConfigError::Validation(format!("invalid server mac '{}': {e}", raw.mac.as_deref().unwrap_or("")))
+    })?;
+
+    Ok(Server { id, address, mac })
 }
 
 /// Minimal hex decoder (no external dependency).
@@ -282,7 +303,13 @@ impl fmt::Display for RouteConfig {
         
         for s in &self.servers {
             let id_hex: String = s.id.iter().map(|b| format!("{b:02x}")).collect();
-            writeln!(f, "    {} -> {}", id_hex, s.address)?;
+            match s.mac {
+                Some(mac) => {
+                    let mac_str = mac.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(":");
+                    writeln!(f, "    {} -> {} (mac: {})", id_hex, s.address, mac_str)?;
+                }
+                None => writeln!(f, "    {} -> {}", id_hex, s.address)?,
+            }
         }
  
         Ok(())
@@ -302,11 +329,11 @@ key = "000102030405060708090a0b0c0d0e0f"
 
 [[servers]]
 id = "000001"
-address = "10.0.1.10:443"
+address = "10.0.1.10"
 
 [[servers]]
 id = "000002"
-address = "[2001:db8::1]:443"
+address = "2001:db8::1"
 "#;
 
     #[test]
@@ -386,7 +413,7 @@ nonce_length = 13
 
 [[servers]]
 id = "0001"
-address = "10.0.1.10:443"
+address = "10.0.1.10"
 "#;
         let err = RouteConfig::from_str(toml).unwrap_err();
         assert!(err.to_string().contains("2 bytes, expected 3"));
@@ -408,7 +435,7 @@ key = "0102030405"
     fn find_server_by_id() {
         let cfg = RouteConfig::from_str(SAMPLE_TOML).unwrap();
         let s = cfg.find_server(&[0x00, 0x00, 0x01]).unwrap();
-        assert_eq!(s.address.port(), 443);
+        assert_eq!(s.address, "10.0.1.10".parse::<IpAddr>().unwrap());
         assert!(cfg.find_server(&[0xff, 0xff, 0xff]).is_none());
     }
 }
