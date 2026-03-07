@@ -1,5 +1,6 @@
 mod args;
 mod config;
+mod neigh;
 mod pidfile;
 mod threading;
 mod utils;
@@ -72,28 +73,42 @@ fn init_logging() -> Result<()> {
     Ok(())
 }
 
-fn reload_config(args: &mut Args) {
-    let Some(ref path) = args.config else {
-        info!("SIGHUP received but no config file specified; ignoring");
-
-        return;
-    };
-
+fn reload_config(args: &mut Args, route_config: &mut RouteConfig) {
     let _ = sd_notify::notify(false, &[NotifyState::Reloading]);
 
-    match FileConfig::from_file(path) {
-        Ok(fc) => {
-            args.ports = fc.ports;
-            args.interface = fc.interface;
-            args.queues = fc.queues;
+    if let Some(ref path) = args.config.clone() {
+        match FileConfig::from_file(path) {
+            Ok(fc) => {
+                args.ports = fc.ports;
+                args.interface = fc.interface;
+                args.queues = fc.queues;
 
-            info!(
-                "config reloaded: interface='{}', ports={:?}, queues={}",
-                args.interface, args.ports, args.queues
-            );
+                info!(
+                    "config reloaded: interface='{}', ports={:?}, queues={}",
+                    args.interface, args.ports, args.queues
+                );
+            }
+            Err(e) => {
+                error!("failed to reload config: {}; keeping current settings", e);
+            }
+        }
+    }
+
+    let rc_path = args.routeconfig.as_ref();
+    let new_rc = match rc_path {
+        Some(path) => RouteConfig::from_file(path),
+        None => RouteConfig::from_file(DEFAULT_ROUTE_CONFIG),
+    };
+
+    match new_rc {
+        Ok(mut rc) => {
+            neigh::resolve_macs(&mut rc.servers);
+            info!("route config reloaded: {}", rc.path.display());
+            info!("{}", rc);
+            *route_config = rc;
         }
         Err(e) => {
-            error!("failed to reload config: {}; keeping current settings", e);
+            error!("failed to reload route config: {}; keeping current settings", e);
         }
     }
 
@@ -182,7 +197,7 @@ fn main() -> Result<()> {
     }
 
     // Route config
-    let route_config = match &args.routeconfig {
+    let mut route_config = match &args.routeconfig {
         Some(path) => RouteConfig::from_file(path),
         None => RouteConfig::from_file(DEFAULT_ROUTE_CONFIG),
     }
@@ -190,6 +205,8 @@ fn main() -> Result<()> {
 
     info!("Loaded route config: {}", route_config.path.display());
     info!("{}", route_config);
+    
+    neigh::resolve_macs(&mut route_config.servers);
 
     // Notify systemd that we're ready with a status string
     let _ = sd_notify::notify(false, &[
@@ -204,7 +221,7 @@ fn main() -> Result<()> {
     loop {
         for sig in signals.pending() {
             match sig {
-                SIGHUP => reload_config(&mut args),
+                SIGHUP => reload_config(&mut args, &mut route_config),
                 SIGINT | SIGTERM => {
                     let _ = sd_notify::notify(false, &[NotifyState::Stopping]);
                     info!("received signal {}, shutting down", sig);
