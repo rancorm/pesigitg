@@ -44,21 +44,29 @@ const NDA_LLADDR: u16 = 2;
 /// RAII wrapper for a raw netlink socket fd.
 struct NetlinkSocket(libc::c_int);
 
+#[repr(C)]
+pub struct ndmsg {
+    pub ndm_family: u8,
+    pub ndm_pad1: u8,
+    pub ndm_pad2: u16,
+    pub ndm_ifindex: i32,
+    pub ndm_state: u16,
+    pub ndm_flags: u8,
+    pub ndm_type: u8,
+}
+
 impl NetlinkSocket {
     fn open() -> io::Result<Self> {
         let fd = unsafe {
             libc::socket(libc::AF_NETLINK, libc::SOCK_RAW | libc::SOCK_CLOEXEC, libc::NETLINK_ROUTE)
         };
+
         if fd < 0 {
             return Err(io::Error::last_os_error());
         }
 
-        let addr = libc::sockaddr_nl {
-            nl_family: libc::AF_NETLINK as u16,
-            nl_pad: 0,
-            nl_pid: 0,
-            nl_groups: 0,
-        };
+        let mut addr: libc::sockaddr_nl = unsafe { std::mem::zeroed() };
+        addr.nl_family = libc::AF_NETLINK as u16;
 
         let ret = unsafe {
             libc::bind(
@@ -67,6 +75,7 @@ impl NetlinkSocket {
                 std::mem::size_of::<libc::sockaddr_nl>() as libc::socklen_t,
             )
         };
+        
         if ret < 0 {
             let err = io::Error::last_os_error();
             unsafe { libc::close(fd) };
@@ -121,6 +130,7 @@ pub fn resolve_macs(servers: &mut Vec<Server>) {
 /// Send `RTM_GETNEIGH | NLM_F_DUMP` and collect all valid entries into a map.
 fn query_neighbour_table() -> io::Result<HashMap<IpAddr, [u8; 6]>> {
     let sock = NetlinkSocket::open()?;
+    
     send_dump_request(&sock)?;
     recv_neigh_entries(&sock)
 }
@@ -129,23 +139,16 @@ fn send_dump_request(sock: &NetlinkSocket) -> io::Result<()> {
     #[repr(C)]
     struct Request {
         hdr: libc::nlmsghdr,
-        ndm: libc::ndmsg,
+        ndm: ndmsg,
     }
 
-    let req = Request {
-        hdr: libc::nlmsghdr {
-            nlmsg_len:   std::mem::size_of::<Request>() as u32,
-            nlmsg_type:  RTM_GETNEIGH,
-            nlmsg_flags: NLM_F_REQUEST | NLM_F_DUMP,
-            nlmsg_seq:   1,
-            nlmsg_pid:   0,
-        },
-        ndm: libc::ndmsg {
-            ndm_family: AF_UNSPEC,
-            ndm_pad1: 0, ndm_pad2: 0, ndm_ifindex: 0,
-            ndm_state: 0, ndm_flags: 0, ndm_type: 0,
-        },
-    };
+    let mut req: Request = unsafe { std::mem::zeroed() };
+    
+    req.hdr.nlmsg_len = std::mem::size_of::<Request>() as u32;
+    req.hdr.nlmsg_type = RTM_GETNEIGH;
+    req.hdr.nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP;
+    req.hdr.nlmsg_seq = 1;
+    req.ndm.ndm_family = AF_UNSPEC;
 
     let ret = unsafe {
         libc::send(
@@ -203,19 +206,20 @@ fn recv_neigh_entries(sock: &NetlinkSocket) -> io::Result<HashMap<IpAddr, [u8; 6
 
 fn parse_neigh_msg(buf: &[u8], table: &mut HashMap<IpAddr, [u8; 6]>) {
     let hdr_len = nlmsg_align(std::mem::size_of::<libc::nlmsghdr>());
-    let ndm_len = std::mem::size_of::<libc::ndmsg>();
+    let ndm_len = std::mem::size_of::<ndmsg>();
 
     if buf.len() < hdr_len + ndm_len {
         return;
     }
 
-    let ndm = unsafe { &*(buf.as_ptr().add(hdr_len) as *const libc::ndmsg) };
+    let ndm = unsafe { &*(buf.as_ptr().add(hdr_len) as *const ndmsg) };
 
     if ndm.ndm_state & NUD_VALID == 0 {
         return;
     }
 
     let family = ndm.ndm_family;
+
     if family != AF_INET && family != AF_INET6 {
         return;
     }
@@ -240,11 +244,13 @@ fn parse_neigh_msg(buf: &[u8], table: &mut HashMap<IpAddr, [u8; 6]>) {
             NDA_DST if family == AF_INET && data.len() == 4 => {
                 dst_ip = Some(IpAddr::V4(Ipv4Addr::new(data[0], data[1], data[2], data[3])));
             }
+
             NDA_DST if family == AF_INET6 && data.len() == 16 => {
                 let mut octets = [0u8; 16];
                 octets.copy_from_slice(data);
                 dst_ip = Some(IpAddr::V6(Ipv6Addr::from(octets)));
             }
+            
             NDA_LLADDR if data.len() == 6 => {
                 let mut mac = [0u8; 6];
                 mac.copy_from_slice(data);
