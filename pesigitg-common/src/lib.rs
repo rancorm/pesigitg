@@ -11,9 +11,11 @@ pub const MAX_QUEUES: u32 = 256;
 pub const TAGLINE: &str = "A high-performance QUIC-aware load balancer, using eBPF and AF_XDP for kernel-bypass packet forwarding.";
 
 
+#[cfg(feature = "std")]
 #[allow(non_upper_case_globals)]
 pub const current_pid: fn() -> u32 = std::process::id;
 
+#[cfg(feature = "std")]
 #[macro_export]
 macro_rules! exit {
     ($code:expr) => { std::process::exit($code) };

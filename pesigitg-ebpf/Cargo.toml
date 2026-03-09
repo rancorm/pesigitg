@@ -1,0 +1,14 @@
+[package]
+name = "pesigitg-ebpf"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+pesigitg-common = { path = "../pesigitg-common", default-features = false }
+
+aya-ebpf = "0.1.1"
+aya-log-ebpf = "0.1.0"
+
+[[bin]]
+name = "pesigitg-ebpf"
+path = "src/main.rs"

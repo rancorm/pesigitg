@@ -1,0 +1,15 @@
+[build]
+target = "bpfel-unknown-none"
+
+[target.bpfel-unknown-none]
+linker = "bpf-linker"
+rustflags = ["-C", "target-cpu=generic"]
+
+[unstable]
+build-std = ["core"]
+
+[profile.release]
+panic = "abort"
+
+[profile.dev]
+panic = "abort"
