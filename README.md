@@ -17,6 +17,51 @@ A high-performance QUIC-aware load balancer written in Rust, using eBPF and AF_X
 
 - **pesigitg-ebpf** — eBPF programs.
 
+## Development Prerequisites
+
+### Toolchain
+
+| Tool | Install | Notes |
+|------|---------|-------|
+| Rust (stable) | `rustup toolchain install stable` | Builds `pesigitg-daemon` and `pesigitg-common` |
+| Rust (nightly) | `rustup toolchain install nightly` | Required for `pesigitg-ebpf` (`-Z build-std=core`) |
+| `rust-src` component | `rustup component add rust-src --toolchain nightly` | Needed to cross-compile `core` for the BPF target |
+| `bpf-linker` | `cargo +nightly install bpf-linker` | Links eBPF object files; uses rustc's bundled LLVM |
+
+### System Packages (Debian/Ubuntu)
+
+```sh
+sudo apt install \
+  build-essential \
+  linux-headers-generic \
+  libsystemd-dev \
+  pkg-config
+```
+
+| Package | Why |
+|---------|-----|
+| `build-essential` | C compiler and libc headers (`libc6-dev`) needed by the `libc` and `nix` crates |
+| `linux-headers-generic` | Kernel headers for netlink, ethtool ioctl, and XDP structures |
+| `libsystemd-dev` | Required by the `sd-notify` crate for systemd integration |
+| `pkg-config` | Locates system libraries during `cargo build` |
+
+### Runtime Requirements
+
+- **Linux kernel 5.8+** — AF_XDP socket support
+- **AES-NI** — the daemon checks for this CPU feature at startup and will refuse to run without it (Westmere / 2010+ x86_64 CPUs)
+- **systemd** (recommended) — `pesigitgd` uses `Type=notify` with watchdog; see `contrib/pesigitgd.service`
+
+### Building
+
+```sh
+# daemon (stable toolchain)
+cargo build --release -p pesigitg-daemon
+
+# ebpf program (nightly toolchain, from the ebpf crate directory)
+cd pesigitg-ebpf
+cargo build --release
+```
+
 ## HTTPS DNS Records
 
 HTTP DNS records (formally SVCB and HTTPS RR, defined in RFC 9460) are
