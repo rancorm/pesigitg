@@ -10,7 +10,6 @@ use std::time::Duration;
 
 use log::{error, warn, info};
 use nix::unistd::{chdir, dup2_stdin, dup2_stdout, dup2_stderr, fork, setsid, ForkResult};
-use sd_notify::NotifyState;
 use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
 use signal_hook::iterator::Signals;
 use anyhow::{anyhow, bail, Result};
@@ -21,7 +20,7 @@ use config::daemon::FileConfig;
 use config::route::RouteConfig;
 use pidfile::PidFile;
 use threading::{get_hw_queues, plan_threads};
-use utils::{is_aes_available, num_cores, running_under_systemd};
+use utils::{is_aes_available, notify_ready, num_cores, running_under_systemd, systemd_notify};
 
 fn daemonize() -> Result<()> {
     // First fork: parent exits, child continues
@@ -74,7 +73,7 @@ fn init_logging() -> Result<()> {
 }
 
 fn reload_config(args: &mut Args, route_config: &mut RouteConfig) {
-    let _ = sd_notify::notify(false, &[NotifyState::Reloading]);
+    systemd_notify!(sd_notify::NotifyState::Reloading);
 
     if let Some(ref path) = args.config.clone() {
         match FileConfig::from_file(path) {
@@ -112,12 +111,9 @@ fn reload_config(args: &mut Args, route_config: &mut RouteConfig) {
         }
     }
 
-    let _ = sd_notify::notify(false, &[
-        NotifyState::Ready,
-        NotifyState::Status(&format!(
-            "listening on {} ports {:?}", args.interface, args.ports
-        )),
-    ]);
+    notify_ready(&format!(
+        "listening on {} ports {:?}", args.interface, args.ports
+    ));
 }
 
 fn main() -> Result<()> {
@@ -209,13 +205,10 @@ fn main() -> Result<()> {
     neigh::resolve_macs(&mut route_config.servers);
 
     // Notify systemd that we're ready with a status string
-    let _ = sd_notify::notify(false, &[
-        NotifyState::Ready,
-        NotifyState::Status(&format!(
-            "listening on {} ports {:?}, queues: {}", 
-            args.interface, args.ports, args.queues
-        )),
-    ]);
+    notify_ready(&format!(
+        "listening on {} ports {:?}, queues: {}",
+        args.interface, args.ports, args.queues
+    ));
 
     // Poll for signals with a timeout to allow watchdog keepalives
     loop {
@@ -223,7 +216,7 @@ fn main() -> Result<()> {
             match sig {
                 SIGHUP => reload_config(&mut args, &mut route_config),
                 SIGINT | SIGTERM => {
-                    let _ = sd_notify::notify(false, &[NotifyState::Stopping]);
+                    systemd_notify!(sd_notify::NotifyState::Stopping);
                     info!("received signal {}, shutting down", sig);
 
                     return Ok(());
@@ -232,7 +225,7 @@ fn main() -> Result<()> {
             }
         }
 
-        let _ = sd_notify::notify(false, &[NotifyState::Watchdog]);
+        systemd_notify!(sd_notify::NotifyState::Watchdog);
         thread::sleep(Duration::from_secs(5));
     }
 }
