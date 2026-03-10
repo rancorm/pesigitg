@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["pesigitg-daemon", "pesigitg-ebpf", "pesigitg-common"]
+default-members = ["pesigitg-daemon", "pesigitg-common"]
 
 [profile.release]
 opt-level = 3

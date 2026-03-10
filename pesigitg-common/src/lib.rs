@@ -9,6 +9,7 @@ pub const PROC_NAME: &str = "pesigitgd";
 pub const MAX_CONFIG_SIZE: u64 = 1_000_000;
 pub const MAX_QUEUES: u32 = 256;
 pub const MAX_PORTS: u32 = 64;
+pub const DEFAULT_EBPF_OBJ: &str = "/usr/lib/pesigitg/pesigitg-ebpf";
 pub const TAGLINE: &str = "A high-performance QUIC-aware load balancer, using eBPF and AF_XDP for kernel-bypass packet forwarding.";
 
 

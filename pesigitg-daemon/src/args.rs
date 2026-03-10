@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::{bail, Result};
-use pesigitg_common::{DEFAULT_INTF, DEFAULT_PORT, DEFAULT_QUEUES, MAX_QUEUES, PROC_NAME, TAGLINE, exit};
+use pesigitg_common::{DEFAULT_EBPF_OBJ, DEFAULT_INTF, DEFAULT_PORT, DEFAULT_QUEUES, MAX_QUEUES, PROC_NAME, TAGLINE, exit};
 
 use crate::config::daemon::FileConfig;
 
@@ -11,6 +11,7 @@ pub struct Args {
     pub queues: u32,
     pub config: Option<PathBuf>,
     pub routeconfig: Option<PathBuf>,
+    pub ebpf_obj: PathBuf,
     pub foreground: bool,
 }
 
@@ -37,6 +38,7 @@ pub fn parse_args() -> Result<Args> {
             -i, --interface <NAME>    Network interface [default: {DEFAULT_INTF}]\n  \
             -c, --config <PATH>       Daemon config file path\n  \
             --route-config <PATH>     Route config file path\n  \
+            -l, --load-ebpf <PATH>    eBPF object path [default: {DEFAULT_EBPF_OBJ}]\n  \
             -q, --queues <NUM>        Number of NIC queues [default: 1]\n  \
             -f, --foreground          Run in foreground (don't daemonize)\n  \
             -V, --version             Print version\
@@ -46,6 +48,7 @@ pub fn parse_args() -> Result<Args> {
     }
 
     let routeconfig: Option<PathBuf> = pargs.opt_value_from_str("--route-config")?;
+    let ebpf_obj: Option<PathBuf> = pargs.opt_value_from_str(["-l", "--load-ebpf"])?;
     let foreground = pargs.contains(["-f", "--foreground"]);
     let config: Option<PathBuf> = pargs.opt_value_from_str(["-c", "--config"])?;
     let interface: Option<String> = pargs.opt_value_from_str(["-i", "--interface"])?;
@@ -91,6 +94,7 @@ pub fn parse_args() -> Result<Args> {
         queues,
         config,
         routeconfig,
+        ebpf_obj: ebpf_obj.unwrap_or_else(|| DEFAULT_EBPF_OBJ.into()),
         foreground,
     })
 }

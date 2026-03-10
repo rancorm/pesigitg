@@ -1,5 +1,6 @@
 mod args;
 mod config;
+mod ebpf;
 mod neigh;
 mod pidfile;
 mod threading;
@@ -203,6 +204,9 @@ fn main() -> Result<()> {
     info!("{}", route_config);
     
     neigh::resolve_macs(&mut route_config.servers);
+
+    // Load XDP program and populate PORTS map
+    let _ebpf = ebpf::load_ebpf(&args.ebpf_obj, &args.interface, &args.ports)?;
 
     // Notify systemd that we're ready with a status string
     notify_ready(&format!(

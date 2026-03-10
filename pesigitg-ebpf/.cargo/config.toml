@@ -3,7 +3,7 @@ target = "bpfel-unknown-none"
 
 [target.bpfel-unknown-none]
 linker = "bpf-linker"
-rustflags = ["-C", "target-cpu=generic"]
+rustflags = ["-C", "target-cpu=generic", "-C", "panic=abort"]
 
 [unstable]
 build-std = ["core"]
