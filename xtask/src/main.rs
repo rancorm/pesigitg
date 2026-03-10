@@ -1,0 +1,97 @@
+use std::string::String;
+use std::path::PathBuf;
+use std::process::{self, Command};
+
+fn main() {
+    let args: Vec<String> = std::env::args()
+        .skip(1)
+        .collect();
+
+    match args.first().map(String::as_str) {
+        Some("build") => {
+            let release = args.contains(&"--release".into());
+            build_ebpf(release);
+            build_daemon(release);
+        }
+        Some("build-ebpf") => {
+            let release = args.contains(&"--release".into());
+            build_ebpf(release);
+        }
+        _ => {
+            eprintln!(
+                "Usage: cargo xtask <COMMAND>\n\n\
+                 Commands:\n  \
+                   build        Build the eBPF program and daemon\n  \
+                   build-ebpf   Build only the eBPF program\n\n\
+                 Options:\n  \
+                   --release    Build in release mode"
+            );
+            
+            process::exit(1);
+        }
+    }
+}
+
+fn build_ebpf(release: bool) {
+    let ebpf_dir = workspace_root().join("pesigitg-ebpf");
+
+    // Use "cargo" (via rustup) rather than the CARGO env var so that
+    // rust-toolchain.toml in pesigitg-ebpf/ selects the nightly toolchain
+    // required for build-std.
+    let mut cmd = Command::new("cargo");
+    
+    cmd.current_dir(&ebpf_dir)
+        .env_remove("CARGO")
+        .env_remove("RUSTUP_TOOLCHAIN")
+        .arg("build");
+    if release {
+        cmd.arg("--release");
+    }
+
+    let status = cmd
+        .status()
+        .expect("failed to spawn cargo for eBPF build");
+    
+    if !status.success() {
+        eprintln!("eBPF build failed");
+        process::exit(status.code().unwrap_or(1));
+    }
+}
+
+fn build_daemon(release: bool) {
+    let mut cmd = Command::new(cargo());
+    
+    cmd.current_dir(workspace_root())
+        .args(["build", "-p", "pesigitg-daemon"]);
+    if release {
+        cmd.arg("--release");
+    }
+
+    let status = cmd
+        .status()
+        .expect("failed to spawn cargo for daemon build");
+    
+    if !status.success() {
+        eprintln!("daemon build failed");
+        process::exit(status.code().unwrap_or(1));
+    }
+}
+
+fn cargo() -> String {
+    std::env::var("CARGO")
+        .unwrap_or_else(|_| "cargo".into())
+}
+
+fn workspace_root() -> PathBuf {
+    let output = Command::new(cargo())
+        .args(["locate-project", "--workspace", "--message-format=plain"])
+        .output()
+        .expect("failed to locate workspace root");
+    let path = String::from_utf8(output.stdout)
+        .expect("invalid utf-8 in cargo output");
+    
+    PathBuf::from(path.trim())
+        .parent()
+        .expect("Cargo.toml has no parent directory")
+        .to_path_buf()
+}
