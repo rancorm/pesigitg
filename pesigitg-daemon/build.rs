@@ -16,4 +16,17 @@ fn main() {
 
     let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
     rustc_env!("BUILD_DATE", date);
+
+    // eBPF object embedding: set by `cargo xtask build`, or fall back to
+    // a dummy empty file for standalone `cargo build -p pesigitg-daemon`.
+    println!("cargo:rerun-if-env-changed=PESIGITG_EBPF_OBJ");
+    match std::env::var("PESIGITG_EBPF_OBJ") {
+        Ok(path) => rustc_env!("PESIGITG_EBPF_OBJ", path),
+        Err(_) => {
+            let out_dir = std::env::var("OUT_DIR").unwrap();
+            let dummy = std::path::Path::new(&out_dir).join("dummy-ebpf");
+            std::fs::write(&dummy, []).unwrap();
+            rustc_env!("PESIGITG_EBPF_OBJ", dummy.display());
+        }
+    }
 }

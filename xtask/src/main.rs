@@ -10,8 +10,8 @@ fn main() {
     match args.first().map(String::as_str) {
         Some("build") => {
             let release = args.contains(&"--release".into());
-            build_ebpf(release);
-            build_daemon(release);
+            let ebpf_obj = build_ebpf(release);
+            build_daemon(release, &ebpf_obj);
         }
         Some("build-ebpf") => {
             let release = args.contains(&"--release".into());
@@ -32,18 +32,19 @@ fn main() {
     }
 }
 
-fn build_ebpf(release: bool) {
+fn build_ebpf(release: bool) -> PathBuf {
     let ebpf_dir = workspace_root().join("pesigitg-ebpf");
 
     // Use "cargo" (via rustup) rather than the CARGO env var so that
     // rust-toolchain.toml in pesigitg-ebpf/ selects the nightly toolchain
     // required for build-std.
     let mut cmd = Command::new("cargo");
-    
+
     cmd.current_dir(&ebpf_dir)
         .env_remove("CARGO")
         .env_remove("RUSTUP_TOOLCHAIN")
         .arg("build");
+    
     if release {
         cmd.arg("--release");
     }
@@ -51,18 +52,28 @@ fn build_ebpf(release: bool) {
     let status = cmd
         .status()
         .expect("failed to spawn cargo for eBPF build");
-    
+
     if !status.success() {
         eprintln!("eBPF build failed");
         process::exit(status.code().unwrap_or(1));
     }
+
+    let profile = if release { "release" } else { "debug" };
+    
+    workspace_root()
+        .join("target")
+        .join("bpfel-unknown-none")
+        .join(profile)
+        .join("pesigitg-ebpf")
 }
 
-fn build_daemon(release: bool) {
+fn build_daemon(release: bool, ebpf_obj: &std::path::Path) {
     let mut cmd = Command::new(cargo());
-    
+
     cmd.current_dir(workspace_root())
+        .env("PESIGITG_EBPF_OBJ", ebpf_obj)
         .args(["build", "-p", "pesigitg-daemon"]);
+    
     if release {
         cmd.arg("--release");
     }
@@ -70,7 +81,7 @@ fn build_daemon(release: bool) {
     let status = cmd
         .status()
         .expect("failed to spawn cargo for daemon build");
-    
+
     if !status.success() {
         eprintln!("daemon build failed");
         process::exit(status.code().unwrap_or(1));
