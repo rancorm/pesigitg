@@ -206,7 +206,14 @@ fn main() -> Result<()> {
     neigh::resolve_macs(&mut route_config.servers);
 
     // Load XDP program and populate PORTS map
-    let _ebpf = ebpf::load_ebpf(args.ebpf_obj.as_deref(), &args.interface, &args.ports)?;
+    let _ebpf = ebpf::load_ebpf(
+        #[cfg(debug_assertions)]
+        args.ebpf_obj.as_deref(),
+        #[cfg(not(debug_assertions))]
+        None,
+        &args.interface,
+        &args.ports,
+    )?;
 
     // Notify systemd that we're ready with a status string
     notify_ready(&format!(

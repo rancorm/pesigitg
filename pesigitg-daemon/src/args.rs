@@ -11,6 +11,7 @@ pub struct Args {
     pub queues: u32,
     pub config: Option<PathBuf>,
     pub routeconfig: Option<PathBuf>,
+    #[cfg(debug_assertions)]
     pub ebpf_obj: Option<PathBuf>,
     pub foreground: bool,
 }
@@ -38,16 +39,22 @@ pub fn parse_args() -> Result<Args> {
             -i, --interface <NAME>    Network interface [default: {DEFAULT_INTF}]\n  \
             -c, --config <PATH>       Daemon config file path\n  \
             --route-config <PATH>     Route config file path\n  \
-            -l, --load-ebpf <PATH>    eBPF object path (overrides embedded)\n  \
             -q, --queues <NUM>        Number of NIC queues [default: 1]\n  \
             -f, --foreground          Run in foreground (don't daemonize)\n  \
             -V, --version             Print version\
         ", PROC_NAME, TAGLINE, env!("CARGO_PKG_VERSION"));
 
+        #[cfg(debug_assertions)]
+        {
+            println!("\nDevelopment Options:");
+            println!("  -l, --load-ebpf <PATH>    eBPF object path (overrides embedded)");
+        }
+
         exit!();
     }
 
     let routeconfig: Option<PathBuf> = pargs.opt_value_from_str("--route-config")?;
+    #[cfg(debug_assertions)]
     let ebpf_obj: Option<PathBuf> = pargs.opt_value_from_str(["-l", "--load-ebpf"])?;
     let foreground = pargs.contains(["-f", "--foreground"]);
     let config: Option<PathBuf> = pargs.opt_value_from_str(["-c", "--config"])?;
@@ -94,6 +101,7 @@ pub fn parse_args() -> Result<Args> {
         queues,
         config,
         routeconfig,
+        #[cfg(debug_assertions)]
         ebpf_obj,
         foreground,
     })
