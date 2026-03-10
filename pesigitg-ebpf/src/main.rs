@@ -1,10 +1,13 @@
 #![no_std]
 #![no_main]
 
-use aya_ebpf::{bindings::xdp_action, macros::xdp, programs::XdpContext};
+use aya_ebpf::{bindings::xdp_action, macros::{map, xdp}, maps::HashMap, programs::XdpContext};
 use aya_log_ebpf::info;
 
-use pesigitg_common::DEFAULT_PORT;
+use pesigitg_common::MAX_PORTS;
+
+#[map]
+static PORTS: HashMap<u16, u8> = HashMap::with_max_entries(MAX_PORTS, 0);
 
 #[xdp]
 pub fn pesigitg(ctx: XdpContext) -> u32 {
