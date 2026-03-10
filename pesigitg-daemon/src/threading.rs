@@ -1,5 +1,12 @@
 use std::ffi::CString;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread::{self, JoinHandle};
+
 use libc::{ioctl, socket, AF_INET, SOCK_DGRAM, c_char};
+use log::{error, info};
+use nix::sched::{sched_setaffinity, CpuSet};
+use nix::unistd::Pid;
 
 use crate::utils::num_cores;
 
@@ -78,6 +85,86 @@ pub fn plan_threads(interface: &str, max_threads: Option<u32>) -> Vec<ThreadConf
             core_id: numa_cores[i as usize],
         })
         .collect()
+}
+
+/// Pin the calling thread to a specific CPU core.
+fn pin_to_core(core_id: usize) -> std::io::Result<()> {
+    let mut cpuset = CpuSet::new();
+    cpuset.set(core_id).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+
+    // Pid::from_raw(0) means the calling thread
+    sched_setaffinity(Pid::from_raw(0), &cpuset)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+}
+
+/// A pool of AF_XDP worker threads, one per NIC queue.
+pub struct WorkerPool {
+    handles: Vec<JoinHandle<()>>,
+    shutdown: Arc<AtomicBool>,
+}
+
+impl WorkerPool {
+    /// Spawn one worker thread per `ThreadConfig`.
+    ///
+    /// Each thread is pinned to its assigned CPU core and will process
+    /// packets from the corresponding NIC queue via AF_XDP.
+    pub fn spawn(threads: Vec<ThreadConfig>, shutdown: Arc<AtomicBool>) -> Self {
+        let mut handles = Vec::with_capacity(threads.len());
+
+        for tc in threads {
+            let shutdown = Arc::clone(&shutdown);
+
+            let handle = thread::Builder::new()
+                .name(format!("xdp-q{}", tc.queue_id))
+                .spawn(move || {
+                    if let Err(e) = pin_to_core(tc.core_id) {
+                        error!(
+                            "worker q{}: failed to pin to core {}: {}",
+                            tc.queue_id, tc.core_id, e
+                        );
+                        return;
+                    }
+
+                    info!(
+                        "worker q{}: started on core {}",
+                        tc.queue_id, tc.core_id
+                    );
+
+                    worker_loop(tc.queue_id, &shutdown);
+
+                    info!("worker q{}: exiting", tc.queue_id);
+                })
+                .expect("failed to spawn worker thread");
+
+            handles.push(handle);
+        }
+
+        WorkerPool { handles, shutdown }
+    }
+
+    /// Signal all workers to stop and wait for them to finish.
+    pub fn shutdown(&mut self) {
+        self.shutdown.store(true, Ordering::Relaxed);
+
+        for handle in self.handles.drain(..) {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// Per-queue worker loop.
+///
+/// This is the hot path — each invocation runs on a dedicated, pinned
+/// core and will later bind an AF_XDP socket to `queue_id` to receive
+/// packets redirected by the XDP program.
+fn worker_loop(queue_id: u32, shutdown: &AtomicBool) {
+    // TODO: create AF_XDP socket, bind to queue_id, register with EbpfHandle
+    while !shutdown.load(Ordering::Relaxed) {
+        // TODO: poll AF_XDP socket, process packets
+        thread::park_timeout(std::time::Duration::from_millis(100));
+    }
+
+    let _ = queue_id;
 }
 
 fn select_cores(interface: &str, queue_count: u32) -> Vec<usize> {

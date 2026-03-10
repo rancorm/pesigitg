@@ -6,6 +6,8 @@ mod pidfile;
 mod threading;
 mod utils;
 
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::thread;
 use std::time::Duration;
 
@@ -20,7 +22,7 @@ use args::{Args, parse_args};
 use config::daemon::FileConfig;
 use config::route::RouteConfig;
 use pidfile::PidFile;
-use threading::{get_hw_queues, plan_threads};
+use threading::{get_hw_queues, plan_threads, WorkerPool};
 use utils::{is_aes_available, notify_ready, num_cores, running_under_systemd, systemd_notify};
 
 fn daemonize() -> Result<()> {
@@ -186,12 +188,15 @@ fn main() -> Result<()> {
         }
     }
 
-    // Threads
-    let threads = plan_threads(&args.interface, Some(args.queues));
-    
-    for t in &threads {
-        info!("thread: queue={}, core={}", t.queue_id, t.core_id);
+    // Plan and spawn AF_XDP worker threads, one per NIC queue
+    let thread_plan = plan_threads(&args.interface, Some(args.queues));
+
+    for t in &thread_plan {
+        info!("planned: queue={} -> core={}", t.queue_id, t.core_id);
     }
+
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let mut workers = WorkerPool::spawn(thread_plan, Arc::clone(&shutdown));
 
     // Route config
     let mut route_config = match &args.routeconfig {
@@ -230,6 +235,9 @@ fn main() -> Result<()> {
                 SIGINT | SIGTERM => {
                     systemd_notify!(sd_notify::NotifyState::Stopping);
                     info!("received signal {}, shutting down", sig);
+
+                    workers.shutdown();
+                    info!("all workers stopped");
 
                     return Ok(());
                 }
