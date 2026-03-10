@@ -205,8 +205,9 @@ fn main() -> Result<()> {
     
     neigh::resolve_macs(&mut route_config.servers);
 
-    // Load XDP program and populate PORTS map
-    let _ebpf = ebpf::load_ebpf(
+    // Load XDP program and populate PORTS map.
+    // The handle must stay alive and is used to register AF_XDP sockets.
+    let mut _ebpf = ebpf::load_ebpf(
         #[cfg(debug_assertions)]
         args.ebpf_obj.as_deref(),
         #[cfg(not(debug_assertions))]
