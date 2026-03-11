@@ -11,6 +11,28 @@ pub const MAX_QUEUES: u32 = 256;
 pub const MAX_PORTS: u32 = 64;
 pub const TAGLINE: &str = "A high-performance QUIC-aware load balancer, using eBPF and AF_XDP for kernel-bypass packet forwarding.";
 
+// -- Network protocol constants (shared between eBPF and daemon) ----------
+
+// Header sizes
+pub const ETH_HDR_LEN: usize = 14;
+pub const IPV4_MIN_HDR_LEN: usize = 20;
+pub const IPV6_HDR_LEN: usize = 40;
+pub const UDP_HDR_LEN: usize = 8;
+
+// EtherType
+pub const ETH_P_IP: u16 = 0x0800;
+pub const ETH_P_IPV6: u16 = 0x86dd;
+
+// IP protocol numbers
+pub const IPPROTO_HOPOPTS: u8 = 0;
+pub const IPPROTO_UDP: u8 = 17;
+pub const IPPROTO_ROUTING: u8 = 43;
+pub const IPPROTO_FRAGMENT: u8 = 44;
+pub const IPPROTO_DSTOPTS: u8 = 60;
+
+// Maximum IPv6 extension headers to walk before giving up
+pub const MAX_IPV6_EXT_HDRS: usize = 6;
+
 
 #[cfg(feature = "std")]
 #[allow(non_upper_case_globals)]

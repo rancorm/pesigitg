@@ -13,6 +13,7 @@ pesigitg-common = { path = "../pesigitg-common", features = ["std"] }
 
 aya = "0.13"
 aya-log = "0.2"
+aes = "0.8"
 anyhow = "1"
 env_logger = "0.11"
 log = "0.4"

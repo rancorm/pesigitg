@@ -9,22 +9,11 @@ use aya_ebpf::{
 };
 use core::mem;
 
-use pesigitg_common::{MAX_PORTS, MAX_QUEUES};
-
-const ETH_HDR_LEN: usize = 14;
-// Minimum, without options.
-const IPV4_HDR_LEN: usize = 20;
-// Fixed size
-const IPV6_HDR_LEN: usize = 40;
-const ETH_P_IP: u16 = 0x0800;
-const ETH_P_IPV6: u16 = 0x86dd;
-const IPPROTO_HOPOPTS: u8 = 0;
-const IPPROTO_UDP: u8 = 17;
-const IPPROTO_ROUTING: u8 = 43;
-const IPPROTO_FRAGMENT: u8 = 44;
-const IPPROTO_DSTOPTS: u8 = 60;
-// Handle at max. IPv6 extensions
-const MAX_EXT_HDRS: usize = 6;
+use pesigitg_common::{
+    ETH_HDR_LEN, ETH_P_IP, ETH_P_IPV6, IPPROTO_DSTOPTS, IPPROTO_FRAGMENT, IPPROTO_HOPOPTS,
+    IPPROTO_ROUTING, IPPROTO_UDP, IPV4_MIN_HDR_LEN, IPV6_HDR_LEN, MAX_IPV6_EXT_HDRS, MAX_PORTS,
+    MAX_QUEUES,
+};
 
 #[map]
 static PORTS: HashMap<u16, u8> = HashMap::with_max_entries(MAX_PORTS, 0);
@@ -96,7 +85,7 @@ fn parse_ipv4_udp(ctx: &XdpContext) -> Result<Option<u16>, ()> {
     let iph_byte0 = unsafe { *ptr_at::<u8>(ctx, ETH_HDR_LEN)? };
     let ihl = ((iph_byte0 & 0x0F) as usize) * 4;
 
-    if ihl < IPV4_HDR_LEN {
+    if ihl < IPV4_MIN_HDR_LEN {
         return Err(());
     }
 
@@ -124,7 +113,7 @@ fn parse_ipv6_udp(ctx: &XdpContext) -> Result<Option<u16>, ()> {
     let mut offset = ETH_HDR_LEN + IPV6_HDR_LEN;
     let mut i = 0;
 
-    while i < MAX_EXT_HDRS {
+    while i < MAX_IPV6_EXT_HDRS {
         match next_hdr {
             IPPROTO_UDP => break,
             IPPROTO_FRAGMENT => {

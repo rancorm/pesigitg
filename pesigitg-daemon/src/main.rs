@@ -1,7 +1,9 @@
 mod args;
+mod cid;
 mod config;
 mod ebpf;
 mod neigh;
+mod packet;
 mod pidfile;
 mod threading;
 mod utils;
@@ -105,8 +107,10 @@ fn reload_config(args: &mut Args, route_config: &mut RouteConfig) {
     match new_rc {
         Ok(mut rc) => {
             neigh::resolve_macs(&mut rc.servers);
+
             info!("route config reloaded: {}", rc.path.display());
             info!("{}", rc);
+            
             *route_config = rc;
         }
         Err(e) => {
@@ -234,9 +238,11 @@ fn main() -> Result<()> {
                 SIGHUP => reload_config(&mut args, &mut route_config),
                 SIGINT | SIGTERM => {
                     systemd_notify!(sd_notify::NotifyState::Stopping);
+
                     info!("received signal {}, shutting down", sig);
 
                     workers.shutdown();
+                    
                     info!("all workers stopped");
 
                     return Ok(());
