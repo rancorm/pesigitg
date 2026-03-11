@@ -12,11 +12,19 @@ use core::mem;
 use pesigitg_common::{MAX_PORTS, MAX_QUEUES};
 
 const ETH_HDR_LEN: usize = 14;
-const IPV4_HDR_LEN: usize = 20; // minimum, without options
+// Minimum, without options.
+const IPV4_HDR_LEN: usize = 20;
+// Fixed size
 const IPV6_HDR_LEN: usize = 40;
 const ETH_P_IP: u16 = 0x0800;
-const ETH_P_IPV6: u16 = 0x86DD;
+const ETH_P_IPV6: u16 = 0x86dd;
+const IPPROTO_HOPOPTS: u8 = 0;
 const IPPROTO_UDP: u8 = 17;
+const IPPROTO_ROUTING: u8 = 43;
+const IPPROTO_FRAGMENT: u8 = 44;
+const IPPROTO_DSTOPTS: u8 = 60;
+// Handle at max. IPv6 extensions
+const MAX_EXT_HDRS: usize = 6;
 
 #[map]
 static PORTS: HashMap<u16, u8> = HashMap::with_max_entries(MAX_PORTS, 0);
@@ -52,15 +60,18 @@ unsafe fn ptr_at<T>(ctx: &XdpContext, offset: usize) -> Result<*const T, ()> {
 }
 
 fn try_pesigitg(ctx: &XdpContext) -> Result<u32, ()> {
-    // --- Ethernet header ---
+    // Ethernet header
     let eth_proto = u16::from_be(unsafe { *ptr_at::<u16>(ctx, 12)? });
 
+    // Parse out UDP port or None for non-UDP traffic
     let dst_port = match eth_proto {
         ETH_P_IP => parse_ipv4_udp(ctx)?,
         ETH_P_IPV6 => parse_ipv6_udp(ctx)?,
         _ => return Ok(xdp_action::XDP_PASS),
     };
 
+
+    // Continue if UDP destination port is found
     let dst_port = match dst_port {
         Some(p) => p,
         None => return Ok(xdp_action::XDP_PASS),
@@ -103,23 +114,40 @@ fn parse_ipv4_udp(ctx: &XdpContext) -> Result<Option<u16>, ()> {
 }
 
 /// Parse an IPv6 packet and return the UDP destination port, or None if
-/// the next header is not UDP.
+/// it is not a UDP packet.
 ///
-/// This handles the fixed 40-byte IPv6 header only.  Extension headers
-/// are not followed — a packet whose Next Header is not UDP (17) is
-/// simply passed through.
+/// Walks through known extension headers (Hop-by-Hop, Routing, Fragment,
+/// Destination Options) with a bounded loop to satisfy the eBPF verifier.
 #[inline(always)]
 fn parse_ipv6_udp(ctx: &XdpContext) -> Result<Option<u16>, ()> {
-    // Next Header field is at offset 6 in the IPv6 header.
-    let next_hdr = unsafe { *ptr_at::<u8>(ctx, ETH_HDR_LEN + 6)? };
+    let mut next_hdr = unsafe { *ptr_at::<u8>(ctx, ETH_HDR_LEN + 6)? };
+    let mut offset = ETH_HDR_LEN + IPV6_HDR_LEN;
+    let mut i = 0;
+
+    while i < MAX_EXT_HDRS {
+        match next_hdr {
+            IPPROTO_UDP => break,
+            IPPROTO_FRAGMENT => {
+                next_hdr = unsafe { *ptr_at::<u8>(ctx, offset)? };
+                offset += 8;
+            },
+            IPPROTO_HOPOPTS | IPPROTO_ROUTING | IPPROTO_DSTOPTS => {
+                next_hdr = unsafe { *ptr_at::<u8>(ctx, offset)? };
+                let ext_len = unsafe { *ptr_at::<u8>(ctx, offset + 1)? } as usize;
+                offset += (ext_len + 1) * 8;
+            }
+            _ => return Ok(None),
+        }
+        
+        i += 1;
+    }
+
     if next_hdr != IPPROTO_UDP {
         return Ok(None);
     }
 
-    // UDP destination port is at offset 2 within the UDP header.
-    let udp_offset = ETH_HDR_LEN + IPV6_HDR_LEN;
-    let dst_port = u16::from_be(unsafe { *ptr_at::<u16>(ctx, udp_offset + 2)? });
-
+    let dst_port = u16::from_be(unsafe { *ptr_at::<u16>(ctx, offset + 2)? });
+    
     Ok(Some(dst_port))
 }
 
