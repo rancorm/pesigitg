@@ -59,8 +59,8 @@ fn build_ebpf(release: bool) -> PathBuf {
     }
 
     let profile = if release { "release" } else { "debug" };
-    
-    workspace_root()
+
+    ebpf_dir
         .join("target")
         .join("bpfel-unknown-none")
         .join(profile)

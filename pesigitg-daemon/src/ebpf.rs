@@ -5,7 +5,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use aya::maps::{HashMap, XskMap};
 use aya::programs::{Xdp, XdpFlags};
 use aya::Ebpf;
-use log::{warn, info};
+use log::info;
 
 static EMBEDDED_EBPF: &[u8] = include_bytes!(env!("PESIGITG_EBPF_OBJ"));
 
@@ -66,10 +66,6 @@ pub fn load_ebpf(path: Option<&Path>, interface: &str, ports: &[u16]) -> Result<
             Ebpf::load(EMBEDDED_EBPF).context("failed to load embedded eBPF object")?
         }
     };
-
-    if let Err(e) = aya_log::EbpfLogger::init(&mut ebpf) {
-        warn!("failed to initialize eBPF logger: {}", e);
-    }
 
     let program: &mut Xdp = ebpf
         .program_mut("pesigitg")
