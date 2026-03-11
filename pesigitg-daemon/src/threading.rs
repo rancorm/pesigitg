@@ -1,17 +1,26 @@
 use std::ffi::CString;
-use std::sync::Arc;
+use std::os::fd::BorrowedFd;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread::{self, JoinHandle};
 
 use libc::{ioctl, socket, AF_INET, SOCK_DGRAM, c_char};
 use log::{error, info};
 use nix::sched::{sched_setaffinity, CpuSet};
 use nix::unistd::Pid;
+use xsk_rs::FrameDesc;
 
+use crate::config::route::RouteConfig;
+use crate::ebpf::EbpfHandle;
+use crate::packet::{self, Verdict};
 use crate::utils::num_cores;
+use crate::xsk::XskSocket;
 
 const ETHTOOL_GCHANNELS: u32 = 0x0000003c;
 const SIOCETHTOOL: libc::c_ulong = 0x8946;
+
+const BATCH_SIZE: usize = 64;
+const POLL_TIMEOUT_MS: i32 = 100;
 
 #[repr(C)]
 struct EthtoolChannels {
@@ -106,13 +115,22 @@ pub struct WorkerPool {
 impl WorkerPool {
     /// Spawn one worker thread per `ThreadConfig`.
     ///
-    /// Each thread is pinned to its assigned CPU core and will process
+    /// Each thread is pinned to its assigned CPU core and processes
     /// packets from the corresponding NIC queue via AF_XDP.
-    pub fn spawn(threads: Vec<ThreadConfig>, shutdown: Arc<AtomicBool>) -> Self {
+    pub fn spawn(
+        threads: Vec<ThreadConfig>,
+        interface: &str,
+        config: Arc<RwLock<RouteConfig>>,
+        ebpf: Arc<Mutex<EbpfHandle>>,
+        shutdown: Arc<AtomicBool>,
+    ) -> Self {
         let mut handles = Vec::with_capacity(threads.len());
 
         for tc in threads {
             let shutdown = Arc::clone(&shutdown);
+            let config = Arc::clone(&config);
+            let ebpf = Arc::clone(&ebpf);
+            let interface = interface.to_owned();
 
             let handle = thread::Builder::new()
                 .name(format!("xdp-q{}", tc.queue_id))
@@ -130,7 +148,7 @@ impl WorkerPool {
                         tc.queue_id, tc.core_id
                     );
 
-                    worker_loop(tc.queue_id, &shutdown);
+                    worker_loop(&interface, tc.queue_id, &config, &ebpf, &shutdown);
 
                     info!("worker q{}: exiting", tc.queue_id);
                 })
@@ -155,16 +173,62 @@ impl WorkerPool {
 /// Per-queue worker loop.
 ///
 /// This is the hot path — each invocation runs on a dedicated, pinned
-/// core and will later bind an AF_XDP socket to `queue_id` to receive
-/// packets redirected by the XDP program.
-fn worker_loop(queue_id: u32, shutdown: &AtomicBool) {
-    // TODO: create AF_XDP socket, bind to queue_id, register with EbpfHandle
-    while !shutdown.load(Ordering::Relaxed) {
-        // TODO: poll AF_XDP socket, process packets
-        thread::park_timeout(std::time::Duration::from_millis(100));
+/// core with an AF_XDP socket bound to `queue_id`, receiving packets
+/// redirected by the XDP program.
+fn worker_loop(
+    interface: &str,
+    queue_id: u32,
+    config: &Arc<RwLock<RouteConfig>>,
+    ebpf: &Arc<Mutex<EbpfHandle>>,
+    shutdown: &AtomicBool,
+) {
+    let mut xsk = match XskSocket::new(interface, queue_id) {
+        Ok(s) => s,
+        Err(e) => {
+            error!("worker q{}: failed to create AF_XDP socket: {}", queue_id, e);
+            return;
+        }
+    };
+
+    let fd = unsafe { BorrowedFd::borrow_raw(xsk.raw_fd()) };
+    if let Err(e) = ebpf.lock().unwrap().register_xsk(queue_id, fd) {
+        error!("worker q{}: failed to register in XSKS map: {}", queue_id, e);
+        return;
     }
 
-    let _ = queue_id;
+    info!("worker q{}: AF_XDP socket bound and registered", queue_id);
+
+    let mut rx_descs = vec![FrameDesc::default(); BATCH_SIZE];
+    let mut comp_descs = vec![FrameDesc::default(); BATCH_SIZE];
+
+    while !shutdown.load(Ordering::Relaxed) {
+        let n = xsk.poll_recv(&mut rx_descs, POLL_TIMEOUT_MS);
+        if n == 0 {
+            continue;
+        }
+
+        let config = config.read().unwrap();
+
+        let mut tx_batch = Vec::with_capacity(n);
+        let mut recycle_batch = Vec::with_capacity(n);
+
+        for i in 0..n {
+            let verdict = {
+                let mut data = unsafe { xsk.frame_mut(&mut rx_descs[i]) };
+                packet::process_packet(&mut *data, &config)
+            };
+            match verdict {
+                Verdict::Forward => tx_batch.push(rx_descs[i]),
+                Verdict::Pass => recycle_batch.push(rx_descs[i]),
+            }
+        }
+
+        drop(config);
+
+        xsk.transmit(&tx_batch);
+        xsk.refill(&recycle_batch);
+        xsk.complete(&mut comp_descs);
+    }
 }
 
 fn select_cores(interface: &str, queue_count: u32) -> Vec<usize> {

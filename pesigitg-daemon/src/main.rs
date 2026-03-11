@@ -7,9 +7,10 @@ mod packet;
 mod pidfile;
 mod threading;
 mod utils;
+mod xsk;
 
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::Duration;
 
@@ -51,7 +52,7 @@ fn daemonize() -> Result<()> {
         nix::fcntl::OFlag::O_RDWR,
         nix::sys::stat::Mode::empty(),
     )?;
- 
+
     dup2_stdin(&devnull)?;
     dup2_stdout(&devnull)?;
     dup2_stderr(&devnull)?;
@@ -77,7 +78,7 @@ fn init_logging() -> Result<()> {
     Ok(())
 }
 
-fn reload_config(args: &mut Args, route_config: &mut RouteConfig) {
+fn reload_config(args: &mut Args, route_config: &Arc<RwLock<RouteConfig>>) {
     systemd_notify!(sd_notify::NotifyState::Reloading);
 
     if let Some(ref path) = args.config.clone() {
@@ -110,8 +111,8 @@ fn reload_config(args: &mut Args, route_config: &mut RouteConfig) {
 
             info!("route config reloaded: {}", rc.path.display());
             info!("{}", rc);
-            
-            *route_config = rc;
+
+            *route_config.write().unwrap() = rc;
         }
         Err(e) => {
             error!("failed to reload route config: {}; keeping current settings", e);
@@ -156,7 +157,7 @@ fn main() -> Result<()> {
 
     // AES-NI instruction set availability. AES-NI was introduced with
     // Westmere in 2010, so anything from the last ~15 years has it.
-    // 
+    //
     // Few notable exceptions:
     //  - Early Atom Celeron/Pentium processors
     //  - Some Xeon Phi models
@@ -187,20 +188,10 @@ fn main() -> Result<()> {
         Err(e) => {
             error!("failed to query {}: {}", args.interface, e);
             error!("(requires root or CAP_NET_ADMIN)");
-            
+
             exit!(1);
         }
     }
-
-    // Plan and spawn AF_XDP worker threads, one per NIC queue
-    let thread_plan = plan_threads(&args.interface, Some(args.queues));
-
-    for t in &thread_plan {
-        info!("planned: queue={} -> core={}", t.queue_id, t.core_id);
-    }
-
-    let shutdown = Arc::new(AtomicBool::new(false));
-    let mut workers = WorkerPool::spawn(thread_plan, Arc::clone(&shutdown));
 
     // Route config
     let mut route_config = match &args.routeconfig {
@@ -211,12 +202,13 @@ fn main() -> Result<()> {
 
     info!("Loaded route config: {}", route_config.path.display());
     info!("{}", route_config);
-    
+
     neigh::resolve_macs(&mut route_config.servers);
 
+    let route_config = Arc::new(RwLock::new(route_config));
+
     // Load XDP program and populate PORTS map.
-    // The handle must stay alive and is used to register AF_XDP sockets.
-    let mut _ebpf = ebpf::load_ebpf(
+    let ebpf = ebpf::load_ebpf(
         #[cfg(debug_assertions)]
         args.ebpf_obj.as_deref(),
         #[cfg(not(debug_assertions))]
@@ -224,6 +216,26 @@ fn main() -> Result<()> {
         &args.interface,
         &args.ports,
     )?;
+
+    let ebpf = Arc::new(Mutex::new(ebpf));
+
+    // Plan and spawn AF_XDP worker threads, one per NIC queue.
+    // Workers create their own AF_XDP sockets and register them with
+    // the eBPF XSKS map.
+    let thread_plan = plan_threads(&args.interface, Some(args.queues));
+
+    for t in &thread_plan {
+        info!("planned: queue={} -> core={}", t.queue_id, t.core_id);
+    }
+
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let mut workers = WorkerPool::spawn(
+        thread_plan,
+        &args.interface,
+        Arc::clone(&route_config),
+        Arc::clone(&ebpf),
+        Arc::clone(&shutdown),
+    );
 
     // Notify systemd that we're ready with a status string
     notify_ready(&format!(
@@ -235,14 +247,14 @@ fn main() -> Result<()> {
     loop {
         for sig in signals.pending() {
             match sig {
-                SIGHUP => reload_config(&mut args, &mut route_config),
+                SIGHUP => reload_config(&mut args, &route_config),
                 SIGINT | SIGTERM => {
                     systemd_notify!(sd_notify::NotifyState::Stopping);
 
                     info!("received signal {}, shutting down", sig);
 
                     workers.shutdown();
-                    
+
                     info!("all workers stopped");
 
                     return Ok(());
