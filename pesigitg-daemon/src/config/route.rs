@@ -303,6 +303,38 @@ fn hex_decode(s: &str) -> Result<Vec<u8>, String> {
         .collect()
 }
 
+impl fmt::Display for Encryption {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Plaintext => write!(f, "plaintext"),
+            Self::SinglePass { .. } => write!(f, "single-pass AES-ECB"),
+            Self::FourPass { .. } => write!(f, "four-pass block cipher"),
+        }
+    }
+}
+
+impl fmt::Display for Server {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let id_hex: String = self.id
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+
+        match self.mac {
+            Some(mac) => {
+                let mac_str = mac
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<Vec<_>>()
+                    .join(":");
+                
+                write!(f, "{} -> {} (mac: {})", id_hex, self.address, mac_str)
+            }
+            None => write!(f, "{} -> {}", id_hex, self.address),
+        }
+    }
+}
+
 impl fmt::Display for RouteConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "Route Configuration:")?;
@@ -311,27 +343,13 @@ impl fmt::Display for RouteConfig {
         writeln!(f, "  server_id_length: {}", self.server_id_length)?;
         writeln!(f, "  nonce_length:     {}", self.nonce_length)?;
         writeln!(f, "  cid_length:       {} (1 + {})", self.cid_length(), self.cid_payload_length())?;
-        write!(f, "  encryption:       ")?;
-        
-        match &self.encryption {
-            Encryption::Plaintext => writeln!(f, "plaintext")?,
-            Encryption::SinglePass { .. } => writeln!(f, "single-pass AES-ECB")?,
-            Encryption::FourPass { .. } => writeln!(f, "four-pass block cipher")?,
-        }
-        
+        writeln!(f, "  encryption:       {}", self.encryption)?;
         writeln!(f, "  servers:          {}", self.servers.len())?;
-        
+
         for s in &self.servers {
-            let id_hex: String = s.id.iter().map(|b| format!("{b:02x}")).collect();
-            match s.mac {
-                Some(mac) => {
-                    let mac_str = mac.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(":");
-                    writeln!(f, "    {} -> {} (mac: {})", id_hex, s.address, mac_str)?;
-                }
-                None => writeln!(f, "    {} -> {}", id_hex, s.address)?,
-            }
+            writeln!(f, "    {}", s)?;
         }
- 
+
         Ok(())
     }
 }
@@ -359,6 +377,7 @@ address = "2001:db8::1"
     #[test]
     fn parse_valid_single_pass() {
         let cfg = RouteConfig::from_str(SAMPLE_TOML).unwrap();
+        
         assert_eq!(cfg.config_id, 0);
         assert!(cfg.first_octet_encodes_cid_length);
         assert_eq!(cfg.server_id_length, 3);
@@ -379,6 +398,7 @@ nonce_length = 4
 key = "000102030405060708090a0b0c0d0e0f"
 "#;
         let cfg = RouteConfig::from_str(toml).unwrap();
+        
         assert!(matches!(cfg.encryption, Encryption::FourPass { .. }));
         assert_eq!(cfg.cid_payload_length(), 7);
     }
@@ -391,6 +411,7 @@ server_id_length = 2
 nonce_length = 5
 "#;
         let cfg = RouteConfig::from_str(toml).unwrap();
+        
         assert!(matches!(cfg.encryption, Encryption::Plaintext));
     }
 
@@ -436,6 +457,7 @@ id = "0001"
 address = "10.0.1.10"
 "#;
         let err = RouteConfig::from_str(toml).unwrap_err();
+        
         assert!(err.to_string().contains("server_id_length * 2"));
     }
 
@@ -448,6 +470,7 @@ nonce_length = 13
 key = "0102030405"
 "#;
         let err = RouteConfig::from_str(toml).unwrap_err();
+        
         assert!(err.to_string().contains("16 bytes"));
     }
 
@@ -464,6 +487,7 @@ id = "01020304"
 address = "10.0.1.10"
 "#;
         let err = RouteConfig::from_str(toml).unwrap_err();
+        
         assert!(err.to_string().contains("server_id_length * 2"));
     }
 
@@ -471,6 +495,7 @@ address = "10.0.1.10"
     fn find_server_by_id() {
         let cfg = RouteConfig::from_str(SAMPLE_TOML).unwrap();
         let s = cfg.find_server(&[0x00, 0x00, 0x01]).unwrap();
+
         assert_eq!(s.address, "10.0.1.10".parse::<IpAddr>().unwrap());
         assert!(cfg.find_server(&[0xff, 0xff, 0xff]).is_none());
     }
