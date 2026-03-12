@@ -26,6 +26,7 @@ pub fn extract_dcid<'a>(quic: &'a [u8], config: &RouteConfig) -> Option<&'a [u8]
     // Top 3 bits of the first CID octet carry the config rotation id.
     // Value 7 (0b111) is reserved for fallback/unroutable.
     let cid_config_id = dcid[0] >> 5;
+    
     if cid_config_id == 7 || cid_config_id != config.config_id {
         return None;
     }
@@ -46,19 +47,24 @@ fn extract_dcid_bytes<'a>(quic: &'a [u8], cid_length: u8) -> Option<&'a [u8]> {
         if quic.len() < 6 {
             return None;
         }
+        
         let dcid_len = quic[5] as usize;
         let end = 6 + dcid_len;
+        
         if quic.len() < end {
             return None;
         }
+        
         &quic[6..end]
     } else {
         // Short Header: [header(1)][dcid(cid_length bytes)]
         let cid_len = cid_length as usize;
         let end = 1 + cid_len;
+
         if quic.len() < end {
             return None;
         }
+        
         &quic[1..end]
     };
 
@@ -83,7 +89,9 @@ pub fn resolve_server_idx(dcid: &[u8], config: &RouteConfig) -> Option<usize> {
     // Copy payload to stack buffer for in-place decryption.
     // Max payload = server_id(15) + nonce(18) capped at 19.
     let mut buf = [0u8; 19];
-    buf[..payload_len].copy_from_slice(&dcid[1..1 + payload_len]);
+    
+    buf[..payload_len]
+        .copy_from_slice(&dcid[1..1 + payload_len]);
 
     match &config.encryption {
         Encryption::Plaintext => {}
@@ -102,7 +110,9 @@ pub fn resolve_server_idx(dcid: &[u8], config: &RouteConfig) -> Option<usize> {
 fn decrypt_single_pass(buf: &mut [u8; 19], key: &[u8; 16]) {
     let cipher = Aes128::new(GenericArray::from_slice(key));
     let mut block = *GenericArray::from_slice(&buf[..16]);
+    
     cipher.decrypt_block(&mut block);
+    
     buf[..16].copy_from_slice(&block);
 }
 
@@ -120,8 +130,11 @@ fn decrypt_four_pass(buf: &mut [u8; 19], sid_len: usize, nonce_len: usize, key: 
             // Odd pass: encrypt Left (server_id), XOR into Right (nonce)
             block[..sid_len].copy_from_slice(&buf[..sid_len]);
             block[0] ^= i;
+            
             let mut ga = *GenericArray::from_slice(&block);
+            
             cipher.encrypt_block(&mut ga);
+            
             for j in 0..nonce_len {
                 buf[sid_len + j] ^= ga[j];
             }
@@ -129,8 +142,11 @@ fn decrypt_four_pass(buf: &mut [u8; 19], sid_len: usize, nonce_len: usize, key: 
             // Even pass: encrypt Right (nonce), XOR into Left (server_id)
             block[..nonce_len].copy_from_slice(&buf[sid_len..sid_len + nonce_len]);
             block[0] ^= i;
+            
             let mut ga = *GenericArray::from_slice(&block);
+            
             cipher.encrypt_block(&mut ga);
+            
             for j in 0..sid_len {
                 buf[j] ^= ga[j];
             }
@@ -182,16 +198,22 @@ mod tests {
             if i % 2 == 0 {
                 block[..nonce_len].copy_from_slice(&buf[sid_len..sid_len + nonce_len]);
                 block[0] ^= i;
+                
                 let mut ga = *GenericArray::from_slice(&block);
+                
                 cipher.encrypt_block(&mut ga);
+                
                 for j in 0..sid_len {
                     buf[j] ^= ga[j];
                 }
             } else {
                 block[..sid_len].copy_from_slice(&buf[..sid_len]);
                 block[0] ^= i;
+                
                 let mut ga = *GenericArray::from_slice(&block);
+                
                 cipher.encrypt_block(&mut ga);
+                
                 for j in 0..nonce_len {
                     buf[sid_len + j] ^= ga[j];
                 }
@@ -210,14 +232,17 @@ mod tests {
         // DCID length: 17 (1 + 3 + 13)
         // DCID: [first_octet=0x00 (config_id=0)][server_id: 3B][nonce: 13B]
         let mut quic = vec![0xc0];
+        
         quic.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]); // version
         quic.push(17); // dcid_len
+        
         // CID: config_id=0 in top 3 bits -> first octet = 0x00
         quic.push(0x00); // first octet
         quic.extend_from_slice(&[0x00, 0x00, 0x01]); // server_id
         quic.extend_from_slice(&[0xaa; 13]); // nonce
 
         let dcid = extract_dcid(&quic, &config).unwrap();
+        
         assert_eq!(dcid.len(), 17);
         assert_eq!(dcid[0] >> 5, 0); // config_id
         assert_eq!(&dcid[1..4], &[0x00, 0x00, 0x01]); // server_id
@@ -230,11 +255,13 @@ mod tests {
         // Short Header: first byte 0x40 (form=0, fixed=1)
         // DCID starts at byte 1, length = cid_length = 17
         let mut quic = vec![0x40];
+        
         quic.push(0x00); // first CID octet (config_id=0)
         quic.extend_from_slice(&[0x00, 0x00, 0x02]); // server_id
         quic.extend_from_slice(&[0xbb; 13]); // nonce
 
         let dcid = extract_dcid(&quic, &config).unwrap();
+        
         assert_eq!(dcid.len(), 17);
         assert_eq!(&dcid[1..4], &[0x00, 0x00, 0x02]);
     }
@@ -245,6 +272,7 @@ mod tests {
 
         // config_id = 3 in top 3 bits -> first CID octet = 3 << 5 = 0x60
         let mut quic = vec![0xc0];
+        
         quic.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
         quic.push(17);
         quic.push(0x60); // config_id=3, doesn't match config.config_id=0
@@ -259,6 +287,7 @@ mod tests {
 
         // config_id = 7 -> 0xe0
         let mut quic = vec![0xc0];
+        
         quic.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
         quic.push(17);
         quic.push(0xe0); // config_id=7 (reserved)
@@ -270,6 +299,7 @@ mod tests {
     #[test]
     fn extract_dcid_truncated() {
         let config = make_config(Encryption::Plaintext, 0, 3, 13);
+        
         assert!(extract_dcid(&[], &config).is_none());
         assert!(extract_dcid(&[0xc0, 0x00], &config).is_none());
     }
@@ -281,6 +311,7 @@ mod tests {
         let config = make_config(Encryption::Plaintext, 0, 3, 13);
 
         let mut dcid = vec![0x00]; // first octet, config_id=0
+        
         dcid.extend_from_slice(&[0x00, 0x00, 0x01]); // server_id
         dcid.extend_from_slice(&[0x00; 13]); // nonce
 
@@ -292,6 +323,7 @@ mod tests {
         let config = make_config(Encryption::Plaintext, 0, 3, 13);
 
         let mut dcid = vec![0x00];
+        
         dcid.extend_from_slice(&[0xff, 0xff, 0xff]); // unknown server_id
         dcid.extend_from_slice(&[0x00; 13]);
 
@@ -307,16 +339,19 @@ mod tests {
 
         // Build a plaintext CID payload: server_id || nonce
         let mut payload = [0u8; 16];
+        
         payload[0..3].copy_from_slice(&[0x00, 0x00, 0x01]); // server_id
         payload[3..16].copy_from_slice(&[0x42; 13]); // nonce
 
         // Encrypt with AES-128-ECB
         let cipher = Aes128::new(GenericArray::from_slice(&TEST_KEY));
         let mut block = *GenericArray::from_slice(&payload);
+        
         cipher.encrypt_block(&mut block);
 
         // Build the full CID: [first_octet][encrypted_payload]
         let mut dcid = vec![0x00]; // config_id=0
+        
         dcid.extend_from_slice(&block);
 
         assert_eq!(resolve_server_idx(&dcid, &config), Some(0));
@@ -331,6 +366,7 @@ mod tests {
 
         // Plaintext payload: server_id(3) || nonce(4)
         let mut payload = [0u8; 7];
+        
         payload[0..3].copy_from_slice(&[0x00, 0x00, 0x01]);
         payload[3..7].copy_from_slice(&[0x42; 4]);
 
@@ -339,6 +375,7 @@ mod tests {
 
         // Build CID: [first_octet (config_id=1 -> 0x20)][encrypted_payload]
         let mut dcid = vec![0x20]; // config_id=1
+        
         dcid.extend_from_slice(&payload);
 
         assert_eq!(resolve_server_idx(&dcid, &config), Some(0));
@@ -351,14 +388,17 @@ mod tests {
 
         let original = [0xde, 0xad, 0xbe, 0x01, 0x02, 0x03, 0x04];
         let mut buf = [0u8; 19];
+        
         buf[..7].copy_from_slice(&original);
 
         encrypt_four_pass(&mut buf[..7], sid_len, nonce_len, &TEST_KEY);
+        
         // Encrypted should differ from original
         assert_ne!(&buf[..7], &original);
 
         // Decrypt
         let mut dbuf = [0u8; 19];
+        
         dbuf[..7].copy_from_slice(&buf[..7]);
         decrypt_four_pass(&mut dbuf, sid_len, nonce_len, &TEST_KEY);
 

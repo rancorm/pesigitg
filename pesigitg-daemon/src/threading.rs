@@ -14,6 +14,7 @@ use crate::config::route::RouteConfig;
 use crate::conntable::ConnectionTable;
 use crate::ebpf::EbpfHandle;
 use crate::packet::{self, Verdict};
+use crate::stats::{StatsTable, WorkerStats};
 use crate::utils::num_cores;
 use crate::xsk::XskSocket;
 
@@ -124,13 +125,15 @@ impl WorkerPool {
         config: Arc<RwLock<RouteConfig>>,
         ebpf: Arc<Mutex<EbpfHandle>>,
         shutdown: Arc<AtomicBool>,
+        stats: Arc<StatsTable>,
     ) -> Self {
         let mut handles = Vec::with_capacity(threads.len());
 
-        for tc in threads {
+        for (worker_idx, tc) in threads.into_iter().enumerate() {
             let shutdown = Arc::clone(&shutdown);
             let config = Arc::clone(&config);
             let ebpf = Arc::clone(&ebpf);
+            let stats = Arc::clone(&stats);
             let interface = interface.to_owned();
 
             let handle = thread::Builder::new()
@@ -149,7 +152,7 @@ impl WorkerPool {
                         tc.queue_id, tc.core_id
                     );
 
-                    worker_loop(&interface, tc.queue_id, &config, &ebpf, &shutdown);
+                    worker_loop(&interface, tc.queue_id, &config, &ebpf, &shutdown, stats.slot(worker_idx));
 
                     info!("worker q{}: exiting", tc.queue_id);
                 })
@@ -182,6 +185,7 @@ fn worker_loop(
     config: &Arc<RwLock<RouteConfig>>,
     ebpf: &Arc<Mutex<EbpfHandle>>,
     shutdown: &AtomicBool,
+    stats: &WorkerStats,
 ) {
     let mut xsk = match XskSocket::new(interface, queue_id) {
         Ok(s) => s,
@@ -215,14 +219,26 @@ fn worker_loop(
         let mut tx_batch = Vec::with_capacity(n);
         let mut recycle_batch = Vec::with_capacity(n);
 
+        stats.record_rx(n as u64);
+
         for i in 0..n {
             let verdict = {
                 let mut data = unsafe { xsk.frame_mut(&mut rx_descs[i]) };
                 packet::process_packet(&mut *data, &config, &mut conn)
             };
             match verdict {
-                Verdict::Forward => tx_batch.push(rx_descs[i]),
-                Verdict::Pass => recycle_batch.push(rx_descs[i]),
+                Verdict::CidForward => {
+                    stats.record_cid_forward();
+                    tx_batch.push(rx_descs[i]);
+                }
+                Verdict::FallbackForward => {
+                    stats.record_fallback_forward();
+                    tx_batch.push(rx_descs[i]);
+                }
+                Verdict::Pass => {
+                    stats.record_pass();
+                    recycle_batch.push(rx_descs[i]);
+                }
             }
         }
 

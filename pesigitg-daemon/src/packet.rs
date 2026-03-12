@@ -24,8 +24,10 @@ use crate::conntable::{ConnectionTable, DcidKey, FlowKey};
 
 /// Outcome of packet processing.
 pub enum Verdict {
-    /// Destination MAC rewritten; the packet should be forwarded.
-    Forward,
+    /// CID-routed: DCID decrypted and mapped to a backend server.
+    CidForward,
+    /// Fallback-routed: connection table hit or consistent hash.
+    FallbackForward,
     /// Packet not modified; pass through to the kernel stack.
     Pass,
 }
@@ -63,7 +65,7 @@ pub fn process_packet(
                 // Record DCID mapping for NAT rebinding resilience.
                 conn.record_dcid(DcidKey::from_slice(dcid), server_idx);
                 frame[..6].copy_from_slice(&mac);
-                return Verdict::Forward;
+                return Verdict::CidForward;
             }
         }
         // CID was routable but server unknown or has no MAC — don't fallback
@@ -81,7 +83,7 @@ pub fn process_packet(
         if let Some(server) = config.servers.get(server_idx) {
             if let Some(mac) = server.mac {
                 frame[..6].copy_from_slice(&mac);
-                return Verdict::Forward;
+                return Verdict::FallbackForward;
             }
         }
     }
@@ -92,7 +94,7 @@ pub fn process_packet(
         let mac = config.servers[server_idx].mac.unwrap();
         conn.insert(meta.flow, dcid_key, server_idx);
         frame[..6].copy_from_slice(&mac);
-        return Verdict::Forward;
+        return Verdict::FallbackForward;
     }
 
     Verdict::Pass
@@ -378,7 +380,7 @@ mod tests {
 
         assert!(matches!(
             process_packet(&mut frame, &config, &mut conn),
-            Verdict::Forward
+            Verdict::CidForward
         ));
         assert_eq!(&frame[..6], &[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01]);
     }
@@ -392,7 +394,7 @@ mod tests {
 
         assert!(matches!(
             process_packet(&mut frame, &config, &mut conn),
-            Verdict::Forward
+            Verdict::CidForward
         ));
         assert_eq!(&frame[..6], &[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01]);
     }
@@ -447,7 +449,7 @@ mod tests {
 
         assert!(matches!(
             process_packet(&mut frame, &config, &mut conn),
-            Verdict::Forward
+            Verdict::CidForward
         ));
         assert_eq!(&frame[..6], &[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01]);
     }
@@ -464,7 +466,7 @@ mod tests {
 
         assert!(matches!(
             process_packet(&mut frame, &config, &mut conn),
-            Verdict::Forward
+            Verdict::FallbackForward
         ));
         // Only one server with a MAC, so it must be selected.
         assert_eq!(&frame[..6], &[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01]);
@@ -481,7 +483,7 @@ mod tests {
         let mut frame1 = build_ipv4_frame(&quic);
         assert!(matches!(
             process_packet(&mut frame1, &config, &mut conn),
-            Verdict::Forward
+            Verdict::FallbackForward
         ));
         let mac1 = frame1[..6].to_vec();
 
@@ -489,7 +491,7 @@ mod tests {
         let mut frame2 = build_ipv4_frame(&quic);
         assert!(matches!(
             process_packet(&mut frame2, &config, &mut conn),
-            Verdict::Forward
+            Verdict::FallbackForward
         ));
         assert_eq!(&frame2[..6], &mac1[..]);
     }
@@ -506,7 +508,7 @@ mod tests {
         let mut frame1 = build_ipv4_frame_ex(&quic, [10, 0, 0, 1], 12345);
         assert!(matches!(
             process_packet(&mut frame1, &config, &mut conn),
-            Verdict::Forward
+            Verdict::FallbackForward
         ));
         let mac1 = frame1[..6].to_vec();
 
@@ -514,7 +516,7 @@ mod tests {
         let mut frame2 = build_ipv4_frame_ex(&quic, [10, 0, 0, 99], 54321);
         assert!(matches!(
             process_packet(&mut frame2, &config, &mut conn),
-            Verdict::Forward
+            Verdict::FallbackForward
         ));
         // Same server via DCID index.
         assert_eq!(&frame2[..6], &mac1[..]);
@@ -531,7 +533,7 @@ mod tests {
 
         assert!(matches!(
             process_packet(&mut frame, &config, &mut conn),
-            Verdict::Forward
+            Verdict::CidForward
         ));
 
         // The DCID should now be in the connection table.

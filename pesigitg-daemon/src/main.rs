@@ -6,6 +6,7 @@ mod ebpf;
 mod neigh;
 mod packet;
 mod pidfile;
+mod stats;
 mod threading;
 mod utils;
 mod xsk;
@@ -26,6 +27,7 @@ use args::{Args, parse_args};
 use config::daemon::FileConfig;
 use config::route::RouteConfig;
 use pidfile::PidFile;
+use stats::{Snapshot, StatsTable};
 use threading::{get_hw_queues, plan_threads, WorkerPool};
 use utils::{is_aes_available, notify_ready, num_cores, running_under_systemd, systemd_notify};
 
@@ -230,12 +232,14 @@ fn main() -> Result<()> {
     }
 
     let shutdown = Arc::new(AtomicBool::new(false));
+    let stats = Arc::new(StatsTable::new(thread_plan.len()));
     let mut workers = WorkerPool::spawn(
         thread_plan,
         &args.interface,
         Arc::clone(&route_config),
         Arc::clone(&ebpf),
         Arc::clone(&shutdown),
+        Arc::clone(&stats),
     );
 
     // Notify systemd that we're ready with a status string
@@ -245,6 +249,8 @@ fn main() -> Result<()> {
     ));
 
     // Poll for signals with a timeout to allow watchdog keepalives
+    let mut prev_stats = Snapshot::default();
+
     loop {
         for sig in signals.pending() {
             match sig {
@@ -263,6 +269,17 @@ fn main() -> Result<()> {
                 _ => unreachable!(),
             }
         }
+
+        let current = stats.aggregate();
+        let delta = current.delta(&prev_stats);
+        if delta.rx_packets > 0 {
+            info!(
+                "stats: rx={} fwd={} (cid={} fallback={}) pass={}",
+                delta.rx_packets, delta.forwarded,
+                delta.cid_routed, delta.fallback_routed, delta.passed,
+            );
+        }
+        prev_stats = current;
 
         systemd_notify!(sd_notify::NotifyState::Watchdog);
         thread::sleep(Duration::from_secs(5));
