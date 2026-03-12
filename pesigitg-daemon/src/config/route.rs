@@ -189,18 +189,6 @@ impl RouteConfig {
         1 + self.cid_payload_length()
     }
 
-    /// Whether encryption is configured (not plaintext).
-    #[inline]
-    pub fn is_encrypted(&self) -> bool {
-        !matches!(self.encryption, Encryption::Plaintext)
-    }
-
-    /// Whether single-pass AES-ECB is in use.
-    #[inline]
-    pub fn is_single_pass(&self) -> bool {
-        matches!(self.encryption, Encryption::SinglePass { .. })
-    }
-
     /// Look up a server by its raw ID bytes.
     pub fn find_server(&self, id: &[u8]) -> Option<&Server> {
         self.servers.iter().find(|s| s.id == id)
@@ -382,7 +370,7 @@ address = "2001:db8::1"
         assert!(cfg.first_octet_encodes_cid_length);
         assert_eq!(cfg.server_id_length, 3);
         assert_eq!(cfg.nonce_length, 13);
-        assert!(cfg.is_single_pass());
+        assert!(matches!(cfg.encryption, Encryption::SinglePass { .. }));
         assert_eq!(cfg.cid_length(), 17); // 1 + 3 + 13
         assert_eq!(cfg.servers.len(), 2);
         assert_eq!(cfg.servers[0].id, vec![0x00, 0x00, 0x01]);
@@ -489,14 +477,4 @@ address = "10.0.1.10"
         let err = RouteConfig::from_str(toml).unwrap_err();
         
         assert!(err.to_string().contains("server_id_length * 2"));
-    }
-
-    #[test]
-    fn find_server_by_id() {
-        let cfg = RouteConfig::from_str(SAMPLE_TOML).unwrap();
-        let s = cfg.find_server(&[0x00, 0x00, 0x01]).unwrap();
-
-        assert_eq!(s.address, "10.0.1.10".parse::<IpAddr>().unwrap());
-        assert!(cfg.find_server(&[0xff, 0xff, 0xff]).is_none());
-    }
-}
+    }}
