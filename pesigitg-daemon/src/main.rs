@@ -1,6 +1,7 @@
 mod args;
 mod cid;
 mod config;
+mod conntable;
 mod ebpf;
 mod neigh;
 mod packet;

@@ -189,9 +189,9 @@ impl RouteConfig {
         1 + self.cid_payload_length()
     }
 
-    /// Look up a server by its raw ID bytes.
-    pub fn find_server(&self, id: &[u8]) -> Option<&Server> {
-        self.servers.iter().find(|s| s.id == id)
+    /// Look up a server's index by its raw ID bytes.
+    pub fn find_server_idx(&self, id: &[u8]) -> Option<usize> {
+        self.servers.iter().position(|s| s.id == id)
     }
 }
 
@@ -477,4 +477,5 @@ address = "10.0.1.10"
         let err = RouteConfig::from_str(toml).unwrap_err();
         
         assert!(err.to_string().contains("server_id_length * 2"));
-    }}
+    }
+}

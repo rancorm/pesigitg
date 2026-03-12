@@ -11,6 +11,7 @@ use nix::unistd::Pid;
 use xsk_rs::FrameDesc;
 
 use crate::config::route::RouteConfig;
+use crate::conntable::ConnectionTable;
 use crate::ebpf::EbpfHandle;
 use crate::packet::{self, Verdict};
 use crate::utils::num_cores;
@@ -200,10 +201,12 @@ fn worker_loop(
 
     let mut rx_descs = vec![FrameDesc::default(); BATCH_SIZE];
     let mut comp_descs = vec![FrameDesc::default(); BATCH_SIZE];
+    let mut conn = ConnectionTable::new();
 
     while !shutdown.load(Ordering::Relaxed) {
         let n = xsk.poll_recv(&mut rx_descs, POLL_TIMEOUT_MS);
         if n == 0 {
+            conn.maybe_sweep();
             continue;
         }
 
@@ -215,7 +218,7 @@ fn worker_loop(
         for i in 0..n {
             let verdict = {
                 let mut data = unsafe { xsk.frame_mut(&mut rx_descs[i]) };
-                packet::process_packet(&mut *data, &config)
+                packet::process_packet(&mut *data, &config, &mut conn)
             };
             match verdict {
                 Verdict::Forward => tx_batch.push(rx_descs[i]),

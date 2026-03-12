@@ -8,13 +8,33 @@
 use aes::Aes128;
 use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit, generic_array::GenericArray};
 
-use crate::config::route::{Encryption, RouteConfig, Server};
+use crate::config::route::{Encryption, RouteConfig};
+
+/// Extract raw DCID bytes from a QUIC packet without validating the config
+/// rotation ID. Used for connection table lookups on unroutable packets.
+pub fn extract_raw_dcid<'a>(quic: &'a [u8], cid_length: u8) -> Option<&'a [u8]> {
+    extract_dcid_bytes(quic, cid_length)
+}
 
 /// Extract the DCID from a QUIC packet payload (starting after the UDP header).
 ///
 /// Returns the DCID slice, or `None` if the packet is malformed or the
 /// config_id in the CID first octet doesn't match the active configuration.
 pub fn extract_dcid<'a>(quic: &'a [u8], config: &RouteConfig) -> Option<&'a [u8]> {
+    let dcid = extract_dcid_bytes(quic, config.cid_length())?;
+
+    // Top 3 bits of the first CID octet carry the config rotation id.
+    // Value 7 (0b111) is reserved for fallback/unroutable.
+    let cid_config_id = dcid[0] >> 5;
+    if cid_config_id == 7 || cid_config_id != config.config_id {
+        return None;
+    }
+
+    Some(dcid)
+}
+
+/// Common DCID byte extraction for both long and short headers.
+fn extract_dcid_bytes<'a>(quic: &'a [u8], cid_length: u8) -> Option<&'a [u8]> {
     if quic.is_empty() {
         return None;
     }
@@ -34,7 +54,7 @@ pub fn extract_dcid<'a>(quic: &'a [u8], config: &RouteConfig) -> Option<&'a [u8]
         &quic[6..end]
     } else {
         // Short Header: [header(1)][dcid(cid_length bytes)]
-        let cid_len = config.cid_length() as usize;
+        let cid_len = cid_length as usize;
         let end = 1 + cid_len;
         if quic.len() < end {
             return None;
@@ -46,20 +66,13 @@ pub fn extract_dcid<'a>(quic: &'a [u8], config: &RouteConfig) -> Option<&'a [u8]
         return None;
     }
 
-    // Top 3 bits of the first CID octet carry the config rotation id.
-    // Value 7 (0b111) is reserved for fallback/unroutable.
-    let cid_config_id = dcid[0] >> 5;
-    if cid_config_id == 7 || cid_config_id != config.config_id {
-        return None;
-    }
-
     Some(dcid)
 }
 
-/// Decrypt the CID payload and look up the corresponding backend server.
+/// Decrypt the CID payload and return the index of the matching backend server.
 ///
 /// Performs zero heap allocations — decryption works on a stack buffer.
-pub fn resolve_server<'a>(dcid: &[u8], config: &'a RouteConfig) -> Option<&'a Server> {
+pub fn resolve_server_idx(dcid: &[u8], config: &RouteConfig) -> Option<usize> {
     let payload_len = config.cid_payload_length() as usize;
     let sid_len = config.server_id_length as usize;
 
@@ -82,7 +95,7 @@ pub fn resolve_server<'a>(dcid: &[u8], config: &'a RouteConfig) -> Option<&'a Se
         }
     }
 
-    config.find_server(&buf[..sid_len])
+    config.find_server_idx(&buf[..sid_len])
 }
 
 /// AES-128-ECB decrypt a 16-byte block in place.
@@ -128,6 +141,7 @@ fn decrypt_four_pass(buf: &mut [u8; 19], sid_len: usize, nonce_len: usize, key: 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::route::Server;
     use std::path::PathBuf;
 
     const TEST_KEY: [u8; 16] = [
@@ -270,8 +284,7 @@ mod tests {
         dcid.extend_from_slice(&[0x00, 0x00, 0x01]); // server_id
         dcid.extend_from_slice(&[0x00; 13]); // nonce
 
-        let server = resolve_server(&dcid, &config).unwrap();
-        assert_eq!(server.id, vec![0x00, 0x00, 0x01]);
+        assert_eq!(resolve_server_idx(&dcid, &config), Some(0));
     }
 
     #[test]
@@ -282,7 +295,7 @@ mod tests {
         dcid.extend_from_slice(&[0xff, 0xff, 0xff]); // unknown server_id
         dcid.extend_from_slice(&[0x00; 13]);
 
-        assert!(resolve_server(&dcid, &config).is_none());
+        assert!(resolve_server_idx(&dcid, &config).is_none());
     }
 
     #[test]
@@ -306,8 +319,7 @@ mod tests {
         let mut dcid = vec![0x00]; // config_id=0
         dcid.extend_from_slice(&block);
 
-        let server = resolve_server(&dcid, &config).unwrap();
-        assert_eq!(server.id, vec![0x00, 0x00, 0x01]);
+        assert_eq!(resolve_server_idx(&dcid, &config), Some(0));
     }
 
     #[test]
@@ -329,8 +341,7 @@ mod tests {
         let mut dcid = vec![0x20]; // config_id=1
         dcid.extend_from_slice(&payload);
 
-        let server = resolve_server(&dcid, &config).unwrap();
-        assert_eq!(server.id, vec![0x00, 0x00, 0x01]);
+        assert_eq!(resolve_server_idx(&dcid, &config), Some(0));
     }
 
     #[test]
