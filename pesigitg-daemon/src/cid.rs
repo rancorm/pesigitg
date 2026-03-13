@@ -8,7 +8,43 @@
 use aes::Aes128;
 use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit, generic_array::GenericArray};
 
-use crate::config::route::{Encryption, RouteConfig};
+use crate::config::route::{ConfigTable, Encryption, RouteConfig};
+
+/// Look up the config for a QUIC packet by extracting the config_id from the
+/// CID's first octet and indexing into the config table.
+///
+/// Returns the DCID slice and the matching config, or `None` if the packet is
+/// malformed, config_id is reserved (7), or no config exists for that id.
+pub fn lookup_config<'a, 'b>(quic: &'a [u8], table: &'b ConfigTable) -> Option<(&'a [u8], &'b RouteConfig)> {
+    let first_octet = first_cid_octet(quic)?;
+    let config_id = first_octet >> 5;
+    if config_id == 7 {
+        return None;
+    }
+    let config = table.get(config_id)?;
+    let dcid = extract_dcid_bytes(quic, config.cid_length())?;
+    Some((dcid, config))
+}
+
+/// Extract the first CID octet from a QUIC packet (long or short header).
+fn first_cid_octet(quic: &[u8]) -> Option<u8> {
+    if quic.is_empty() {
+        return None;
+    }
+    if quic[0] & 0x80 != 0 {
+        // Long header: [header(1)][version(4)][dcid_len(1)][dcid(..)]
+        if quic.len() < 7 || quic[5] == 0 {
+            return None;
+        }
+        Some(quic[6])
+    } else {
+        // Short header: [header(1)][dcid(..)]
+        if quic.len() < 2 {
+            return None;
+        }
+        Some(quic[1])
+    }
+}
 
 /// Extract raw DCID bytes from a QUIC packet without validating the config
 /// rotation ID. Used for connection table lookups on unroutable packets.
@@ -158,7 +194,6 @@ fn decrypt_four_pass(buf: &mut [u8; 19], sid_len: usize, nonce_len: usize, key: 
 mod tests {
     use super::*;
     use crate::config::route::Server;
-    use std::path::PathBuf;
 
     const TEST_KEY: [u8; 16] = [
         0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
@@ -167,7 +202,6 @@ mod tests {
 
     fn make_config(encryption: Encryption, config_id: u8, sid_len: u8, nonce_len: u8) -> RouteConfig {
         RouteConfig {
-            path: PathBuf::new(),
             config_id,
             first_octet_encodes_cid_length: true,
             server_id_length: sid_len,

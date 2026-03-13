@@ -1,24 +1,35 @@
 //! Configuration for load balancer.
 //!
 //! Parses `lb.toml` into validated Rust types per the QUIC-LB specification
-//! (draft-ietf-quic-load-balancers-21). Determines the encryption algorithm
-//! (single-pass AES-ECB vs four-pass block cipher) from field lengths.
+//! (draft-ietf-quic-load-balancers-21). Supports multiple simultaneous
+//! configurations indexed by config_id (0-6) for config rotation.
 
 use std::fmt;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
-/// Top-level configuration, validated and ready for use.
+/// Per-config-id configuration, validated and ready for use.
 #[derive(Debug, Clone)]
 pub struct RouteConfig {
-    pub path: PathBuf,
     pub config_id: u8,
     pub first_octet_encodes_cid_length: bool,
     pub server_id_length: u8,
     pub nonce_length: u8,
     pub encryption: Encryption,
     pub servers: Vec<Server>,
+}
+
+/// Config table holding up to 7 simultaneous configurations (config_id 0-6).
+///
+/// The config_id from a CID's first octet is a direct index into this table.
+/// Codepoint 7 is reserved for fallback/unroutable.
+#[derive(Debug)]
+pub struct ConfigTable {
+    pub path: PathBuf,
+    slots: [Option<RouteConfig>; 7],
+    /// Merged, deduplicated server list for fallback consistent hashing.
+    pub fallback_servers: Vec<Server>,
 }
 
 /// Encryption mode derived from `server_id_length + nonce_length`.
@@ -75,6 +86,12 @@ impl From<toml::de::Error> for RouteConfigError {
 }
 
 #[derive(Deserialize)]
+struct RawConfigFile {
+    #[serde(default)]
+    configs: Vec<RawConfig>,
+}
+
+#[derive(Deserialize)]
 struct RawConfig {
     config_id: u8,
     #[serde(default)]
@@ -94,23 +111,6 @@ struct RawServer {
 }
 
 impl RouteConfig {
-    /// Load and validate configuration from a TOML file.
-    pub fn from_file(path: impl AsRef<Path>) -> Result<Self, RouteConfigError> {
-        let path = path.as_ref();
-        let text = std::fs::read_to_string(path)?;
-        let mut config = Self::from_str(&text)?;
-        
-        config.path = path.to_path_buf();
-        
-        Ok(config)
-    }
-
-    /// Parse and validate configuration from a TOML string.
-    pub fn from_str(text: &str) -> Result<Self, RouteConfigError> {
-        let raw: RawConfig = toml::from_str(text)?;
-        Self::validate(raw)
-    }
-
     fn validate(raw: RawConfig) -> Result<Self, RouteConfigError> {
         // config_id: 0..=6 (0b111 is reserved for fallback/unroutable)
         if raw.config_id > 6 {
@@ -166,7 +166,6 @@ impl RouteConfig {
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(RouteConfig {
-            path: PathBuf::new(),
             config_id: raw.config_id,
             first_octet_encodes_cid_length: raw.first_octet_encodes_cid_length,
             server_id_length: raw.server_id_length,
@@ -195,6 +194,100 @@ impl RouteConfig {
     }
 }
 
+impl ConfigTable {
+    /// Load and validate configuration from a TOML file.
+    pub fn from_file(path: impl AsRef<Path>) -> Result<Self, RouteConfigError> {
+        let path = path.as_ref();
+        let text = std::fs::read_to_string(path)?;
+        let mut table = Self::from_str(&text)?;
+        table.path = path.to_path_buf();
+        Ok(table)
+    }
+
+    /// Parse and validate configuration from a TOML string.
+    pub fn from_str(text: &str) -> Result<Self, RouteConfigError> {
+        let raw: RawConfigFile = toml::from_str(text)?;
+
+        if raw.configs.is_empty() {
+            return Err(RouteConfigError::Validation(
+                "no [[configs]] entries found".into(),
+            ));
+        }
+
+        let mut slots: [Option<RouteConfig>; 7] = Default::default();
+
+        for raw_config in raw.configs {
+            let config = RouteConfig::validate(raw_config)?;
+            let id = config.config_id as usize;
+            if slots[id].is_some() {
+                return Err(RouteConfigError::Validation(format!(
+                    "duplicate config_id {}",
+                    config.config_id,
+                )));
+            }
+            slots[id] = Some(config);
+        }
+
+        Ok(ConfigTable {
+            path: PathBuf::new(),
+            slots,
+            fallback_servers: Vec::new(),
+        })
+    }
+
+    /// Look up a config by config_id (0-6).
+    #[inline]
+    pub fn get(&self, config_id: u8) -> Option<&RouteConfig> {
+        self.slots.get(config_id as usize)?.as_ref()
+    }
+
+    /// CID length for raw DCID extraction on the fallback path.
+    /// Uses the first active config's cid_length.
+    pub fn fallback_cid_length(&self) -> Option<u8> {
+        self.slots.iter()
+            .flatten()
+            .next()
+            .map(|c| c.cid_length())
+    }
+
+    /// Mutable iterator over all active configs.
+    pub fn configs_mut(&mut self) -> impl Iterator<Item = &mut RouteConfig> {
+        self.slots.iter_mut().filter_map(|s| s.as_mut())
+    }
+
+    /// Rebuild the merged fallback server list from all active configs.
+    /// Call after resolving MACs.
+    pub fn rebuild_fallback_servers(&mut self) {
+        self.fallback_servers.clear();
+        for config in self.slots.iter().flatten() {
+            for server in &config.servers {
+                if server.mac.is_some()
+                    && !self.fallback_servers.iter().any(|s| s.address == server.address)
+                {
+                    self.fallback_servers.push(server.clone());
+                }
+            }
+        }
+    }
+
+    /// Construct a ConfigTable directly from configs (for tests).
+    #[cfg(test)]
+    pub(crate) fn with_configs(configs: Vec<RouteConfig>) -> Self {
+        let mut slots: [Option<RouteConfig>; 7] = Default::default();
+        for config in configs {
+            let id = config.config_id as usize;
+            slots[id] = Some(config);
+        }
+        let mut table = ConfigTable {
+            path: PathBuf::new(),
+            slots,
+            fallback_servers: Vec::new(),
+        };
+        table.rebuild_fallback_servers();
+        table
+    }
+}
+
 /// Parse a hex-encoded 16-byte (128-bit) AES key.
 fn parse_hex_key(hex: &str) -> Result<[u8; 16], RouteConfigError> {
     let bytes = hex_decode(hex).map_err(|e| {
@@ -207,32 +300,32 @@ fn parse_hex_key(hex: &str) -> Result<[u8; 16], RouteConfigError> {
             bytes.len(),
         )));
     }
-    
+
     let mut key = [0u8; 16];
     key.copy_from_slice(&bytes);
-    
+
     Ok(key)
 }
 
 /// Parse a colon-separated MAC address string (e.g. `"aa:bb:cc:dd:ee:01"`).
 fn parse_mac(s: &str) -> Result<[u8; 6], String> {
     let parts: Vec<&str> = s.split(':').collect();
-    
+
     if parts.len() != 6 {
         return Err(format!("expected 6 colon-separated octets, got {}", parts.len()));
     }
-    
+
     let mut mac = [0u8; 6];
-    
+
     for (i, part) in parts.iter().enumerate() {
         mac[i] = u8::from_str_radix(part, 16)
             .map_err(|_| format!("invalid hex octet '{}' at position {i}", part))?;
     }
-    
+
     Ok(mac)
 }
 
-/// Parse a single `[[servers]]` entry.
+/// Parse a single `[[configs.servers]]` entry.
 fn parse_server(raw: &RawServer, expected_id_len: u8) -> Result<Server, RouteConfigError> {
     let expected_hex_len = expected_id_len as usize * 2;
 
@@ -281,7 +374,7 @@ fn hex_decode(s: &str) -> Result<Vec<u8>, String> {
     if s.len() % 2 != 0 {
         return Err("odd number of hex characters".into());
     }
-    
+
     (0..s.len())
         .step_by(2)
         .map(|i| {
@@ -315,7 +408,7 @@ impl fmt::Display for Server {
                     .map(|b| format!("{b:02x}"))
                     .collect::<Vec<_>>()
                     .join(":");
-                
+
                 write!(f, "{} -> {} (mac: {})", id_hex, self.address, mac_str)
             }
             None => write!(f, "{} -> {}", id_hex, self.address),
@@ -325,7 +418,6 @@ impl fmt::Display for Server {
 
 impl fmt::Display for RouteConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "Route Configuration:")?;
         writeln!(f, "  config_id:        {}", self.config_id)?;
         writeln!(f, "  first_octet_len:  {}", self.first_octet_encodes_cid_length)?;
         writeln!(f, "  server_id_length: {}", self.server_id_length)?;
@@ -333,11 +425,20 @@ impl fmt::Display for RouteConfig {
         writeln!(f, "  cid_length:       {} (1 + {})", self.cid_length(), self.cid_payload_length())?;
         writeln!(f, "  encryption:       {}", self.encryption)?;
         writeln!(f, "  servers:          {}", self.servers.len())?;
-
         for s in &self.servers {
             writeln!(f, "    {}", s)?;
         }
+        Ok(())
+    }
+}
 
+impl fmt::Display for ConfigTable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let active: Vec<_> = self.slots.iter().flatten().collect();
+        writeln!(f, "Config Table ({} active):", active.len())?;
+        for config in active {
+            write!(f, "{}", config)?;
+        }
         Ok(())
     }
 }
@@ -347,25 +448,27 @@ mod tests {
     use super::*;
 
     const SAMPLE_TOML: &str = r#"
+[[configs]]
 config_id = 0
 first_octet_encodes_cid_length = true
 server_id_length = 3
 nonce_length = 13
 key = "000102030405060708090a0b0c0d0e0f"
 
-[[servers]]
+[[configs.servers]]
 id = "000001"
 address = "10.0.1.10"
 
-[[servers]]
+[[configs.servers]]
 id = "000002"
 address = "2001:db8::1"
 "#;
 
     #[test]
     fn parse_valid_single_pass() {
-        let cfg = RouteConfig::from_str(SAMPLE_TOML).unwrap();
-        
+        let table = ConfigTable::from_str(SAMPLE_TOML).unwrap();
+        let cfg = table.get(0).unwrap();
+
         assert_eq!(cfg.config_id, 0);
         assert!(cfg.first_octet_encodes_cid_length);
         assert_eq!(cfg.server_id_length, 3);
@@ -380,13 +483,15 @@ address = "2001:db8::1"
     #[test]
     fn parse_four_pass() {
         let toml = r#"
+[[configs]]
 config_id = 1
 server_id_length = 3
 nonce_length = 4
 key = "000102030405060708090a0b0c0d0e0f"
 "#;
-        let cfg = RouteConfig::from_str(toml).unwrap();
-        
+        let table = ConfigTable::from_str(toml).unwrap();
+        let cfg = table.get(1).unwrap();
+
         assert!(matches!(cfg.encryption, Encryption::FourPass { .. }));
         assert_eq!(cfg.cid_payload_length(), 7);
     }
@@ -394,88 +499,151 @@ key = "000102030405060708090a0b0c0d0e0f"
     #[test]
     fn parse_plaintext() {
         let toml = r#"
+[[configs]]
 config_id = 2
 server_id_length = 2
 nonce_length = 5
 "#;
-        let cfg = RouteConfig::from_str(toml).unwrap();
-        
+        let table = ConfigTable::from_str(toml).unwrap();
+        let cfg = table.get(2).unwrap();
+
         assert!(matches!(cfg.encryption, Encryption::Plaintext));
+    }
+
+    #[test]
+    fn parse_multiple_configs() {
+        let toml = r#"
+[[configs]]
+config_id = 0
+server_id_length = 3
+nonce_length = 13
+key = "000102030405060708090a0b0c0d0e0f"
+
+[[configs.servers]]
+id = "000001"
+address = "10.0.1.10"
+
+[[configs]]
+config_id = 1
+server_id_length = 3
+nonce_length = 13
+key = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6"
+
+[[configs.servers]]
+id = "000001"
+address = "10.0.1.10"
+"#;
+        let table = ConfigTable::from_str(toml).unwrap();
+
+        assert!(table.get(0).is_some());
+        assert!(table.get(1).is_some());
+        assert!(table.get(2).is_none());
+    }
+
+    #[test]
+    fn reject_duplicate_config_id() {
+        let toml = r#"
+[[configs]]
+config_id = 0
+server_id_length = 3
+nonce_length = 13
+
+[[configs]]
+config_id = 0
+server_id_length = 3
+nonce_length = 4
+"#;
+        let err = ConfigTable::from_str(toml).unwrap_err();
+        assert!(err.to_string().contains("duplicate config_id"));
+    }
+
+    #[test]
+    fn reject_empty_configs() {
+        let toml = "";
+        assert!(ConfigTable::from_str(toml).is_err());
     }
 
     #[test]
     fn reject_config_id_7() {
         let toml = r#"
+[[configs]]
 config_id = 7
 server_id_length = 3
 nonce_length = 13
 "#;
-        assert!(RouteConfig::from_str(toml).is_err());
+        assert!(ConfigTable::from_str(toml).is_err());
     }
 
     #[test]
     fn reject_sum_exceeds_19() {
         let toml = r#"
+[[configs]]
 config_id = 0
 server_id_length = 15
 nonce_length = 5
 "#;
-        assert!(RouteConfig::from_str(toml).is_err());
+        assert!(ConfigTable::from_str(toml).is_err());
     }
 
     #[test]
     fn reject_nonce_below_4() {
         let toml = r#"
+[[configs]]
 config_id = 0
 server_id_length = 3
 nonce_length = 3
 "#;
-        assert!(RouteConfig::from_str(toml).is_err());
+        assert!(ConfigTable::from_str(toml).is_err());
     }
 
     #[test]
     fn reject_wrong_server_id_length() {
         let toml = r#"
+[[configs]]
 config_id = 0
 server_id_length = 3
 nonce_length = 13
 
-[[servers]]
+[[configs.servers]]
 id = "0001"
 address = "10.0.1.10"
 "#;
-        let err = RouteConfig::from_str(toml).unwrap_err();
-        
+        let err = ConfigTable::from_str(toml).unwrap_err();
         assert!(err.to_string().contains("server_id_length * 2"));
     }
 
     #[test]
     fn reject_bad_key_length() {
         let toml = r#"
+[[configs]]
 config_id = 0
 server_id_length = 3
 nonce_length = 13
 key = "0102030405"
 "#;
-        let err = RouteConfig::from_str(toml).unwrap_err();
-        
+        let err = ConfigTable::from_str(toml).unwrap_err();
         assert!(err.to_string().contains("16 bytes"));
     }
 
     #[test]
     fn reject_server_id_hex_length_mismatch() {
-        // server_id_length = 3 expects 6 hex chars; "01020304" is 8
         let toml = r#"
+[[configs]]
 config_id = 0
 server_id_length = 3
 nonce_length = 4
 
-[[servers]]
+[[configs.servers]]
 id = "01020304"
 address = "10.0.1.10"
 "#;
-        let err = RouteConfig::from_str(toml).unwrap_err();
-        
+        let err = ConfigTable::from_str(toml).unwrap_err();
         assert!(err.to_string().contains("server_id_length * 2"));
+    }
+
+    #[test]
+    fn fallback_cid_length_from_first_active() {
+        let table = ConfigTable::from_str(SAMPLE_TOML).unwrap();
+        assert_eq!(table.fallback_cid_length(), Some(17));
     }
 }

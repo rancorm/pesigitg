@@ -25,7 +25,7 @@ use pesigitg_common::{PID_FILE, PROC_NAME, DEFAULT_ROUTE_CONFIG, current_pid, ex
 
 use args::{Args, parse_args};
 use config::daemon::FileConfig;
-use config::route::RouteConfig;
+use config::route::ConfigTable;
 use pidfile::PidFile;
 use stats::{Snapshot, StatsTable};
 use threading::{get_hw_queues, plan_threads, WorkerPool};
@@ -81,7 +81,7 @@ fn init_logging() -> Result<()> {
     Ok(())
 }
 
-fn reload_config(args: &mut Args, route_config: &Arc<RwLock<RouteConfig>>) {
+fn reload_config(args: &mut Args, route_config: &Arc<RwLock<ConfigTable>>) {
     systemd_notify!(sd_notify::NotifyState::Reloading);
 
     if let Some(ref path) = args.config.clone() {
@@ -104,13 +104,16 @@ fn reload_config(args: &mut Args, route_config: &Arc<RwLock<RouteConfig>>) {
 
     let rc_path = args.routeconfig.as_ref();
     let new_rc = match rc_path {
-        Some(path) => RouteConfig::from_file(path),
-        None => RouteConfig::from_file(DEFAULT_ROUTE_CONFIG),
+        Some(path) => ConfigTable::from_file(path),
+        None => ConfigTable::from_file(DEFAULT_ROUTE_CONFIG),
     };
 
     match new_rc {
         Ok(mut rc) => {
-            neigh::resolve_macs(&mut rc.servers);
+            for config in rc.configs_mut() {
+                neigh::resolve_macs(&mut config.servers);
+            }
+            rc.rebuild_fallback_servers();
 
             info!("route config reloaded: {}", rc.path.display());
             info!("{}", rc);
@@ -198,15 +201,18 @@ fn main() -> Result<()> {
 
     // Route config
     let mut route_config = match &args.routeconfig {
-        Some(path) => RouteConfig::from_file(path),
-        None => RouteConfig::from_file(DEFAULT_ROUTE_CONFIG),
+        Some(path) => ConfigTable::from_file(path),
+        None => ConfigTable::from_file(DEFAULT_ROUTE_CONFIG),
     }
     .map_err(|e| anyhow!("failed to load route config: {}", e))?;
 
     info!("Loaded route config: {}", route_config.path.display());
     info!("{}", route_config);
 
-    neigh::resolve_macs(&mut route_config.servers);
+    for config in route_config.configs_mut() {
+        neigh::resolve_macs(&mut config.servers);
+    }
+    route_config.rebuild_fallback_servers();
 
     let route_config = Arc::new(RwLock::new(route_config));
 

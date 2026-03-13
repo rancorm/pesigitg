@@ -10,7 +10,7 @@ use nix::sched::{sched_setaffinity, CpuSet};
 use nix::unistd::Pid;
 use xsk_rs::FrameDesc;
 
-use crate::config::route::RouteConfig;
+use crate::config::route::ConfigTable;
 use crate::conntable::ConnectionTable;
 use crate::ebpf::EbpfHandle;
 use crate::packet::{self, Verdict};
@@ -122,7 +122,7 @@ impl WorkerPool {
     pub fn spawn(
         threads: Vec<ThreadConfig>,
         interface: &str,
-        config: Arc<RwLock<RouteConfig>>,
+        config: Arc<RwLock<ConfigTable>>,
         ebpf: Arc<Mutex<EbpfHandle>>,
         shutdown: Arc<AtomicBool>,
         stats: Arc<StatsTable>,
@@ -182,7 +182,7 @@ impl WorkerPool {
 fn worker_loop(
     interface: &str,
     queue_id: u32,
-    config: &Arc<RwLock<RouteConfig>>,
+    config: &Arc<RwLock<ConfigTable>>,
     ebpf: &Arc<Mutex<EbpfHandle>>,
     shutdown: &AtomicBool,
     stats: &WorkerStats,

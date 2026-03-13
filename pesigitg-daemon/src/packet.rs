@@ -19,7 +19,7 @@ use pesigitg_common::{
 };
 
 use crate::cid;
-use crate::config::route::{RouteConfig, Server};
+use crate::config::route::{ConfigTable, Server};
 use crate::conntable::{ConnectionTable, DcidKey, FlowKey};
 
 /// Outcome of packet processing.
@@ -47,7 +47,7 @@ struct FrameMeta {
 ///    then fall back to consistent hashing over the 4-tuple.
 pub fn process_packet(
     frame: &mut [u8],
-    config: &RouteConfig,
+    table: &ConfigTable,
     conn: &mut ConnectionTable,
 ) -> Verdict {
     let meta = match parse_frame(frame) {
@@ -57,13 +57,13 @@ pub fn process_packet(
 
     let quic = &frame[meta.quic_offset..];
 
-    // Fast path: CID-based routing.
-    if let Some(dcid) = cid::extract_dcid(quic, config) {
+    // Fast path: CID-based routing via config table lookup.
+    if let Some((dcid, config)) = cid::lookup_config(quic, table) {
         if let Some(server_idx) = cid::resolve_server_idx(dcid, config) {
             let server = &config.servers[server_idx];
             if let Some(mac) = server.mac {
                 // Record DCID mapping for NAT rebinding resilience.
-                conn.record_dcid(DcidKey::from_slice(dcid), server_idx);
+                conn.record_dcid(DcidKey::from_slice(dcid), mac);
                 frame[..6].copy_from_slice(&mac);
                 return Verdict::CidForward;
             }
@@ -75,24 +75,19 @@ pub fn process_packet(
 
     // Fallback path: CID is unroutable (client-generated Initial, config
     // rotation mismatch, or reserved config_id 7).
-    let raw_dcid = cid::extract_raw_dcid(quic, config.cid_length());
+    let raw_dcid = table.fallback_cid_length()
+        .and_then(|len| cid::extract_raw_dcid(quic, len));
     let dcid_key = raw_dcid.map(DcidKey::from_slice);
 
     // Check connection table: 4-tuple index first, then DCID index.
-    if let Some(server_idx) = conn.lookup(&meta.flow, dcid_key.as_ref()) {
-        if let Some(server) = config.servers.get(server_idx) {
-            if let Some(mac) = server.mac {
-                frame[..6].copy_from_slice(&mac);
-                return Verdict::FallbackForward;
-            }
-        }
+    if let Some(mac) = conn.lookup(&meta.flow, dcid_key.as_ref()) {
+        frame[..6].copy_from_slice(&mac);
+        return Verdict::FallbackForward;
     }
 
     // Consistent hash over 4-tuple to select a backend.
-    if let Some(server_idx) = fallback_server_idx(&meta.flow, &config.servers) {
-        // Safe: fallback_server_idx only returns servers with mac.is_some().
-        let mac = config.servers[server_idx].mac.unwrap();
-        conn.insert(meta.flow, dcid_key, server_idx);
+    if let Some(mac) = fallback_mac(&meta.flow, &table.fallback_servers) {
+        conn.insert(meta.flow, dcid_key, mac);
         frame[..6].copy_from_slice(&mac);
         return Verdict::FallbackForward;
     }
@@ -103,8 +98,8 @@ pub fn process_packet(
 /// Select a backend server via consistent hashing of the 4-tuple.
 ///
 /// Only considers servers that have a resolved MAC address. Returns the
-/// index into `servers`, or `None` if no server is routable.
-fn fallback_server_idx(flow: &FlowKey, servers: &[Server]) -> Option<usize> {
+/// MAC address, or `None` if no server is routable.
+fn fallback_mac(flow: &FlowKey, servers: &[Server]) -> Option<[u8; 6]> {
     let routable_count = servers.iter().filter(|s| s.mac.is_some()).count();
     if routable_count == 0 {
         return None;
@@ -116,10 +111,9 @@ fn fallback_server_idx(flow: &FlowKey, servers: &[Server]) -> Option<usize> {
 
     servers
         .iter()
-        .enumerate()
-        .filter(|(_, s)| s.mac.is_some())
+        .filter(|s| s.mac.is_some())
         .nth(target)
-        .map(|(i, _)| i)
+        .and_then(|s| s.mac)
 }
 
 /// Parse a raw Ethernet frame to extract the QUIC payload offset and 4-tuple.
@@ -248,12 +242,10 @@ fn parse_frame_ipv6(frame: &[u8]) -> Option<FrameMeta> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::route::Encryption;
-    use std::path::PathBuf;
+    use crate::config::route::{Encryption, RouteConfig};
 
-    fn make_config() -> RouteConfig {
-        RouteConfig {
-            path: PathBuf::new(),
+    fn make_config() -> ConfigTable {
+        ConfigTable::with_configs(vec![RouteConfig {
             config_id: 0,
             first_octet_encodes_cid_length: true,
             server_id_length: 3,
@@ -264,12 +256,11 @@ mod tests {
                 address: "10.0.1.10".parse().unwrap(),
                 mac: Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01]),
             }],
-        }
+        }])
     }
 
-    fn make_config_two_servers() -> RouteConfig {
-        RouteConfig {
-            path: PathBuf::new(),
+    fn make_config_two_servers() -> ConfigTable {
+        ConfigTable::with_configs(vec![RouteConfig {
             config_id: 0,
             first_octet_encodes_cid_length: true,
             server_id_length: 3,
@@ -287,7 +278,7 @@ mod tests {
                     mac: Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x02]),
                 },
             ],
-        }
+        }])
     }
 
     /// Build a minimal IPv4/UDP Ethernet frame with the given QUIC payload.
@@ -550,7 +541,7 @@ mod tests {
             dst_port: 9999,
         };
 
-        assert_eq!(conn.lookup(&unrelated_flow, Some(&dcid_key)), Some(0));
+        assert_eq!(conn.lookup(&unrelated_flow, Some(&dcid_key)), Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01]));
     }
 
     #[test]
