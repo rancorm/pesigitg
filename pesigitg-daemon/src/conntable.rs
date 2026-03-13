@@ -8,9 +8,10 @@
 //! Each AF_XDP worker thread owns its own table -- no cross-thread sharing
 //! is needed because RSS/flow director pins flows to NIC queues.
 
-use std::collections::HashMap;
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
+
+use rustc_hash::FxHashMap;
 
 /// TTL for connection table entries.
 ///
@@ -21,6 +22,10 @@ const ENTRY_TTL: Duration = Duration::from_secs(5);
 
 /// How often to sweep expired entries from the table.
 const SWEEP_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Pre-allocated capacity for each hash map. Sized above expected peak
+/// concurrent handshakes so the maps never resize during normal operation.
+const INITIAL_CAPACITY: usize = 8192;
 
 /// 4-tuple flow identifier.
 #[derive(Hash, Eq, PartialEq)]
@@ -75,16 +80,16 @@ impl Entry {
 
 /// Per-worker connection table with 4-tuple and DCID indexes.
 pub struct ConnectionTable {
-    by_flow: HashMap<FlowKey, Entry>,
-    by_dcid: HashMap<DcidKey, Entry>,
+    by_flow: FxHashMap<FlowKey, Entry>,
+    by_dcid: FxHashMap<DcidKey, Entry>,
     last_sweep: Instant,
 }
 
 impl ConnectionTable {
     pub fn new() -> Self {
         ConnectionTable {
-            by_flow: HashMap::new(),
-            by_dcid: HashMap::new(),
+            by_flow: FxHashMap::with_capacity_and_hasher(INITIAL_CAPACITY, Default::default()),
+            by_dcid: FxHashMap::with_capacity_and_hasher(INITIAL_CAPACITY, Default::default()),
             last_sweep: Instant::now(),
         }
     }

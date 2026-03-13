@@ -25,6 +25,7 @@ libc = "0.2"
 bytesize = "2.3"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
+rustc-hash = "2"
 xsk-rs = "0.4"
 
 [build-dependencies]
