@@ -60,11 +60,14 @@ fn build_ebpf(release: bool) -> PathBuf {
 
     let profile = if release { "release" } else { "debug" };
 
-    ebpf_dir
+    let obj = ebpf_dir
         .join("target")
         .join("bpfel-unknown-none")
         .join(profile)
-        .join("pesigitg-ebpf")
+        .join("pesigitg-ebpf");
+
+    print_size(&obj);
+    obj
 }
 
 fn build_daemon(release: bool, ebpf_obj: &std::path::Path) {
@@ -73,7 +76,7 @@ fn build_daemon(release: bool, ebpf_obj: &std::path::Path) {
     cmd.current_dir(workspace_root())
         .env("PESIGITG_EBPF_OBJ", ebpf_obj)
         .args(["build", "-p", "pesigitg-daemon"]);
-    
+
     if release {
         cmd.arg("--release");
     }
@@ -85,6 +88,24 @@ fn build_daemon(release: bool, ebpf_obj: &std::path::Path) {
     if !status.success() {
         eprintln!("daemon build failed");
         process::exit(status.code().unwrap_or(1));
+    }
+
+    let profile = if release { "release" } else { "debug" };
+    let bin = workspace_root()
+        .join("target")
+        .join(profile)
+        .join("pesigitgd");
+
+    print_size(&bin);
+}
+
+fn print_size(path: &std::path::Path) {
+    let status = Command::new("rust-size")
+        .arg(path)
+        .status();
+
+    if let Err(e) = status {
+        eprintln!("warning: rust-size not found ({}), skipping size report", e);
     }
 }
 
