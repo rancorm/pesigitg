@@ -96,3 +96,51 @@ example.com.  300  IN  HTTPS  1 . alpn=h3,h2 ipv4hint=192.0.2.1 ipv6hint=2001:db
 -- **`port`** — if the service runs on a non-standard port.
 -- **`ech`** — Encrypted Client Hello configuration, enabling TLS encryption of the SNI field for privacy.
 -- **`no-default-alpn`** — indicates the server does not support default protocols, the client must use one of the listed ALPNs.
+
+## Glossary
+
+| Acronym | Full Name | Context |
+|---------|-----------|---------|
+| **AES** | Advanced Encryption Standard | Block cipher used for CID encryption |
+| **AES-NI** | AES New Instructions | x86 CPU instruction set for hardware-accelerated AES; required at runtime |
+| **AF_XDP** | Address Family XDP | User-space socket interface to XDP for kernel-bypass packet I/O |
+| **ARP** | Address Resolution Protocol | IPv4 link-layer address resolution |
+| **BPF** | Berkeley Packet Filter | In-kernel packet filtering VM; see eBPF |
+| **CID** | Connection ID | QUIC connection identifier used for routing decisions |
+| **DCID** | Destination Connection ID | CID carried in incoming QUIC packets; used for server lookup |
+| **DNS** | Domain Name System | Name resolution; HTTPS RR / SVCB records |
+| **DSR** | Direct Server Return | Load-balancing mode where replies bypass the LB |
+| **eBPF** | extended Berkeley Packet Filter | In-kernel virtual machine running the XDP packet-processing programs |
+| **ECB** | Electronic Code Book | AES block cipher mode used in the Feistel-based CID encryption |
+| **ECH** | Encrypted Client Hello | TLS extension that encrypts the SNI field for privacy |
+| **ECMP** | Equal-Cost Multi-Path | Routing strategy that distributes flows across multiple next hops |
+| **ETH** | Ethernet | Layer-2 framing (EtherType constants `ETH_P_IP`, `ETH_P_IPV6`) |
+| **ICMP** | Internet Control Message Protocol | Error and diagnostic messages for IPv4 |
+| **ICMPv6** | ICMP for IPv6 | Error and diagnostic messages for IPv6 |
+| **IP** | Internet Protocol | Network-layer protocol; both v4 and v6 |
+| **L2** | Layer 2 | Data link layer (Ethernet frames, MAC addresses) |
+| **L3** | Layer 3 | Network layer (IP packets) |
+| **LLVM** | Low Level Virtual Machine | Compiler infrastructure; used by `bpf-linker` for eBPF object files |
+| **MAC** | Media Access Control | 48-bit hardware address on Ethernet interfaces |
+| **MTU** | Maximum Transmission Unit | Largest packet size a link can carry |
+| **NAT** | Network Address Translation | Client address/port rewriting; QUIC CID routing survives NAT rebinding |
+| **NDP** | Neighbor Discovery Protocol | IPv6 link-layer address resolution (equivalent of ARP) |
+| **NIC** | Network Interface Card | Physical or virtual network interface |
+| **NUMA** | Non-Uniform Memory Access | CPU/memory topology; used for socket-aware thread placement |
+| **PID** | Process ID | Unix process identifier; managed via PID file |
+| **QUIC** | Quick UDP Internet Connections | UDP-based transport protocol; the primary protocol being load-balanced |
+| **QUIC-LB** | QUIC Load Balancing | Specification for CID-based QUIC-aware load balancing |
+| **RSS** | Receive Side Scaling | NIC feature that distributes incoming packets across hardware queues |
+| **RTT** | Round Trip Time | Network latency measurement |
+| **RX** | Receive | Incoming packet direction / receive queues |
+| **SCID** | Source Connection ID | CID chosen by the server; encodes routing information |
+| **SIGHUP** | Signal Hang Up | Unix signal used to trigger live config reload |
+| **SIGINT** | Signal Interrupt | Unix signal sent by Ctrl+C |
+| **SIGTERM** | Signal Terminate | Unix signal for graceful shutdown |
+| **SNI** | Server Name Indication | TLS extension carrying the target hostname |
+| **TLS** | Transport Layer Security | Cryptographic protocol layered over TCP (or built into QUIC) |
+| **TTL** | Time To Live | IPv4 header field limiting packet lifetime (hop count) |
+| **TX** | Transmit | Outgoing packet direction / transmit queues |
+| **UMEM** | User Memory | Shared memory region for AF_XDP packet buffers |
+| **VIP** | Virtual IP | Frontend IP address exposed to clients by the load balancer |
+| **XDP** | eXpress Data Path | Linux kernel hook for early, high-performance packet processing |
