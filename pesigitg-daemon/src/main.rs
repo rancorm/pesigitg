@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use log::{error, warn, info};
 use nix::unistd::{chdir, dup2_stdin, dup2_stdout, dup2_stderr, fork, setsid, ForkResult};
-use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
+use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM, SIGUSR1};
 use signal_hook::iterator::Signals;
 use anyhow::{anyhow, bail, Result};
 use pesigitg_common::{PID_FILE, PROC_NAME, DEFAULT_ROUTE_CONFIG, current_pid, exit};
@@ -152,7 +152,7 @@ fn main() -> Result<()> {
         None
     };
 
-    let mut signals = Signals::new([SIGINT, SIGTERM, SIGHUP])?;
+    let mut signals = Signals::new([SIGINT, SIGTERM, SIGHUP, SIGUSR1])?;
 
     // Output details
     info!("PID: {}", current_pid());
@@ -261,6 +261,16 @@ fn main() -> Result<()> {
         for sig in signals.pending() {
             match sig {
                 SIGHUP => reload_config(&mut args, &route_config),
+                SIGUSR1 => {
+                    let cumulative = stats.aggregate();
+                    info!(
+                        "stats dump: rx={} fwd={} (cid={}{} fallback={} icmp={}) pass={}",
+                        cumulative.rx_packets, cumulative.forwarded,
+                        cumulative.cid_routed, cumulative.format_cid_by_config(),
+                        cumulative.fallback_routed,
+                        cumulative.icmp_forwarded, cumulative.passed,
+                    );
+                }
                 SIGINT | SIGTERM => {
                     systemd_notify!(sd_notify::NotifyState::Stopping);
 
