@@ -14,8 +14,10 @@ use std::hash::{Hash, Hasher};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use pesigitg_common::{
-    ETH_HDR_LEN, ETH_P_IP, ETH_P_IPV6, IPPROTO_DSTOPTS, IPPROTO_FRAGMENT, IPPROTO_HOPOPTS,
-    IPPROTO_ROUTING, IPPROTO_UDP, IPV4_MIN_HDR_LEN, IPV6_HDR_LEN, MAX_IPV6_EXT_HDRS, UDP_HDR_LEN,
+    ETH_HDR_LEN, ETH_P_IP, ETH_P_IPV6, ICMP_DEST_UNREACH, ICMP_HDR_LEN, ICMP_TIME_EXCEEDED,
+    ICMPV6_DEST_UNREACH, ICMPV6_PACKET_TOO_BIG, ICMPV6_TIME_EXCEEDED, IPPROTO_DSTOPTS,
+    IPPROTO_FRAGMENT, IPPROTO_HOPOPTS, IPPROTO_ICMP, IPPROTO_ICMPV6, IPPROTO_ROUTING, IPPROTO_UDP,
+    IPV4_MIN_HDR_LEN, IPV6_HDR_LEN, MAX_IPV6_EXT_HDRS, UDP_HDR_LEN,
 };
 
 use crate::cid;
@@ -28,14 +30,24 @@ pub enum Verdict {
     CidForward,
     /// Fallback-routed: connection table hit or consistent hash.
     FallbackForward,
+    /// ICMP error routed back to the originating backend server.
+    IcmpForward,
     /// Packet not modified; pass through to the kernel stack.
     Pass,
 }
 
-/// Parsed frame metadata: QUIC payload offset and 4-tuple flow key.
-struct FrameMeta {
-    quic_offset: usize,
-    flow: FlowKey,
+/// Parsed frame metadata returned by the frame parser.
+enum FrameMeta {
+    /// Regular UDP/QUIC packet.
+    Udp {
+        quic_offset: usize,
+        flow: FlowKey,
+    },
+    /// ICMP error containing an echoed UDP/QUIC packet.
+    Icmp {
+        inner_quic_offset: usize,
+        reversed_flow: FlowKey,
+    },
 }
 
 /// Process a raw Ethernet frame containing a QUIC/UDP packet.
@@ -55,7 +67,25 @@ pub fn process_packet(
         None => return Verdict::Pass,
     };
 
-    let quic = &frame[meta.quic_offset..];
+    match meta {
+        FrameMeta::Udp { quic_offset, flow } => {
+            process_udp(frame, table, conn, quic_offset, flow)
+        }
+        FrameMeta::Icmp { inner_quic_offset, reversed_flow } => {
+            process_icmp(frame, table, conn, inner_quic_offset, reversed_flow)
+        }
+    }
+}
+
+/// Process a regular UDP/QUIC packet.
+fn process_udp(
+    frame: &mut [u8],
+    table: &ConfigTable,
+    conn: &mut ConnectionTable,
+    quic_offset: usize,
+    flow: FlowKey,
+) -> Verdict {
+    let quic = &frame[quic_offset..];
 
     // Fast path: CID-based routing via config table lookup.
     if let Some((dcid, config)) = cid::lookup_config(quic, table) {
@@ -80,16 +110,57 @@ pub fn process_packet(
     let dcid_key = raw_dcid.map(DcidKey::from_slice);
 
     // Check connection table: 4-tuple index first, then DCID index.
-    if let Some(mac) = conn.lookup(&meta.flow, dcid_key.as_ref()) {
+    if let Some(mac) = conn.lookup(&flow, dcid_key.as_ref()) {
         frame[..6].copy_from_slice(&mac);
         return Verdict::FallbackForward;
     }
 
     // Consistent hash over 4-tuple to select a backend.
-    if let Some(mac) = fallback_mac(&meta.flow, &table.fallback_servers) {
-        conn.insert(meta.flow, dcid_key, mac);
+    if let Some(mac) = fallback_mac(&flow, &table.fallback_servers) {
+        conn.insert(flow, dcid_key, mac);
         frame[..6].copy_from_slice(&mac);
         return Verdict::FallbackForward;
+    }
+
+    Verdict::Pass
+}
+
+/// Process an ICMP error packet containing an echoed QUIC packet.
+///
+/// Strategy 1: If the inner QUIC has a long header, extract the Source CID
+/// (server-generated) and route via CID decryption — fully stateless.
+///
+/// Strategy 2: Fall back to reversed 4-tuple connection table lookup.
+fn process_icmp(
+    frame: &mut [u8],
+    table: &ConfigTable,
+    conn: &mut ConnectionTable,
+    inner_quic_offset: usize,
+    reversed_flow: FlowKey,
+) -> Verdict {
+    let inner_quic = &frame[inner_quic_offset..];
+
+    // Strategy 1: Extract SCID from inner long header and route via CID.
+    if let Some(scid) = cid::extract_scid(inner_quic) {
+        if !scid.is_empty() {
+            let config_id = scid[0] >> 5;
+            if config_id != 7 {
+                if let Some(config) = table.get(config_id) {
+                    if let Some(server_idx) = cid::resolve_server_idx(scid, config) {
+                        if let Some(mac) = config.servers[server_idx].mac {
+                            frame[..6].copy_from_slice(&mac);
+                            return Verdict::IcmpForward;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Strategy 2: Reversed 4-tuple connection table lookup.
+    if let Some(mac) = conn.lookup(&reversed_flow, None) {
+        frame[..6].copy_from_slice(&mac);
+        return Verdict::IcmpForward;
     }
 
     Verdict::Pass
@@ -141,38 +212,109 @@ fn parse_frame_ipv4(frame: &[u8]) -> Option<FrameMeta> {
         return None;
     }
 
-    if frame[ETH_HDR_LEN + 9] != IPPROTO_UDP {
+    let protocol = frame[ETH_HDR_LEN + 9];
+
+    match protocol {
+        IPPROTO_UDP => {
+            let udp_offset = ETH_HDR_LEN + ihl;
+            let quic_offset = udp_offset + UDP_HDR_LEN;
+            if quic_offset > frame.len() {
+                return None;
+            }
+
+            let src_addr = IpAddr::V4(Ipv4Addr::new(
+                frame[ETH_HDR_LEN + 12],
+                frame[ETH_HDR_LEN + 13],
+                frame[ETH_HDR_LEN + 14],
+                frame[ETH_HDR_LEN + 15],
+            ));
+            let dst_addr = IpAddr::V4(Ipv4Addr::new(
+                frame[ETH_HDR_LEN + 16],
+                frame[ETH_HDR_LEN + 17],
+                frame[ETH_HDR_LEN + 18],
+                frame[ETH_HDR_LEN + 19],
+            ));
+            let src_port = u16::from_be_bytes([frame[udp_offset], frame[udp_offset + 1]]);
+            let dst_port = u16::from_be_bytes([frame[udp_offset + 2], frame[udp_offset + 3]]);
+
+            Some(FrameMeta::Udp {
+                quic_offset,
+                flow: FlowKey {
+                    src_addr,
+                    dst_addr,
+                    src_port,
+                    dst_port,
+                },
+            })
+        }
+        IPPROTO_ICMP => parse_frame_icmp_ipv4(frame, ihl),
+        _ => None,
+    }
+}
+
+/// Parse an ICMP error packet with an echoed IPv4/UDP/QUIC inner packet.
+fn parse_frame_icmp_ipv4(frame: &[u8], outer_ihl: usize) -> Option<FrameMeta> {
+    let icmp_offset = ETH_HDR_LEN + outer_ihl;
+    if frame.len() < icmp_offset + ICMP_HDR_LEN {
         return None;
     }
 
-    let udp_offset = ETH_HDR_LEN + ihl;
-    let quic_offset = udp_offset + UDP_HDR_LEN;
-    if quic_offset > frame.len() {
+    let icmp_type = frame[icmp_offset];
+    if icmp_type != ICMP_DEST_UNREACH && icmp_type != ICMP_TIME_EXCEEDED {
         return None;
     }
 
-    let src_addr = IpAddr::V4(Ipv4Addr::new(
-        frame[ETH_HDR_LEN + 12],
-        frame[ETH_HDR_LEN + 13],
-        frame[ETH_HDR_LEN + 14],
-        frame[ETH_HDR_LEN + 15],
-    ));
-    let dst_addr = IpAddr::V4(Ipv4Addr::new(
-        frame[ETH_HDR_LEN + 16],
-        frame[ETH_HDR_LEN + 17],
-        frame[ETH_HDR_LEN + 18],
-        frame[ETH_HDR_LEN + 19],
-    ));
-    let src_port = u16::from_be_bytes([frame[udp_offset], frame[udp_offset + 1]]);
-    let dst_port = u16::from_be_bytes([frame[udp_offset + 2], frame[udp_offset + 3]]);
+    // Inner IPv4 header starts after ICMP header.
+    let inner_ip_offset = icmp_offset + ICMP_HDR_LEN;
+    if frame.len() < inner_ip_offset + IPV4_MIN_HDR_LEN {
+        return None;
+    }
 
-    Some(FrameMeta {
-        quic_offset,
-        flow: FlowKey {
-            src_addr,
-            dst_addr,
-            src_port,
-            dst_port,
+    let inner_ihl = ((frame[inner_ip_offset] & 0x0F) as usize) * 4;
+    if inner_ihl < IPV4_MIN_HDR_LEN {
+        return None;
+    }
+
+    if frame[inner_ip_offset + 9] != IPPROTO_UDP {
+        return None;
+    }
+
+    let inner_udp_offset = inner_ip_offset + inner_ihl;
+    let inner_quic_offset = inner_udp_offset + UDP_HDR_LEN;
+    if inner_udp_offset + 4 > frame.len() {
+        return None;
+    }
+
+    // Inner packet is server→client; reverse to get client→server flow
+    // for connection table lookup.
+    let inner_src = IpAddr::V4(Ipv4Addr::new(
+        frame[inner_ip_offset + 12],
+        frame[inner_ip_offset + 13],
+        frame[inner_ip_offset + 14],
+        frame[inner_ip_offset + 15],
+    ));
+    let inner_dst = IpAddr::V4(Ipv4Addr::new(
+        frame[inner_ip_offset + 16],
+        frame[inner_ip_offset + 17],
+        frame[inner_ip_offset + 18],
+        frame[inner_ip_offset + 19],
+    ));
+    let inner_src_port = u16::from_be_bytes([
+        frame[inner_udp_offset],
+        frame[inner_udp_offset + 1],
+    ]);
+    let inner_dst_port = u16::from_be_bytes([
+        frame[inner_udp_offset + 2],
+        frame[inner_udp_offset + 3],
+    ]);
+
+    Some(FrameMeta::Icmp {
+        inner_quic_offset,
+        reversed_flow: FlowKey {
+            src_addr: inner_dst,
+            dst_addr: inner_src,
+            src_port: inner_dst_port,
+            dst_port: inner_src_port,
         },
     })
 }
@@ -195,7 +337,7 @@ fn parse_frame_ipv6(frame: &[u8]) -> Option<FrameMeta> {
 
     for _ in 0..MAX_IPV6_EXT_HDRS {
         match next_hdr {
-            IPPROTO_UDP => break,
+            IPPROTO_UDP | IPPROTO_ICMPV6 => break,
             IPPROTO_FRAGMENT => {
                 if offset >= frame.len() {
                     return None;
@@ -215,26 +357,105 @@ fn parse_frame_ipv6(frame: &[u8]) -> Option<FrameMeta> {
         }
     }
 
-    if next_hdr != IPPROTO_UDP {
+    match next_hdr {
+        IPPROTO_UDP => {
+            let udp_offset = offset;
+            let quic_offset = udp_offset + UDP_HDR_LEN;
+            if quic_offset > frame.len() {
+                return None;
+            }
+
+            let src_port = u16::from_be_bytes([frame[udp_offset], frame[udp_offset + 1]]);
+            let dst_port = u16::from_be_bytes([frame[udp_offset + 2], frame[udp_offset + 3]]);
+
+            Some(FrameMeta::Udp {
+                quic_offset,
+                flow: FlowKey {
+                    src_addr,
+                    dst_addr,
+                    src_port,
+                    dst_port,
+                },
+            })
+        }
+        IPPROTO_ICMPV6 => parse_frame_icmpv6(frame, offset),
+        _ => None,
+    }
+}
+
+/// Parse an ICMPv6 error packet with an echoed IPv6/UDP/QUIC inner packet.
+fn parse_frame_icmpv6(frame: &[u8], icmp_offset: usize) -> Option<FrameMeta> {
+    if frame.len() < icmp_offset + ICMP_HDR_LEN {
         return None;
     }
 
-    let udp_offset = offset;
-    let quic_offset = udp_offset + UDP_HDR_LEN;
-    if quic_offset > frame.len() {
+    let icmp_type = frame[icmp_offset];
+    if icmp_type != ICMPV6_DEST_UNREACH
+        && icmp_type != ICMPV6_PACKET_TOO_BIG
+        && icmp_type != ICMPV6_TIME_EXCEEDED
+    {
         return None;
     }
 
-    let src_port = u16::from_be_bytes([frame[udp_offset], frame[udp_offset + 1]]);
-    let dst_port = u16::from_be_bytes([frame[udp_offset + 2], frame[udp_offset + 3]]);
+    // Inner IPv6 header starts after ICMPv6 header.
+    let inner_ip_offset = icmp_offset + ICMP_HDR_LEN;
+    if frame.len() < inner_ip_offset + IPV6_HDR_LEN {
+        return None;
+    }
 
-    Some(FrameMeta {
-        quic_offset,
-        flow: FlowKey {
-            src_addr,
-            dst_addr,
-            src_port,
-            dst_port,
+    let mut inner_src = [0u8; 16];
+    let mut inner_dst = [0u8; 16];
+    inner_src.copy_from_slice(&frame[inner_ip_offset + 8..inner_ip_offset + 24]);
+    inner_dst.copy_from_slice(&frame[inner_ip_offset + 24..inner_ip_offset + 40]);
+
+    let inner_src_addr = IpAddr::V6(Ipv6Addr::from(inner_src));
+    let inner_dst_addr = IpAddr::V6(Ipv6Addr::from(inner_dst));
+
+    // Walk inner IPv6 extension headers to find UDP.
+    let mut inner_next_hdr = frame[inner_ip_offset + 6];
+    let mut inner_offset = inner_ip_offset + IPV6_HDR_LEN;
+
+    for _ in 0..MAX_IPV6_EXT_HDRS {
+        match inner_next_hdr {
+            IPPROTO_UDP => break,
+            IPPROTO_FRAGMENT => {
+                if inner_offset >= frame.len() {
+                    return None;
+                }
+                inner_next_hdr = frame[inner_offset];
+                inner_offset += 8;
+            }
+            IPPROTO_HOPOPTS | IPPROTO_ROUTING | IPPROTO_DSTOPTS => {
+                if inner_offset + 1 >= frame.len() {
+                    return None;
+                }
+                inner_next_hdr = frame[inner_offset];
+                let ext_len = frame[inner_offset + 1] as usize;
+                inner_offset += (ext_len + 1) * 8;
+            }
+            _ => return None,
+        }
+    }
+
+    if inner_next_hdr != IPPROTO_UDP {
+        return None;
+    }
+
+    if inner_offset + 4 > frame.len() {
+        return None;
+    }
+
+    let inner_src_port = u16::from_be_bytes([frame[inner_offset], frame[inner_offset + 1]]);
+    let inner_dst_port = u16::from_be_bytes([frame[inner_offset + 2], frame[inner_offset + 3]]);
+    let inner_quic_offset = inner_offset + UDP_HDR_LEN;
+
+    Some(FrameMeta::Icmp {
+        inner_quic_offset,
+        reversed_flow: FlowKey {
+            src_addr: inner_dst_addr,
+            dst_addr: inner_src_addr,
+            src_port: inner_dst_port,
+            dst_port: inner_src_port,
         },
     })
 }
@@ -563,6 +784,192 @@ mod tests {
         assert_eq!(&frame1[..6], &frame2[..6]);
     }
 
+    // -- ICMP path tests --
+
+    /// Build an IPv4 ICMP Destination Unreachable frame wrapping an inner
+    /// IPv4/UDP/QUIC packet (server→client direction).
+    fn build_icmp_ipv4_frame(inner_quic: &[u8], inner_src_ip: [u8; 4], inner_dst_ip: [u8; 4], inner_src_port: u16, inner_dst_port: u16) -> Vec<u8> {
+        let mut f = Vec::new();
+
+        // Ethernet
+        f.extend_from_slice(&[0xff; 6]); // dst
+        f.extend_from_slice(&[0x00; 6]); // src
+        f.extend_from_slice(&ETH_P_IP.to_be_bytes());
+
+        // Outer IPv4 header (20 bytes, protocol=ICMP)
+        f.push(0x45);
+        f.push(0x00);
+        // total length placeholder — fill after building
+        let total_len_pos = f.len();
+        f.extend_from_slice(&[0x00; 2]);
+        f.extend_from_slice(&[0x00; 4]); // ident, flags, frag
+        f.push(0x40); // TTL
+        f.push(IPPROTO_ICMP);
+        f.extend_from_slice(&[0x00; 2]); // checksum
+        f.extend_from_slice(&[192, 168, 1, 1]); // src (router)
+        f.extend_from_slice(&[10, 0, 1, 1]); // dst (VIP)
+
+        // ICMP header: type=3 (Dest Unreach), code=4 (Frag Needed), checksum, MTU
+        f.push(ICMP_DEST_UNREACH);
+        f.push(0x04); // code: fragmentation needed
+        f.extend_from_slice(&[0x00; 2]); // checksum
+        f.extend_from_slice(&[0x00; 2]); // unused
+        f.extend_from_slice(&0x05dcu16.to_be_bytes()); // next-hop MTU
+
+        // Inner IPv4 header (server→client)
+        f.push(0x45);
+        f.push(0x00);
+        let inner_total = (20 + 8 + inner_quic.len()) as u16;
+        f.extend_from_slice(&inner_total.to_be_bytes());
+        f.extend_from_slice(&[0x00; 4]);
+        f.push(0x40);
+        f.push(IPPROTO_UDP);
+        f.extend_from_slice(&[0x00; 2]);
+        f.extend_from_slice(&inner_src_ip); // server (VIP)
+        f.extend_from_slice(&inner_dst_ip); // client
+
+        // Inner UDP header
+        f.extend_from_slice(&inner_src_port.to_be_bytes());
+        f.extend_from_slice(&inner_dst_port.to_be_bytes());
+        let inner_udp_len = (8 + inner_quic.len()) as u16;
+        f.extend_from_slice(&inner_udp_len.to_be_bytes());
+        f.extend_from_slice(&[0x00; 2]);
+
+        // Inner QUIC payload
+        f.extend_from_slice(inner_quic);
+
+        // Patch outer IPv4 total length
+        let outer_total = (f.len() - ETH_HDR_LEN) as u16;
+        f[total_len_pos..total_len_pos + 2].copy_from_slice(&outer_total.to_be_bytes());
+
+        f
+    }
+
+    /// Build a QUIC long header with both DCID and SCID (server's response).
+    fn build_quic_long_header_with_scid(
+        dcid: &[u8],
+        scid_config_id: u8,
+        scid_server_id: &[u8],
+        scid_nonce: &[u8],
+    ) -> Vec<u8> {
+        let scid_len = 1 + scid_server_id.len() + scid_nonce.len();
+        let mut q = Vec::new();
+        q.push(0xc0); // Long Header
+        q.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]); // version
+        q.push(dcid.len() as u8); // DCID length
+        q.extend_from_slice(dcid); // DCID (client-generated)
+        q.push(scid_len as u8); // SCID length
+        q.push(scid_config_id << 5); // SCID first octet
+        q.extend_from_slice(scid_server_id);
+        q.extend_from_slice(scid_nonce);
+        q
+    }
+
+    #[test]
+    fn icmp_scid_routes_to_server() {
+        // ICMP containing a server's long-header response: SCID is routable.
+        let config = make_config();
+        let inner_quic = build_quic_long_header_with_scid(
+            &[0xde, 0xad], // client DCID (irrelevant)
+            0,             // config_id=0
+            &[0x00, 0x00, 0x01], // server_id
+            &[0xaa; 13],  // nonce
+        );
+        let mut frame = build_icmp_ipv4_frame(
+            &inner_quic,
+            [10, 0, 1, 10], // server (VIP)
+            [10, 0, 0, 1],  // client
+            443, 12345,
+        );
+        let mut conn = ConnectionTable::new();
+
+        assert!(matches!(
+            process_packet(&mut frame, &config, &mut conn),
+            Verdict::IcmpForward
+        ));
+        assert_eq!(&frame[..6], &[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01]);
+    }
+
+    #[test]
+    fn icmp_fallback_to_connection_table() {
+        // ICMP containing a short header (no SCID). The reversed 4-tuple
+        // should match a connection table entry from a prior fallback-routed
+        // packet (CID fast path only records DCID, not the 4-tuple flow).
+        let config = make_config();
+        let mut conn = ConnectionTable::new();
+
+        // First, send a fallback-routed packet (wrong config_id=3, so CID
+        // path fails and it goes through consistent hash). This records the
+        // 4-tuple in the connection table.
+        let quic = build_quic_long_header(3, &[0x00, 0x00, 0x01], &[0x00; 13]);
+        let mut normal_frame = build_ipv4_frame_ex(&quic, [10, 0, 0, 1], 12345);
+        assert!(matches!(
+            process_packet(&mut normal_frame, &config, &mut conn),
+            Verdict::FallbackForward
+        ));
+
+        // Now an ICMP arrives with an inner short-header packet (server→client).
+        // Short header: no SCID, so we fall back to reversed 4-tuple lookup.
+        let mut inner_quic = vec![0x40]; // short header
+        inner_quic.extend_from_slice(&[0x00; 20]); // some payload
+        let mut icmp_frame = build_icmp_ipv4_frame(
+            &inner_quic,
+            [10, 0, 1, 10], // server src = VIP (dst of original flow)
+            [10, 0, 0, 1],  // client dst = client (src of original flow)
+            443,   // server port (dst_port of original flow)
+            12345, // client port (src_port of original flow)
+        );
+
+        assert!(matches!(
+            process_packet(&mut icmp_frame, &config, &mut conn),
+            Verdict::IcmpForward
+        ));
+        assert_eq!(&icmp_frame[..6], &[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01]);
+    }
+
+    #[test]
+    fn icmp_no_match_passes() {
+        // ICMP with a short header and no connection table entry → Pass.
+        let config = make_config();
+        let mut conn = ConnectionTable::new();
+
+        let mut inner_quic = vec![0x40]; // short header
+        inner_quic.extend_from_slice(&[0x00; 20]);
+        let mut frame = build_icmp_ipv4_frame(
+            &inner_quic,
+            [10, 0, 1, 10], [10, 0, 0, 99],
+            443, 54321,
+        );
+
+        assert!(matches!(
+            process_packet(&mut frame, &config, &mut conn),
+            Verdict::Pass
+        ));
+        // MAC not rewritten.
+        assert_eq!(&frame[..6], &[0xff; 6]);
+    }
+
+    #[test]
+    fn icmp_truncated_inner_quic_falls_back() {
+        // ICMP with truncated inner QUIC (not enough bytes for SCID).
+        // Should fall through to connection table lookup, then Pass.
+        let config = make_config();
+        let mut conn = ConnectionTable::new();
+
+        // Only 8 bytes of inner QUIC — long header but way too short for SCID.
+        let inner_quic = vec![0xc0, 0x00, 0x00, 0x00, 0x01, 0x02, 0x03, 0x04];
+        let mut frame = build_icmp_ipv4_frame(
+            &inner_quic,
+            [10, 0, 1, 10], [10, 0, 0, 1],
+            443, 12345,
+        );
+
+        assert!(matches!(
+            process_packet(&mut frame, &config, &mut conn),
+            Verdict::Pass
+        ));
+    }
+
     // -- Frame parsing tests --
 
     #[test]
@@ -602,6 +1009,11 @@ mod tests {
         f.extend_from_slice(&quic_payload);
 
         let meta = parse_frame(&f).unwrap();
-        assert_eq!(&f[meta.quic_offset..], &quic_payload);
+        match meta {
+            FrameMeta::Udp { quic_offset, .. } => {
+                assert_eq!(&f[quic_offset..], &quic_payload);
+            }
+            _ => panic!("expected FrameMeta::Udp"),
+        }
     }
 }

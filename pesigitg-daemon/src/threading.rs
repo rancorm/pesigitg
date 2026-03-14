@@ -235,6 +235,10 @@ fn worker_loop(
                     stats.record_fallback_forward();
                     tx_batch.push(rx_descs[i]);
                 }
+                Verdict::IcmpForward => {
+                    stats.record_icmp_forward();
+                    tx_batch.push(rx_descs[i]);
+                }
                 Verdict::Pass => {
                     stats.record_pass();
                     recycle_batch.push(rx_descs[i]);

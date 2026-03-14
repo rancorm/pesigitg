@@ -14,6 +14,7 @@ pub struct WorkerStats {
     forwarded: AtomicU64,
     cid_routed: AtomicU64,
     fallback_routed: AtomicU64,
+    icmp_forwarded: AtomicU64,
     passed: AtomicU64,
 }
 
@@ -29,6 +30,7 @@ impl WorkerStats {
             forwarded: AtomicU64::new(0),
             cid_routed: AtomicU64::new(0),
             fallback_routed: AtomicU64::new(0),
+            icmp_forwarded: AtomicU64::new(0),
             passed: AtomicU64::new(0),
         }
     }
@@ -52,6 +54,12 @@ impl WorkerStats {
     }
 
     #[inline(always)]
+    pub fn record_icmp_forward(&self) {
+        inc(&self.icmp_forwarded);
+        inc(&self.forwarded);
+    }
+
+    #[inline(always)]
     pub fn record_pass(&self) {
         inc(&self.passed);
     }
@@ -64,6 +72,7 @@ pub struct Snapshot {
     pub forwarded: u64,
     pub cid_routed: u64,
     pub fallback_routed: u64,
+    pub icmp_forwarded: u64,
     pub passed: u64,
 }
 
@@ -74,6 +83,7 @@ impl Snapshot {
             forwarded: self.forwarded.wrapping_sub(prev.forwarded),
             cid_routed: self.cid_routed.wrapping_sub(prev.cid_routed),
             fallback_routed: self.fallback_routed.wrapping_sub(prev.fallback_routed),
+            icmp_forwarded: self.icmp_forwarded.wrapping_sub(prev.icmp_forwarded),
             passed: self.passed.wrapping_sub(prev.passed),
         }
     }
@@ -104,6 +114,7 @@ impl StatsTable {
             total.forwarded += slot.forwarded.load(Ordering::Relaxed);
             total.cid_routed += slot.cid_routed.load(Ordering::Relaxed);
             total.fallback_routed += slot.fallback_routed.load(Ordering::Relaxed);
+            total.icmp_forwarded += slot.icmp_forwarded.load(Ordering::Relaxed);
             total.passed += slot.passed.load(Ordering::Relaxed);
         }
         total

@@ -24,11 +24,25 @@ pub const ETH_P_IP: u16 = 0x0800;
 pub const ETH_P_IPV6: u16 = 0x86dd;
 
 // IP protocol numbers
+pub const IPPROTO_ICMP: u8 = 1;
 pub const IPPROTO_HOPOPTS: u8 = 0;
 pub const IPPROTO_UDP: u8 = 17;
 pub const IPPROTO_ROUTING: u8 = 43;
 pub const IPPROTO_FRAGMENT: u8 = 44;
+pub const IPPROTO_ICMPV6: u8 = 58;
 pub const IPPROTO_DSTOPTS: u8 = 60;
+
+// ICMP header size (same for ICMPv4 and ICMPv6 error messages)
+pub const ICMP_HDR_LEN: usize = 8;
+
+// ICMPv4 error types
+pub const ICMP_DEST_UNREACH: u8 = 3;
+pub const ICMP_TIME_EXCEEDED: u8 = 11;
+
+// ICMPv6 error types
+pub const ICMPV6_DEST_UNREACH: u8 = 1;
+pub const ICMPV6_PACKET_TOO_BIG: u8 = 2;
+pub const ICMPV6_TIME_EXCEEDED: u8 = 3;
 
 // Maximum IPv6 extension headers to walk before giving up
 pub const MAX_IPV6_EXT_HDRS: usize = 6;

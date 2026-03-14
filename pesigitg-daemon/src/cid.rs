@@ -52,6 +52,39 @@ pub fn extract_raw_dcid<'a>(quic: &'a [u8], cid_length: u8) -> Option<&'a [u8]> 
     extract_dcid_bytes(quic, cid_length)
 }
 
+/// Extract the Source Connection ID from a QUIC long header.
+///
+/// Used for ICMP error handling: the echoed QUIC packet's SCID was generated
+/// by the server using the QUIC-LB config, so it can be decoded as a CID
+/// to route the ICMP back to the correct backend.
+///
+/// Returns `None` for short headers (no SCID) or truncated packets.
+pub fn extract_scid<'a>(quic: &'a [u8]) -> Option<&'a [u8]> {
+    // Must be a long header (bit 7 set).
+    if quic.is_empty() || quic[0] & 0x80 == 0 {
+        return None;
+    }
+    // Long Header: [header(1)][version(4)][dcid_len(1)][dcid(dcid_len)][scid_len(1)][scid(scid_len)]
+    if quic.len() < 6 {
+        return None;
+    }
+    let dcid_len = quic[5] as usize;
+    let scid_len_offset = 6 + dcid_len;
+    if quic.len() < scid_len_offset + 1 {
+        return None;
+    }
+    let scid_len = quic[scid_len_offset] as usize;
+    if scid_len == 0 {
+        return None;
+    }
+    let scid_start = scid_len_offset + 1;
+    let scid_end = scid_start + scid_len;
+    if quic.len() < scid_end {
+        return None;
+    }
+    Some(&quic[scid_start..scid_end])
+}
+
 /// Extract the DCID from a QUIC packet payload (starting after the UDP header).
 ///
 /// Returns the DCID slice, or `None` if the packet is malformed or the
@@ -413,6 +446,67 @@ mod tests {
         dcid.extend_from_slice(&payload);
 
         assert_eq!(resolve_server_idx(&dcid, &config), Some(0));
+    }
+
+    // -- extract_scid tests --
+
+    #[test]
+    fn extract_scid_long_header() {
+        // Long Header: [0xc0][version(4)][dcid_len(1)][dcid(3)][scid_len(1)][scid(17)]
+        let mut quic = vec![0xc0];
+        quic.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]); // version
+        quic.push(3); // dcid_len
+        quic.extend_from_slice(&[0xde, 0xad, 0xbe]); // dcid
+        quic.push(17); // scid_len
+        quic.push(0x00); // scid first octet (config_id=0)
+        quic.extend_from_slice(&[0x00, 0x00, 0x01]); // server_id
+        quic.extend_from_slice(&[0xaa; 13]); // nonce
+
+        let scid = extract_scid(&quic).unwrap();
+        assert_eq!(scid.len(), 17);
+        assert_eq!(scid[0] >> 5, 0); // config_id
+        assert_eq!(&scid[1..4], &[0x00, 0x00, 0x01]); // server_id
+    }
+
+    #[test]
+    fn extract_scid_short_header_returns_none() {
+        // Short header: no SCID.
+        let quic = vec![0x40, 0x00, 0x01, 0x02];
+        assert!(extract_scid(&quic).is_none());
+    }
+
+    #[test]
+    fn extract_scid_truncated_returns_none() {
+        // Long header but truncated before SCID.
+        let quic = vec![0xc0, 0x00, 0x00, 0x00, 0x01, 0x03, 0xaa, 0xbb, 0xcc];
+        assert!(extract_scid(&quic).is_none());
+    }
+
+    #[test]
+    fn extract_scid_zero_length_returns_none() {
+        // Long header with scid_len=0.
+        let mut quic = vec![0xc0];
+        quic.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
+        quic.push(0); // dcid_len = 0
+        quic.push(0); // scid_len = 0
+        assert!(extract_scid(&quic).is_none());
+    }
+
+    #[test]
+    fn extract_scid_resolves_server() {
+        // End-to-end: extract SCID and resolve to a server.
+        let config = make_config(Encryption::Plaintext, 0, 3, 13);
+        let mut quic = vec![0xc0];
+        quic.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
+        quic.push(2); // dcid_len
+        quic.extend_from_slice(&[0xde, 0xad]); // dcid (client-generated)
+        quic.push(17); // scid_len
+        quic.push(0x00); // config_id=0
+        quic.extend_from_slice(&[0x00, 0x00, 0x01]); // server_id
+        quic.extend_from_slice(&[0x00; 13]); // nonce
+
+        let scid = extract_scid(&quic).unwrap();
+        assert_eq!(resolve_server_idx(scid, &config), Some(0));
     }
 
     #[test]

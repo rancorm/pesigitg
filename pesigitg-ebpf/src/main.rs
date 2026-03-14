@@ -10,9 +10,10 @@ use aya_ebpf::{
 use core::mem;
 
 use pesigitg_common::{
-    ETH_HDR_LEN, ETH_P_IP, ETH_P_IPV6, IPPROTO_DSTOPTS, IPPROTO_FRAGMENT, IPPROTO_HOPOPTS,
-    IPPROTO_ROUTING, IPPROTO_UDP, IPV4_MIN_HDR_LEN, IPV6_HDR_LEN, MAX_IPV6_EXT_HDRS, MAX_PORTS,
-    MAX_QUEUES,
+    ETH_HDR_LEN, ETH_P_IP, ETH_P_IPV6, ICMP_DEST_UNREACH, ICMP_HDR_LEN, ICMP_TIME_EXCEEDED,
+    ICMPV6_DEST_UNREACH, ICMPV6_PACKET_TOO_BIG, ICMPV6_TIME_EXCEEDED, IPPROTO_DSTOPTS,
+    IPPROTO_FRAGMENT, IPPROTO_HOPOPTS, IPPROTO_ICMP, IPPROTO_ICMPV6, IPPROTO_ROUTING, IPPROTO_UDP,
+    IPV4_MIN_HDR_LEN, IPV6_HDR_LEN, MAX_IPV6_EXT_HDRS, MAX_PORTS, MAX_QUEUES,
 };
 
 #[map]
@@ -52,16 +53,16 @@ fn try_pesigitg(ctx: &XdpContext) -> Result<u32, ()> {
     // Ethernet header
     let eth_proto = u16::from_be(unsafe { *ptr_at::<u16>(ctx, 12)? });
 
-    // Parse out UDP port or None for non-UDP traffic
-    let dst_port = match eth_proto {
-        ETH_P_IP => parse_ipv4_udp(ctx)?,
-        ETH_P_IPV6 => parse_ipv6_udp(ctx)?,
+    // Parse out a monitored port: UDP destination port, or for ICMP error
+    // packets the inner (echoed) UDP source port.
+    let port = match eth_proto {
+        ETH_P_IP => parse_ipv4(ctx)?,
+        ETH_P_IPV6 => parse_ipv6(ctx)?,
         _ => return Ok(xdp_action::XDP_PASS),
     };
 
-
-    // Continue if UDP destination port is found
-    let dst_port = match dst_port {
+    // Continue if a monitored port was found
+    let dst_port = match port {
         Some(p) => p,
         None => return Ok(xdp_action::XDP_PASS),
     };
@@ -77,11 +78,13 @@ fn try_pesigitg(ctx: &XdpContext) -> Result<u32, ()> {
         .map_err(|_| ())
 }
 
-/// Parse an IPv4 packet and return the UDP destination port, or None if
-/// it is not a UDP packet.
+/// Parse an IPv4 packet and return the port to check against the PORTS map.
+///
+/// For UDP packets: returns the destination port.
+/// For ICMP error packets: parses the echoed inner packet and returns
+/// the inner UDP source port (the server's listening port).
 #[inline(always)]
-fn parse_ipv4_udp(ctx: &XdpContext) -> Result<Option<u16>, ()> {
-    // Read the first byte of the IPv4 header to get IHL (header length).
+fn parse_ipv4(ctx: &XdpContext) -> Result<Option<u16>, ()> {
     let iph_byte0 = unsafe { *ptr_at::<u8>(ctx, ETH_HDR_LEN)? };
     let ihl = ((iph_byte0 & 0x0F) as usize) * 4;
 
@@ -89,37 +92,61 @@ fn parse_ipv4_udp(ctx: &XdpContext) -> Result<Option<u16>, ()> {
         return Err(());
     }
 
-    // Protocol field is at offset 9 in the IPv4 header.
     let protocol = unsafe { *ptr_at::<u8>(ctx, ETH_HDR_LEN + 9)? };
-    if protocol != IPPROTO_UDP {
-        return Ok(None);
+
+    match protocol {
+        IPPROTO_UDP => {
+            let udp_offset = ETH_HDR_LEN + ihl;
+            let dst_port = u16::from_be(unsafe { *ptr_at::<u16>(ctx, udp_offset + 2)? });
+            Ok(Some(dst_port))
+        }
+        IPPROTO_ICMP => {
+            let icmp_offset = ETH_HDR_LEN + ihl;
+            let icmp_type = unsafe { *ptr_at::<u8>(ctx, icmp_offset)? };
+            if icmp_type != ICMP_DEST_UNREACH && icmp_type != ICMP_TIME_EXCEEDED {
+                return Ok(None);
+            }
+            // Inner IPv4 header starts after ICMP header (8 bytes).
+            let inner_ip_offset = icmp_offset + ICMP_HDR_LEN;
+            let inner_byte0 = unsafe { *ptr_at::<u8>(ctx, inner_ip_offset)? };
+            let inner_ihl = ((inner_byte0 & 0x0F) as usize) * 4;
+            if inner_ihl < IPV4_MIN_HDR_LEN {
+                return Ok(None);
+            }
+            let inner_proto = unsafe { *ptr_at::<u8>(ctx, inner_ip_offset + 9)? };
+            if inner_proto != IPPROTO_UDP {
+                return Ok(None);
+            }
+            // Inner UDP source port = server's listening port.
+            let inner_udp_offset = inner_ip_offset + inner_ihl;
+            let src_port = u16::from_be(unsafe { *ptr_at::<u16>(ctx, inner_udp_offset)? });
+            Ok(Some(src_port))
+        }
+        _ => Ok(None),
     }
-
-    // UDP destination port is at offset 2 within the UDP header.
-    let udp_offset = ETH_HDR_LEN + ihl;
-    let dst_port = u16::from_be(unsafe { *ptr_at::<u16>(ctx, udp_offset + 2)? });
-
-    Ok(Some(dst_port))
 }
 
-/// Parse an IPv6 packet and return the UDP destination port, or None if
-/// it is not a UDP packet.
+/// Parse an IPv6 packet and return the port to check against the PORTS map.
 ///
-/// Walks through known extension headers (Hop-by-Hop, Routing, Fragment,
-/// Destination Options) with a bounded loop to satisfy the eBPF verifier.
+/// For UDP packets: returns the destination port.
+/// For ICMPv6 error packets: parses the echoed inner packet and returns
+/// the inner UDP source port.
+///
+/// Walks through known extension headers with a bounded loop to satisfy
+/// the eBPF verifier.
 #[inline(always)]
-fn parse_ipv6_udp(ctx: &XdpContext) -> Result<Option<u16>, ()> {
+fn parse_ipv6(ctx: &XdpContext) -> Result<Option<u16>, ()> {
     let mut next_hdr = unsafe { *ptr_at::<u8>(ctx, ETH_HDR_LEN + 6)? };
     let mut offset = ETH_HDR_LEN + IPV6_HDR_LEN;
     let mut i = 0;
 
     while i < MAX_IPV6_EXT_HDRS {
         match next_hdr {
-            IPPROTO_UDP => break,
+            IPPROTO_UDP | IPPROTO_ICMPV6 => break,
             IPPROTO_FRAGMENT => {
                 next_hdr = unsafe { *ptr_at::<u8>(ctx, offset)? };
                 offset += 8;
-            },
+            }
             IPPROTO_HOPOPTS | IPPROTO_ROUTING | IPPROTO_DSTOPTS => {
                 next_hdr = unsafe { *ptr_at::<u8>(ctx, offset)? };
                 let ext_len = unsafe { *ptr_at::<u8>(ctx, offset + 1)? } as usize;
@@ -127,17 +154,56 @@ fn parse_ipv6_udp(ctx: &XdpContext) -> Result<Option<u16>, ()> {
             }
             _ => return Ok(None),
         }
-        
+
         i += 1;
     }
 
-    if next_hdr != IPPROTO_UDP {
-        return Ok(None);
-    }
+    match next_hdr {
+        IPPROTO_UDP => {
+            let dst_port = u16::from_be(unsafe { *ptr_at::<u16>(ctx, offset + 2)? });
+            Ok(Some(dst_port))
+        }
+        IPPROTO_ICMPV6 => {
+            let icmp_type = unsafe { *ptr_at::<u8>(ctx, offset)? };
+            if icmp_type != ICMPV6_DEST_UNREACH
+                && icmp_type != ICMPV6_PACKET_TOO_BIG
+                && icmp_type != ICMPV6_TIME_EXCEEDED
+            {
+                return Ok(None);
+            }
+            // Inner IPv6 header starts after ICMPv6 header (8 bytes).
+            let inner_ip_offset = offset + ICMP_HDR_LEN;
+            let mut inner_next_hdr = unsafe { *ptr_at::<u8>(ctx, inner_ip_offset + 6)? };
+            let mut inner_offset = inner_ip_offset + IPV6_HDR_LEN;
+            let mut j = 0;
 
-    let dst_port = u16::from_be(unsafe { *ptr_at::<u16>(ctx, offset + 2)? });
-    
-    Ok(Some(dst_port))
+            while j < MAX_IPV6_EXT_HDRS {
+                match inner_next_hdr {
+                    IPPROTO_UDP => break,
+                    IPPROTO_FRAGMENT => {
+                        inner_next_hdr = unsafe { *ptr_at::<u8>(ctx, inner_offset)? };
+                        inner_offset += 8;
+                    }
+                    IPPROTO_HOPOPTS | IPPROTO_ROUTING | IPPROTO_DSTOPTS => {
+                        inner_next_hdr = unsafe { *ptr_at::<u8>(ctx, inner_offset)? };
+                        let ext_len =
+                            unsafe { *ptr_at::<u8>(ctx, inner_offset + 1)? } as usize;
+                        inner_offset += (ext_len + 1) * 8;
+                    }
+                    _ => return Ok(None),
+                }
+                j += 1;
+            }
+
+            if inner_next_hdr != IPPROTO_UDP {
+                return Ok(None);
+            }
+            // Inner UDP source port = server's listening port.
+            let src_port = u16::from_be(unsafe { *ptr_at::<u16>(ctx, inner_offset)? });
+            Ok(Some(src_port))
+        }
+        _ => Ok(None),
+    }
 }
 
 #[panic_handler]

@@ -280,9 +280,10 @@ fn main() -> Result<()> {
         let delta = current.delta(&prev_stats);
         if delta.rx_packets > 0 {
             info!(
-                "stats: rx={} fwd={} (cid={} fallback={}) pass={}",
+                "stats: rx={} fwd={} (cid={} fallback={} icmp={}) pass={}",
                 delta.rx_packets, delta.forwarded,
-                delta.cid_routed, delta.fallback_routed, delta.passed,
+                delta.cid_routed, delta.fallback_routed,
+                delta.icmp_forwarded, delta.passed,
             );
         }
         prev_stats = current;
