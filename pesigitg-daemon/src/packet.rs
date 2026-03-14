@@ -27,7 +27,8 @@ use crate::conntable::{ConnectionTable, DcidKey, FlowKey};
 /// Outcome of packet processing.
 pub enum Verdict {
     /// CID-routed: DCID decrypted and mapped to a backend server.
-    CidForward,
+    /// Carries the config_id (0-6) for per-config stats tracking.
+    CidForward(u8),
     /// Fallback-routed: connection table hit or consistent hash.
     FallbackForward,
     /// ICMP error routed back to the originating backend server.
@@ -95,7 +96,7 @@ fn process_udp(
                 // Record DCID mapping for NAT rebinding resilience.
                 conn.record_dcid(DcidKey::from_slice(dcid), mac);
                 frame[..6].copy_from_slice(&mac);
-                return Verdict::CidForward;
+                return Verdict::CidForward(config.config_id);
             }
         }
         // CID was routable but server unknown or has no MAC — don't fallback
@@ -592,7 +593,7 @@ mod tests {
 
         assert!(matches!(
             process_packet(&mut frame, &config, &mut conn),
-            Verdict::CidForward
+            Verdict::CidForward(_)
         ));
         assert_eq!(&frame[..6], &[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01]);
     }
@@ -606,7 +607,7 @@ mod tests {
 
         assert!(matches!(
             process_packet(&mut frame, &config, &mut conn),
-            Verdict::CidForward
+            Verdict::CidForward(_)
         ));
         assert_eq!(&frame[..6], &[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01]);
     }
@@ -661,7 +662,7 @@ mod tests {
 
         assert!(matches!(
             process_packet(&mut frame, &config, &mut conn),
-            Verdict::CidForward
+            Verdict::CidForward(_)
         ));
         assert_eq!(&frame[..6], &[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01]);
     }
@@ -745,7 +746,7 @@ mod tests {
 
         assert!(matches!(
             process_packet(&mut frame, &config, &mut conn),
-            Verdict::CidForward
+            Verdict::CidForward(_)
         ));
 
         // The DCID should now be in the connection table.

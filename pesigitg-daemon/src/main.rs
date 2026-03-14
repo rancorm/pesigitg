@@ -276,16 +276,20 @@ fn main() -> Result<()> {
             }
         }
 
+        // Statistics
         let current = stats.aggregate();
         let delta = current.delta(&prev_stats);
+        
         if delta.rx_packets > 0 {
             info!(
-                "stats: rx={} fwd={} (cid={} fallback={} icmp={}) pass={}",
+                "stats: rx={} fwd={} (cid={}{} fallback={} icmp={}) pass={}",
                 delta.rx_packets, delta.forwarded,
-                delta.cid_routed, delta.fallback_routed,
+                delta.cid_routed, delta.format_cid_by_config(),
+                delta.fallback_routed,
                 delta.icmp_forwarded, delta.passed,
             );
         }
+        
         prev_stats = current;
 
         systemd_notify!(sd_notify::NotifyState::Watchdog);

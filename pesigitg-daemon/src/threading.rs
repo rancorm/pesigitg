@@ -227,8 +227,8 @@ fn worker_loop(
                 packet::process_packet(&mut *data, &config, &mut conn)
             };
             match verdict {
-                Verdict::CidForward => {
-                    stats.record_cid_forward();
+                Verdict::CidForward(config_id) => {
+                    stats.record_cid_forward(config_id);
                     tx_batch.push(rx_descs[i]);
                 }
                 Verdict::FallbackForward => {

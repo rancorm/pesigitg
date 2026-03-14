@@ -13,6 +13,7 @@ pub struct WorkerStats {
     rx_packets: AtomicU64,
     forwarded: AtomicU64,
     cid_routed: AtomicU64,
+    cid_by_config: [AtomicU64; 7],
     fallback_routed: AtomicU64,
     icmp_forwarded: AtomicU64,
     passed: AtomicU64,
@@ -29,6 +30,7 @@ impl WorkerStats {
             rx_packets: AtomicU64::new(0),
             forwarded: AtomicU64::new(0),
             cid_routed: AtomicU64::new(0),
+            cid_by_config: std::array::from_fn(|_| AtomicU64::new(0)),
             fallback_routed: AtomicU64::new(0),
             icmp_forwarded: AtomicU64::new(0),
             passed: AtomicU64::new(0),
@@ -42,8 +44,9 @@ impl WorkerStats {
     }
 
     #[inline(always)]
-    pub fn record_cid_forward(&self) {
+    pub fn record_cid_forward(&self, config_id: u8) {
         inc(&self.cid_routed);
+        inc(&self.cid_by_config[config_id as usize]);
         inc(&self.forwarded);
     }
 
@@ -71,6 +74,7 @@ pub struct Snapshot {
     pub rx_packets: u64,
     pub forwarded: u64,
     pub cid_routed: u64,
+    pub cid_by_config: [u64; 7],
     pub fallback_routed: u64,
     pub icmp_forwarded: u64,
     pub passed: u64,
@@ -78,13 +82,32 @@ pub struct Snapshot {
 
 impl Snapshot {
     pub fn delta(&self, prev: &Snapshot) -> Snapshot {
+        let mut cid_by_config = [0u64; 7];
+        for i in 0..7 {
+            cid_by_config[i] = self.cid_by_config[i].wrapping_sub(prev.cid_by_config[i]);
+        }
         Snapshot {
             rx_packets: self.rx_packets.wrapping_sub(prev.rx_packets),
             forwarded: self.forwarded.wrapping_sub(prev.forwarded),
             cid_routed: self.cid_routed.wrapping_sub(prev.cid_routed),
+            cid_by_config,
             fallback_routed: self.fallback_routed.wrapping_sub(prev.fallback_routed),
             icmp_forwarded: self.icmp_forwarded.wrapping_sub(prev.icmp_forwarded),
             passed: self.passed.wrapping_sub(prev.passed),
+        }
+    }
+
+    /// Format per-config_id CID breakdown, only including non-zero entries.
+    pub fn format_cid_by_config(&self) -> String {
+        let parts: Vec<String> = self.cid_by_config.iter()
+            .enumerate()
+            .filter(|&(_, &count)| count > 0)
+            .map(|(id, count)| format!("c{}={}", id, count))
+            .collect();
+        if parts.is_empty() {
+            String::new()
+        } else {
+            format!(" [{}]", parts.join(" "))
         }
     }
 }
@@ -113,6 +136,9 @@ impl StatsTable {
             total.rx_packets += slot.rx_packets.load(Ordering::Relaxed);
             total.forwarded += slot.forwarded.load(Ordering::Relaxed);
             total.cid_routed += slot.cid_routed.load(Ordering::Relaxed);
+            for i in 0..7 {
+                total.cid_by_config[i] += slot.cid_by_config[i].load(Ordering::Relaxed);
+            }
             total.fallback_routed += slot.fallback_routed.load(Ordering::Relaxed);
             total.icmp_forwarded += slot.icmp_forwarded.load(Ordering::Relaxed);
             total.passed += slot.passed.load(Ordering::Relaxed);
