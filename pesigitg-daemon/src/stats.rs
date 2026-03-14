@@ -1,3 +1,4 @@
+use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Per-worker packet counters, cache-line aligned to avoid false sharing.
@@ -83,9 +84,11 @@ pub struct Snapshot {
 impl Snapshot {
     pub fn delta(&self, prev: &Snapshot) -> Snapshot {
         let mut cid_by_config = [0u64; 7];
+
         for i in 0..7 {
             cid_by_config[i] = self.cid_by_config[i].wrapping_sub(prev.cid_by_config[i]);
         }
+        
         Snapshot {
             rx_packets: self.rx_packets.wrapping_sub(prev.rx_packets),
             forwarded: self.forwarded.wrapping_sub(prev.forwarded),
@@ -98,17 +101,42 @@ impl Snapshot {
     }
 
     /// Format per-config_id CID breakdown, only including non-zero entries.
-    pub fn format_cid_by_config(&self) -> String {
-        let parts: Vec<String> = self.cid_by_config.iter()
-            .enumerate()
-            .filter(|&(_, &count)| count > 0)
-            .map(|(id, count)| format!("c{}={}", id, count))
-            .collect();
-        if parts.is_empty() {
-            String::new()
-        } else {
-            format!(" [{}]", parts.join(" "))
+    fn format_cid_by_config(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut any = false;
+
+        for (id, &count) in self.cid_by_config.iter().enumerate() {
+            if count > 0 {
+                if !any {
+                    f.write_str(" [")?;
+                    any = true;
+                } else {
+                    f.write_str(" ")?;
+                }
+                write!(f, "c{}={}", id, count)?;
+            }
         }
+
+        if any {
+            f.write_str("]")?;
+        }
+
+        Ok(())
+    }
+}
+
+impl fmt::Display for Snapshot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "rx={} fwd={} (cid={}",
+            self.rx_packets, self.forwarded, self.cid_routed,
+        )?;
+        self.format_cid_by_config(f)?;
+        write!(
+            f,
+            " fallback={} icmp={}) pass={}",
+            self.fallback_routed, self.icmp_forwarded, self.passed,
+        )
     }
 }
 
@@ -123,6 +151,7 @@ impl StatsTable {
             .map(|_| WorkerStats::new())
             .collect::<Vec<_>>()
             .into_boxed_slice();
+
         StatsTable { slots }
     }
 
@@ -132,17 +161,21 @@ impl StatsTable {
 
     pub fn aggregate(&self) -> Snapshot {
         let mut total = Snapshot::default();
+        
         for slot in self.slots.iter() {
             total.rx_packets += slot.rx_packets.load(Ordering::Relaxed);
             total.forwarded += slot.forwarded.load(Ordering::Relaxed);
             total.cid_routed += slot.cid_routed.load(Ordering::Relaxed);
+            
             for i in 0..7 {
                 total.cid_by_config[i] += slot.cid_by_config[i].load(Ordering::Relaxed);
             }
+            
             total.fallback_routed += slot.fallback_routed.load(Ordering::Relaxed);
             total.icmp_forwarded += slot.icmp_forwarded.load(Ordering::Relaxed);
             total.passed += slot.passed.load(Ordering::Relaxed);
         }
+
         total
     }
 }

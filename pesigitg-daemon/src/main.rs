@@ -262,14 +262,7 @@ fn main() -> Result<()> {
             match sig {
                 SIGHUP => reload_config(&mut args, &route_config),
                 SIGUSR1 => {
-                    let cumulative = stats.aggregate();
-                    info!(
-                        "stats dump: rx={} fwd={} (cid={}{} fallback={} icmp={}) pass={}",
-                        cumulative.rx_packets, cumulative.forwarded,
-                        cumulative.cid_routed, cumulative.format_cid_by_config(),
-                        cumulative.fallback_routed,
-                        cumulative.icmp_forwarded, cumulative.passed,
-                    );
+                    info!("stats dump: {}", stats.aggregate());
                 }
                 SIGINT | SIGTERM => {
                     systemd_notify!(sd_notify::NotifyState::Stopping);
@@ -291,13 +284,7 @@ fn main() -> Result<()> {
         let delta = current.delta(&prev_stats);
         
         if delta.rx_packets > 0 {
-            info!(
-                "stats: rx={} fwd={} (cid={}{} fallback={} icmp={}) pass={}",
-                delta.rx_packets, delta.forwarded,
-                delta.cid_routed, delta.format_cid_by_config(),
-                delta.fallback_routed,
-                delta.icmp_forwarded, delta.passed,
-            );
+            info!("stats: {}", delta);
         }
         
         prev_stats = current;
