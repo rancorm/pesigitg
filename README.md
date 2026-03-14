@@ -53,14 +53,22 @@ sudo apt install \
 
 ### Building
 
-```sh
-# daemon (stable toolchain)
-cargo build --release -p pesigitg-daemon
+The workspace uses [cargo-xtask](https://github.com/matklad/cargo-xtask) to
+orchestrate multi-toolchain builds. No extra binaries to install — `cargo xtask`
+is a regular workspace member.
 
-# ebpf program (nightly toolchain, from the ebpf crate directory)
-cd pesigitg-ebpf
-cargo build --release
+```sh
+# build everything (eBPF program + daemon)
+cargo xtask build --release
+
+# build only the eBPF program
+cargo xtask build-ebpf --release
 ```
+
+`cargo xtask build` first compiles the eBPF program with the nightly toolchain
+(selected automatically via `pesigitg-ebpf/rust-toolchain.toml`), then builds
+the daemon with the stable toolchain, passing the eBPF object path through the
+`PESIGITG_EBPF_OBJ` environment variable.
 
 ## HTTPS DNS Records
 
@@ -91,11 +99,11 @@ example.com.  300  IN  HTTPS  1 . alpn=h3,h2 ipv4hint=192.0.2.1 ipv6hint=2001:db
 - **Priority** — `1` here. Priority `0` is a special "AliasMode" that works like a CNAME for HTTPS. Any non-zero value is "ServiceMode" carrying parameters.
 - **Target** — `.` means "same domain." Could point elsewhere.
 - **SvcParams** — the key-value pairs carrying the useful metadata:
--- **`alpn`**— which application protocols are supported (`h3`, `h2`, `http/1.1`). This is the big one — if `h3` is listed, the browser can attempt QUIC on the first connection without waiting for Alt-Svc.
--- **`ipv4hint`** / **`ipv6hint`** — IP addresses to try, saving an additional A/AAAA lookup.
--- **`port`** — if the service runs on a non-standard port.
--- **`ech`** — Encrypted Client Hello configuration, enabling TLS encryption of the SNI field for privacy.
--- **`no-default-alpn`** — indicates the server does not support default protocols, the client must use one of the listed ALPNs.
+  - **`alpn`** — which application protocols are supported (`h3`, `h2`, `http/1.1`). This is the big one — if `h3` is listed, the browser can attempt QUIC on the first connection without waiting for Alt-Svc.
+  - **`ipv4hint`** / **`ipv6hint`** — IP addresses to try, saving an additional A/AAAA lookup.
+  - **`port`** — if the service runs on a non-standard port.
+  - **`ech`** — Encrypted Client Hello configuration, enabling TLS encryption of the SNI field for privacy.
+  - **`no-default-alpn`** — indicates the server does not support default protocols, the client must use one of the listed ALPNs.
 
 ## Glossary
 
