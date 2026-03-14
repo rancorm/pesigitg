@@ -85,24 +85,6 @@ pub fn extract_scid<'a>(quic: &'a [u8]) -> Option<&'a [u8]> {
     Some(&quic[scid_start..scid_end])
 }
 
-/// Extract the DCID from a QUIC packet payload (starting after the UDP header).
-///
-/// Returns the DCID slice, or `None` if the packet is malformed or the
-/// config_id in the CID first octet doesn't match the active configuration.
-pub fn extract_dcid<'a>(quic: &'a [u8], config: &RouteConfig) -> Option<&'a [u8]> {
-    let dcid = extract_dcid_bytes(quic, config.cid_length())?;
-
-    // Top 3 bits of the first CID octet carry the config rotation id.
-    // Value 7 (0b111) is reserved for fallback/unroutable.
-    let cid_config_id = dcid[0] >> 5;
-    
-    if cid_config_id == 7 || cid_config_id != config.config_id {
-        return None;
-    }
-
-    Some(dcid)
-}
-
 /// Common DCID byte extraction for both long and short headers.
 fn extract_dcid_bytes<'a>(quic: &'a [u8], cid_length: u8) -> Option<&'a [u8]> {
     if quic.is_empty() {
@@ -286,89 +268,6 @@ mod tests {
                 }
             }
         }
-    }
-
-    // -- extract_dcid tests --
-
-    #[test]
-    fn extract_dcid_long_header() {
-        let config = make_config(Encryption::Plaintext, 0, 3, 13);
-
-        // Long Header: first byte 0xC0 (form=1, fixed=1, type=Initial)
-        // Version: [0x00, 0x00, 0x00, 0x01]
-        // DCID length: 17 (1 + 3 + 13)
-        // DCID: [first_octet=0x00 (config_id=0)][server_id: 3B][nonce: 13B]
-        let mut quic = vec![0xc0];
-        
-        quic.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]); // version
-        quic.push(17); // dcid_len
-        
-        // CID: config_id=0 in top 3 bits -> first octet = 0x00
-        quic.push(0x00); // first octet
-        quic.extend_from_slice(&[0x00, 0x00, 0x01]); // server_id
-        quic.extend_from_slice(&[0xaa; 13]); // nonce
-
-        let dcid = extract_dcid(&quic, &config).unwrap();
-        
-        assert_eq!(dcid.len(), 17);
-        assert_eq!(dcid[0] >> 5, 0); // config_id
-        assert_eq!(&dcid[1..4], &[0x00, 0x00, 0x01]); // server_id
-    }
-
-    #[test]
-    fn extract_dcid_short_header() {
-        let config = make_config(Encryption::Plaintext, 0, 3, 13);
-
-        // Short Header: first byte 0x40 (form=0, fixed=1)
-        // DCID starts at byte 1, length = cid_length = 17
-        let mut quic = vec![0x40];
-        
-        quic.push(0x00); // first CID octet (config_id=0)
-        quic.extend_from_slice(&[0x00, 0x00, 0x02]); // server_id
-        quic.extend_from_slice(&[0xbb; 13]); // nonce
-
-        let dcid = extract_dcid(&quic, &config).unwrap();
-        
-        assert_eq!(dcid.len(), 17);
-        assert_eq!(&dcid[1..4], &[0x00, 0x00, 0x02]);
-    }
-
-    #[test]
-    fn extract_dcid_wrong_config_id() {
-        let config = make_config(Encryption::Plaintext, 0, 3, 13);
-
-        // config_id = 3 in top 3 bits -> first CID octet = 3 << 5 = 0x60
-        let mut quic = vec![0xc0];
-        
-        quic.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
-        quic.push(17);
-        quic.push(0x60); // config_id=3, doesn't match config.config_id=0
-        quic.extend_from_slice(&[0x00; 16]);
-
-        assert!(extract_dcid(&quic, &config).is_none());
-    }
-
-    #[test]
-    fn extract_dcid_reserved_config_id_7() {
-        let config = make_config(Encryption::Plaintext, 0, 3, 13);
-
-        // config_id = 7 -> 0xe0
-        let mut quic = vec![0xc0];
-        
-        quic.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
-        quic.push(17);
-        quic.push(0xe0); // config_id=7 (reserved)
-        quic.extend_from_slice(&[0x00; 16]);
-
-        assert!(extract_dcid(&quic, &config).is_none());
-    }
-
-    #[test]
-    fn extract_dcid_truncated() {
-        let config = make_config(Encryption::Plaintext, 0, 3, 13);
-        
-        assert!(extract_dcid(&[], &config).is_none());
-        assert!(extract_dcid(&[0xc0, 0x00], &config).is_none());
     }
 
     // -- resolve_server tests --
