@@ -144,6 +144,7 @@ fn print_size(path: &std::path::Path, release: bool) {
 
 fn print_toolchain(ebpf_dir: &std::path::Path) {
     let toolchain_file = ebpf_dir.join("rust-toolchain.toml");
+    
     let contents = match std::fs::read_to_string(&toolchain_file) {
         Ok(c) => c,
         Err(e) => {
@@ -156,6 +157,7 @@ fn print_toolchain(ebpf_dir: &std::path::Path) {
         contents.lines().find_map(|line| {
             let rest = line.strip_prefix(key)?;
             let rest = rest.trim_start().strip_prefix('=')?.trim();
+
             Some(rest.trim_matches('"').to_string())
         })
     };
@@ -164,16 +166,19 @@ fn print_toolchain(ebpf_dir: &std::path::Path) {
     let components = parse_value("components");
 
     if let Some(ch) = channel {
-        eprint!("toolchain: {}", ch);
+        eprint!("ebpf toolchain: {}", ch);
+
         if let Some(comp) = components {
             eprint!(" ({})", comp);
         }
+        
         eprintln!();
     }
 }
 
 fn fmt_duration(d: std::time::Duration) -> String {
     let secs = d.as_secs();
+    
     if secs >= 60 {
         format!("{}m {:02}s", secs / 60, secs % 60)
     } else {
