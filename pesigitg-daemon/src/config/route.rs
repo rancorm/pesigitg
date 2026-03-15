@@ -424,9 +424,17 @@ impl fmt::Display for RouteConfig {
         writeln!(f, "nonce_length:     {}", self.nonce_length)?;
         writeln!(f, "cid_length:       {} (1 + {})", self.cid_length(), self.cid_payload_length())?;
         writeln!(f, "encryption:       {}", self.encryption)?;
-        writeln!(f, "servers:          {}", self.servers.len())?;
-        for s in &self.servers {
-            writeln!(f, "  {}", s)?;
+        if self.servers.is_empty() {
+            write!(f, "servers:          0")?;
+        } else {
+            writeln!(f, "servers:          {}", self.servers.len())?;
+            for (i, s) in self.servers.iter().enumerate() {
+                if i + 1 < self.servers.len() {
+                    writeln!(f, "  {}", s)?;
+                } else {
+                    write!(f, "  {}", s)?;
+                }
+            }
         }
         Ok(())
     }
@@ -435,9 +443,9 @@ impl fmt::Display for RouteConfig {
 impl fmt::Display for ConfigTable {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let active: Vec<_> = self.slots.iter().flatten().collect();
-        writeln!(f, "Config Table ({} active):", active.len())?;
+        write!(f, "Config Table ({} active):", active.len())?;
         for config in active {
-            write!(f, "{}", config)?;
+            write!(f, "\n{}", config)?;
         }
         Ok(())
     }

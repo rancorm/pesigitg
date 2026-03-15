@@ -234,7 +234,7 @@ fn main() -> Result<()> {
     let thread_plan = plan_threads(&args.interface, Some(args.queues));
 
     for t in &thread_plan {
-        info!("planned: queue={} -> core={}", t.queue_id, t.core_id);
+        info!("thread planned: queue={} -> core={}", t.queue_id, t.core_id);
     }
 
     let shutdown = Arc::new(AtomicBool::new(false));
