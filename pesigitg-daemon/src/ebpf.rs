@@ -7,7 +7,13 @@ use aya::programs::{Xdp, XdpFlags};
 use aya::Ebpf;
 use log::info;
 
-static EMBEDDED_EBPF: &[u8] = include_bytes!(env!("PESIGITG_EBPF_OBJ"));
+/// Force 8-byte alignment for the embedded eBPF ELF object.
+/// `include_bytes!` does not guarantee alignment, but the ELF parser requires it.
+#[repr(C, align(8))]
+struct Aligned<T: ?Sized>(T);
+
+static ALIGNED_EBPF: &Aligned<[u8]> = &Aligned(*include_bytes!(env!("PESIGITG_EBPF_OBJ")));
+static EMBEDDED_EBPF: &[u8] = &ALIGNED_EBPF.0;
 
 /// Handle to a loaded eBPF program and its AF_XDP socket map.
 ///

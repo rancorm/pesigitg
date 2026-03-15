@@ -21,16 +21,25 @@ fn main() {
             release = args.contains(&"--release".into());
             build_ebpf(release);
         }
+        Some("run") => {
+            release = args.contains(&"--release".into());
+            let total = Instant::now();
+            let ebpf_obj = build_ebpf(release);
+            build_daemon(release, &ebpf_obj);
+            eprintln!("total: {}", fmt_duration(total.elapsed()));
+            run_daemon(release, &args[1..]);
+        }
         _ => {
             eprintln!(
                 "Usage: cargo xtask <COMMAND>\n\n\
                  Commands:\n  \
                    build        Build the eBPF program and daemon\n  \
-                   build-ebpf   Build only the eBPF program\n\n\
+                   build-ebpf   Build only the eBPF program\n  \
+                   run          Build and run the daemon (use sudo)\n\n\
                  Options:\n  \
                    --release    Build in release mode"
             );
-            
+
             process::exit(1);
         }
     }
@@ -184,6 +193,37 @@ fn fmt_duration(d: std::time::Duration) -> String {
     } else {
         format!("{}.{:02}s", secs, d.subsec_millis() / 10)
     }
+}
+
+fn run_daemon(release: bool, args: &[String]) {
+    let profile = if release { "release" } else { "debug" };
+    let bin = workspace_root()
+        .join("target")
+        .join(profile)
+        .join("pesigitgd");
+
+    // Pass remaining args (excluding --release) to the daemon
+    let daemon_args: Vec<&str> = args.iter()
+        .map(String::as_str)
+        .filter(|a| *a != "--release")
+        .collect();
+
+    let mut cmd = Command::new(&bin);
+    cmd.env("RUST_LOG", std::env::var("RUST_LOG").unwrap_or_else(|_| "pesigitgd=info".into()))
+        .args(&daemon_args);
+
+    eprintln!("running: {} {}", bin.display(), daemon_args.join(" "));
+
+    let err = exec(&mut cmd);
+    eprintln!("failed to exec {}: {}", bin.display(), err);
+    process::exit(1);
+}
+
+/// Replace the current process with the given command.
+#[cfg(unix)]
+fn exec(cmd: &mut Command) -> std::io::Error {
+    use std::os::unix::process::CommandExt;
+    cmd.exec()
 }
 
 fn cargo() -> String {

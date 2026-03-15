@@ -9,7 +9,7 @@ use std::ops::DerefMut;
 use std::os::fd::{AsRawFd, RawFd};
 
 use anyhow::{Context, Result};
-use xsk_rs::config::{SocketConfig, UmemConfig};
+use xsk_rs::config::{LibbpfFlags, SocketConfig, UmemConfig};
 use xsk_rs::{CompQueue, FillQueue, FrameDesc, RxQueue, Socket, TxQueue, Umem};
 
 const NUM_FRAMES: u32 = 4096;
@@ -32,8 +32,12 @@ impl XskSocket {
         )
         .context("failed to create UMEM")?;
 
+        let socket_config = SocketConfig::builder()
+            .libbpf_flags(LibbpfFlags::XSK_LIBBPF_FLAGS_INHIBIT_PROG_LOAD)
+            .build();
+
         let (tx_q, rx_q, fq_cq) = Socket::new(
-            SocketConfig::default(),
+            socket_config,
             &umem,
             &interface.parse().context("invalid interface name")?,
             queue_id,

@@ -190,7 +190,7 @@ fn worker_loop(
     let mut xsk = match XskSocket::new(interface, queue_id) {
         Ok(s) => s,
         Err(e) => {
-            error!("worker q{}: failed to create AF_XDP socket: {}", queue_id, e);
+            error!("worker q{}: failed to create AF_XDP socket: {:#}", queue_id, e);
             return;
         }
     };

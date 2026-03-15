@@ -418,15 +418,15 @@ impl fmt::Display for Server {
 
 impl fmt::Display for RouteConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "  config_id:        {}", self.config_id)?;
-        writeln!(f, "  first_octet_len:  {}", self.first_octet_encodes_cid_length)?;
-        writeln!(f, "  server_id_length: {}", self.server_id_length)?;
-        writeln!(f, "  nonce_length:     {}", self.nonce_length)?;
-        writeln!(f, "  cid_length:       {} (1 + {})", self.cid_length(), self.cid_payload_length())?;
-        writeln!(f, "  encryption:       {}", self.encryption)?;
-        writeln!(f, "  servers:          {}", self.servers.len())?;
+        writeln!(f, "config_id:        {}", self.config_id)?;
+        writeln!(f, "first_octet_len:  {}", self.first_octet_encodes_cid_length)?;
+        writeln!(f, "server_id_length: {}", self.server_id_length)?;
+        writeln!(f, "nonce_length:     {}", self.nonce_length)?;
+        writeln!(f, "cid_length:       {} (1 + {})", self.cid_length(), self.cid_payload_length())?;
+        writeln!(f, "encryption:       {}", self.encryption)?;
+        writeln!(f, "servers:          {}", self.servers.len())?;
         for s in &self.servers {
-            writeln!(f, "    {}", s)?;
+            writeln!(f, "  {}", s)?;
         }
         Ok(())
     }

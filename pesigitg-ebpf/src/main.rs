@@ -141,6 +141,12 @@ fn parse_ipv6(ctx: &XdpContext) -> Result<Option<u16>, ()> {
     let mut i = 0;
 
     while i < MAX_IPV6_EXT_HDRS {
+        // Prevent LLVM from caching packet pointers across iterations.
+        // Without this, the compiler reuses stale packet pointers from the
+        // previous iteration, which the eBPF verifier cannot track through
+        // variable-offset arithmetic.
+        offset = core::hint::black_box(offset);
+
         match next_hdr {
             IPPROTO_UDP | IPPROTO_ICMPV6 => break,
             IPPROTO_FRAGMENT => {
@@ -149,7 +155,7 @@ fn parse_ipv6(ctx: &XdpContext) -> Result<Option<u16>, ()> {
             }
             IPPROTO_HOPOPTS | IPPROTO_ROUTING | IPPROTO_DSTOPTS => {
                 next_hdr = unsafe { *ptr_at::<u8>(ctx, offset)? };
-                let ext_len = unsafe { *ptr_at::<u8>(ctx, offset + 1)? } as usize;
+                let ext_len = (unsafe { *ptr_at::<u8>(ctx, offset + 1)? } as usize) & 0x1F;
                 offset += (ext_len + 1) * 8;
             }
             _ => return Ok(None),
@@ -178,6 +184,8 @@ fn parse_ipv6(ctx: &XdpContext) -> Result<Option<u16>, ()> {
             let mut j = 0;
 
             while j < MAX_IPV6_EXT_HDRS {
+                inner_offset = core::hint::black_box(inner_offset);
+
                 match inner_next_hdr {
                     IPPROTO_UDP => break,
                     IPPROTO_FRAGMENT => {
@@ -187,7 +195,7 @@ fn parse_ipv6(ctx: &XdpContext) -> Result<Option<u16>, ()> {
                     IPPROTO_HOPOPTS | IPPROTO_ROUTING | IPPROTO_DSTOPTS => {
                         inner_next_hdr = unsafe { *ptr_at::<u8>(ctx, inner_offset)? };
                         let ext_len =
-                            unsafe { *ptr_at::<u8>(ctx, inner_offset + 1)? } as usize;
+                            (unsafe { *ptr_at::<u8>(ctx, inner_offset + 1)? } as usize) & 0x1F;
                         inner_offset += (ext_len + 1) * 8;
                     }
                     _ => return Ok(None),
