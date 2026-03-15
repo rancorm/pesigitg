@@ -1,13 +1,6 @@
 # Pesigitg Configuration
 #
 
-# Config rotation bits (0-6, maps to first 3 bits of CID)
-# Must not use 7 (0b111) - reserved for fallback/unroutable
-config_id = 0
-
-# Whether the first octet encodes CID length in its lower 6 bits
-first_octet_encodes_cid_length = true
-
 # Single-pass AES-ECB requires server_id_length + nonce_length = 16
 #
 # server_id_length  nonce_length  Trade-off
@@ -31,6 +24,14 @@ first_octet_encodes_cid_length = true
 #  1                18            19   256 servers, max CID size, longest nonce life
 # 15                 4            19   Max server space, max CID size, nonce exhausts fast
 
+[[configs]]
+# Config rotation bits (0-6, maps to first 3 bits of CID)
+# Must not use 7 (0b111) - reserved for fallback/unroutable
+config_id = 0
+
+# Whether the first octet encodes CID length in its lower 6 bits
+first_octet_encodes_cid_length = true
+
 # Server ID length in octets (1-15)
 server_id_length = 3
 
@@ -39,24 +40,24 @@ nonce_length = 13
 
 # 16-byte AES-128-ECB key for CID encryption (hex-encoded)
 # Omit for plaintext/unencrypted mode (not recommended for production)
-key = "REPLACE_ME_WITH_A_REAL_128BIT_KEY"
+key = "597a84b3093ebb17567bcb7e06721d68"
 
 # Server ID to forwarding address mappings
-[[servers]]
+[[configs.servers]]
 id = "000001"
 # L3 address used for MAC resolution
 address = "10.0.1.10"
 # mac resolved at runtime or override if ARP resolution isn't desired
-# mac = "aa:bb:cc:dd:ee:01" 
+# mac = "aa:bb:cc:dd:ee:01"
 
-[[servers]]
+[[configs.servers]]
 id = "000002"
 address = "10.0.1.11"
 
-[[servers]]
+[[configs.servers]]
 id = "000003"
 address = "10.0.1.12"
 
-[[servers]]
+[[configs.servers]]
 id = "000004"
 address = "2001:db8::1"
