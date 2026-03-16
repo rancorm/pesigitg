@@ -1,0 +1,25 @@
+[Unit]
+Description=pesigitg QUIC-aware load balancer on %i
+After=network-online.target sys-subsystem-net-devices-%i.device
+Wants=network-online.target
+BindsTo=sys-subsystem-net-devices-%i.device
+
+[Service]
+Type=notify
+ExecStart=/usr/local/bin/pesigitgd -f -c /etc/pesigitg/%i.conf -i %i
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+WatchdogSec=30
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+
+[Install]
+WantedBy=multi-user.target
