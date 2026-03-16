@@ -20,6 +20,7 @@ Options:
       --no-default-alpn Advertise that default ALPNs are not supported
       --ech FILE        Path to ECHConfigList file (base64-encoded value)
       --value-only      Output only the record value (no domain, TTL, class, or type)
+  -q, --query           Query the existing HTTPS record for DOMAIN via dig
   -h, --help            Show this help
 
 Examples:
@@ -37,6 +38,9 @@ Examples:
 
   # Value only — for DNS providers that separate the name and value
   dns-rr.sh --value-only -4 192.0.2.1 example.com
+
+  # Query an existing HTTPS record
+  dns-rr.sh --query example.com
 EOF
     exit "${1:-0}"
 }
@@ -46,6 +50,7 @@ PRIORITY=1
 TARGET="."
 NO_DEFAULT_ALPN=false
 VALUE_ONLY=false
+QUERY=false
 PORT=""
 ECH_FILE=""
 IPV4_HINTS=()
@@ -76,6 +81,8 @@ while [[ $# -gt 0 ]]; do
             NO_DEFAULT_ALPN=true; shift ;;
         --value-only)
             VALUE_ONLY=true; shift ;;
+        -q|--query)
+            QUERY=true; shift ;;
         --ech)
             [[ $# -ge 2 ]] || { echo "Error: $1 requires an argument" >&2; exit 1; }
             ECH_FILE="$2"; shift 2 ;;
@@ -99,6 +106,14 @@ if [[ -z "$DOMAIN" ]]; then
     echo "Error: DOMAIN is required" >&2
     echo >&2
     usage 1
+fi
+
+if $QUERY; then
+    if ! command -v dig &>/dev/null; then
+        echo "Error: dig is required for --query (install bind-utils or dnsutils)" >&2
+        exit 1
+    fi
+    exec dig +short "$DOMAIN" HTTPS
 fi
 
 # Ensure FQDN (trailing dot) for zone file format
