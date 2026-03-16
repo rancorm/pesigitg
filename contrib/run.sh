@@ -3,10 +3,15 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-DEV=${1:-eth0}
+BUILD="${1:-release}"
+DEV="${2:-eth0}"
 
 export RUST_LOG="${RUST_LOG:-pesigitgd=info}"
 
-exec sudo -E cargo xtask run --release \
-    -f \
-    -c "$ROOT/contrib/$DEV.conf"
+ARGS=(run -f -c "$ROOT/contrib/$DEV.conf")
+
+if [ "$BUILD" = "release" ]; then
+    ARGS=(run --release -f -c "$ROOT/contrib/$DEV.conf")
+fi
+
+exec sudo -E cargo xtask "${ARGS[@]}"
