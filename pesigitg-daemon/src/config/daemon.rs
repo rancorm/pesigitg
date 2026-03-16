@@ -10,6 +10,7 @@ pub struct FileConfig {
     pub ports: Vec<u16>,
     pub interface: String,
     pub queues: u32,
+    pub route_config: Option<PathBuf>,
 }
 
 impl FileConfig {
@@ -26,6 +27,7 @@ impl FileConfig {
         let mut ports = Vec::new();
         let mut interface = DEFAULT_INTF.to_string();
         let mut queues: u32 = DEFAULT_QUEUES;
+        let mut route_config: Option<PathBuf> = None;
 
         for line in content.lines() {
             let line = line.trim();
@@ -43,12 +45,13 @@ impl FileConfig {
                         }
                         queues = q;
                     }
+                    "route_config" => route_config = Some(PathBuf::from(v.trim())),
                     _ => {}
                 }
             }
         }
 
-        Ok(FileConfig { ports, interface, queues })
+        Ok(FileConfig { ports, interface, queues, route_config })
     }
 }
 
@@ -62,8 +65,9 @@ mod tests {
             ports: vec![443, 8443],
             interface: "eth0".to_string(),
             queues: 4,
+            route_config: None,
         };
-        
+
         assert_eq!(config.ports, vec![443, 8443]);
         assert_eq!(config.interface, "eth0");
         assert_eq!(config.queues, 4);
@@ -75,6 +79,7 @@ mod tests {
             ports: vec![443],
             interface: "enp1s0f0".to_string(),
             queues: 1,
+            route_config: None,
         };
         
         assert_eq!(config.ports.len(), 1);
@@ -87,6 +92,7 @@ mod tests {
             ports: vec![],
             interface: "lo".to_string(),
             queues: 0,
+            route_config: None,
         };
         
         assert!(config.ports.is_empty());
@@ -99,6 +105,7 @@ mod tests {
             ports: ports.clone(),
             interface: "eth0".to_string(),
             queues: 8,
+            route_config: None,
         };
         
         assert_eq!(config.ports.len(), 101);
@@ -111,6 +118,7 @@ mod tests {
             ports: vec![0, 1, 80, 443, 65535],
             interface: "eth0".to_string(),
             queues: 1,
+            route_config: None,
         };
         
         assert_eq!(*config.ports.first().unwrap(), 0);
@@ -124,6 +132,7 @@ mod tests {
                 ports: vec![443],
                 interface: name.to_string(),
                 queues: 1,
+                route_config: None,
             };
             
             assert_eq!(config.interface, name);
@@ -136,6 +145,7 @@ mod tests {
             ports: vec![443],
             interface: "eth0".to_string(),
             queues: 128,
+            route_config: None,
         };
         
         assert_eq!(config.queues, 128);
@@ -147,6 +157,7 @@ mod tests {
             ports: vec![443, 8443],
             interface: "eth0".to_string(),
             queues: 4,
+            route_config: None,
         };
         
         let mut cloned = config.clone();
@@ -172,6 +183,7 @@ mod tests {
             ports: vec![443],
             interface: "eth0".to_string(),
             queues: 4,
+            route_config: None,
         };
         
         let debug = format!("{:?}", config);
@@ -188,6 +200,7 @@ mod tests {
             ports: vec![443],
             interface: "eth0".to_string(),
             queues: 2,
+            route_config: None,
         };
         
         let pretty = format!("{:#?}", config);

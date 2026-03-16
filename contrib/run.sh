@@ -9,5 +9,4 @@ export RUST_LOG="${RUST_LOG:-pesigitgd=info}"
 
 exec sudo -E cargo xtask run --release \
     -f \
-    -c "$ROOT/contrib/$DEV.conf" \
-    --route-config "$ROOT/contrib/lb.toml"
+    -c "$ROOT/contrib/$DEV.conf"

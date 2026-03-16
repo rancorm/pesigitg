@@ -38,7 +38,6 @@ pub fn parse_args() -> Result<Args> {
             -p, --port <PORT>         Port to listen on (repeatable)\n  \
             -i, --interface <NAME>    Network interface [default: {DEFAULT_INTF}]\n  \
             -c, --config <PATH>       Daemon config file path\n  \
-            --route-config <PATH>     Route config file path\n  \
             -q, --queues <NUM>        Number of NIC queues [default: 1]\n  \
             -f, --foreground          Run in foreground (don't daemonize)\n  \
             -V, --version             Print version\
@@ -53,7 +52,6 @@ pub fn parse_args() -> Result<Args> {
         exit!();
     }
 
-    let routeconfig: Option<PathBuf> = pargs.opt_value_from_str("--route-config")?;
     #[cfg(debug_assertions)]
     let ebpf_obj: Option<PathBuf> = pargs.opt_value_from_str(["-l", "--load-ebpf"])?;
     let foreground = pargs.contains(["-f", "--foreground"]);
@@ -100,7 +98,7 @@ pub fn parse_args() -> Result<Args> {
             .unwrap_or_else(|| DEFAULT_INTF.into()),
         queues,
         config,
-        routeconfig,
+        routeconfig: file_config.as_ref().and_then(|fc| fc.route_config.clone()),
         #[cfg(debug_assertions)]
         ebpf_obj,
         foreground,
