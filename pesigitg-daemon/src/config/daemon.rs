@@ -45,7 +45,14 @@ impl FileConfig {
                         }
                         queues = q;
                     }
-                    "route_config" => route_config = Some(PathBuf::from(v.trim())),
+                    "route_config" => {
+                        let p = PathBuf::from(v.trim());
+                        route_config = Some(if p.is_relative() {
+                            path.parent().unwrap_or(path).join(&p)
+                        } else {
+                            p
+                        });
+                    }
                     _ => {}
                 }
             }
