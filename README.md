@@ -70,6 +70,19 @@ cargo xtask build-ebpf --release
 the daemon with the stable toolchain, passing the eBPF object path through the
 `PESIGITG_EBPF_OBJ` environment variable.
 
+## contrib/
+
+Example configuration files, systemd units, and helper scripts.
+
+| File | Description |
+|------|-------------|
+| `lb.toml` | Example route configuration defining CID encryption parameters and server-ID-to-address mappings. Documents both single-pass AES-ECB (when `server_id_length + nonce_length = 16`) and four-pass Feistel modes. |
+| `enp2s0f0.conf` | Example daemon config file (`key=value` format) showing interface, port, queue count, and `route_config` pointer. |
+| `pesigitgd.service` | Systemd `Type=notify` unit for running a single instance of `pesigitgd`. |
+| `pesigitgd@.service` | Systemd template unit for per-interface instances — `systemctl start pesigitgd@eth0` reads `/etc/pesigitg/eth0.conf` and binds the service lifetime to the network device. |
+| `run.sh` | Developer convenience script. Builds and runs the daemon under `sudo` via `cargo xtask run`. Accepts a build mode (`release`/`debug`, default `release`) and interface name (default `eth0`) as positional arguments. |
+| `dns-rr.sh` | Generates HTTPS DNS resource records (RFC 9460) for advertising HTTP/3 support. Supports IP hints, non-standard ports, ECH, `--value-only` output for DNS providers, and `--query` to look up existing records via `dig`. |
+
 ## HTTPS DNS Records
 
 HTTP DNS records (formally SVCB and HTTPS RR, defined in RFC 9460) are
@@ -115,14 +128,13 @@ example.com.  300  IN  HTTPS  1 . alpn=h3,h2 ipv4hint=192.0.2.1 ipv6hint=2001:db
 | **ARP** | Address Resolution Protocol | IPv4 link-layer address resolution |
 | **BPF** | Berkeley Packet Filter | In-kernel packet filtering VM; see eBPF |
 | **CID** | Connection ID | QUIC connection identifier used for routing decisions |
-| **DCID** | Destination Connection ID | CID carried in incoming QUIC packets; used for server lookup |
+| **DCID** | Destination CID | CID carried in incoming QUIC packets; used for server lookup |
 | **DNS** | Domain Name System | Name resolution; HTTPS RR / SVCB records |
 | **DSR** | Direct Server Return | Load-balancing mode where replies bypass the LB |
-| **eBPF** | extended Berkeley Packet Filter | In-kernel virtual machine running the XDP packet-processing programs |
+| **eBPF** | extended BPF | In-kernel virtual machine running the XDP packet-processing programs |
 | **ECB** | Electronic Code Book | AES block cipher mode used in the Feistel-based CID encryption |
 | **ECH** | Encrypted Client Hello | TLS extension that encrypts the SNI field for privacy |
 | **ECMP** | Equal-Cost Multi-Path | Routing strategy that distributes flows across multiple next hops |
-| **ETH** | Ethernet | Layer-2 framing (EtherType constants `ETH_P_IP`, `ETH_P_IPV6`) |
 | **ICMP** | Internet Control Message Protocol | Error and diagnostic messages for IPv4 |
 | **ICMPv6** | ICMP for IPv6 | Error and diagnostic messages for IPv6 |
 | **IP** | Internet Protocol | Network-layer protocol; both v4 and v6 |
