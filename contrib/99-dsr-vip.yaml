@@ -1,0 +1,7 @@
+# pesigitg netplan configuration
+network:
+  version: 2
+  ethernets:
+    lo:
+      addresses:
+        - 198.51.100.1/32
