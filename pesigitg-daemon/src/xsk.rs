@@ -9,7 +9,7 @@ use std::ops::DerefMut;
 use std::os::fd::{AsRawFd, RawFd};
 
 use anyhow::{Context, Result};
-use xsk_rs::config::{LibbpfFlags, SocketConfig, UmemConfig};
+use xsk_rs::config::{BindFlags, LibbpfFlags, SocketConfig, UmemConfig};
 use xsk_rs::{CompQueue, FillQueue, FrameDesc, RxQueue, Socket, TxQueue, Umem};
 
 const NUM_FRAMES: u32 = 4096;
@@ -34,6 +34,7 @@ impl XskSocket {
 
         let socket_config = SocketConfig::builder()
             .libbpf_flags(LibbpfFlags::XSK_LIBBPF_FLAGS_INHIBIT_PROG_LOAD)
+            .bind_flags(BindFlags::XDP_USE_NEED_WAKEUP)
             .build();
 
         let (tx_q, rx_q, fq_cq) = Socket::new(
