@@ -187,7 +187,7 @@ fn worker_loop(
     shutdown: &AtomicBool,
     stats: &WorkerStats,
 ) {
-    let mut xsk = match XskSocket::new(interface, queue_id) {
+    let (mut xsk, xdp_mode) = match XskSocket::new(interface, queue_id) {
         Ok(s) => s,
         Err(e) => {
             error!("worker q{}: failed to create AF_XDP socket: {:#}", queue_id, e);
@@ -201,7 +201,7 @@ fn worker_loop(
         return;
     }
 
-    info!("worker q{}: AF_XDP socket bound and registered", queue_id);
+    info!("worker q{}: AF_XDP socket bound and registered ({})", queue_id, xdp_mode);
 
     let mut rx_descs = vec![FrameDesc::default(); BATCH_SIZE];
     let mut comp_descs = vec![FrameDesc::default(); BATCH_SIZE];

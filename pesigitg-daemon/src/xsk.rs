@@ -14,6 +14,21 @@ use xsk_rs::{CompQueue, FillQueue, FrameDesc, RxQueue, Socket, TxQueue, Umem};
 
 const NUM_FRAMES: u32 = 4096;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum XdpMode {
+    ZeroCopy,
+    Copy,
+}
+
+impl std::fmt::Display for XdpMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            XdpMode::ZeroCopy => write!(f, "zero-copy"),
+            XdpMode::Copy => write!(f, "copy"),
+        }
+    }
+}
+
 pub struct XskSocket {
     umem: Umem,
     rx_q: RxQueue,
@@ -24,39 +39,57 @@ pub struct XskSocket {
 
 impl XskSocket {
     /// Create a UMEM and AF_XDP socket bound to `queue_id` on `interface`.
-    pub fn new(interface: &str, queue_id: u32) -> Result<Self> {
-        let (umem, descs) = Umem::new(
-            UmemConfig::default(),
-            NonZeroU32::new(NUM_FRAMES).unwrap(),
-            false,
-        )
-        .context("failed to create UMEM")?;
+    ///
+    /// Attempts zero-copy mode first; falls back to copy mode if the
+    /// driver or kernel does not support it.  Returns the socket and
+    /// the mode that was actually used.
+    pub fn new(interface: &str, queue_id: u32) -> Result<(Self, XdpMode)> {
+        let iface = interface.parse().context("invalid interface name")?;
 
-        let socket_config = SocketConfig::builder()
-            .libbpf_flags(LibbpfFlags::XSK_LIBBPF_FLAGS_INHIBIT_PROG_LOAD)
-            .bind_flags(BindFlags::XDP_USE_NEED_WAKEUP)
-            .build();
+        // Try zero-copy first, then fall back to copy mode.
+        let modes = [
+            (BindFlags::XDP_ZEROCOPY | BindFlags::XDP_USE_NEED_WAKEUP, XdpMode::ZeroCopy),
+            (BindFlags::XDP_USE_NEED_WAKEUP, XdpMode::Copy),
+        ];
 
-        let (tx_q, rx_q, fq_cq) = Socket::new(
-            socket_config,
-            &umem,
-            &interface.parse().context("invalid interface name")?,
-            queue_id,
-        )
-        .context("failed to create AF_XDP socket")?;
+        for (bind_flags, mode) in modes {
+            let (umem, descs) = Umem::new(
+                UmemConfig::default(),
+                NonZeroU32::new(NUM_FRAMES).unwrap(),
+                false,
+            )
+            .context("failed to create UMEM")?;
 
-        let (mut fill_q, comp_q) = fq_cq.context("expected fill and completion queues")?;
+            let socket_config = SocketConfig::builder()
+                .libbpf_flags(LibbpfFlags::XSK_LIBBPF_FLAGS_INHIBIT_PROG_LOAD)
+                .bind_flags(bind_flags)
+                .build();
 
-        // Seed the fill ring so the kernel has frames to write RX packets into.
-        unsafe { fill_q.produce(&descs) };
+            match Socket::new(socket_config, &umem, &iface, queue_id) {
+                Ok((tx_q, rx_q, fq_cq)) => {
+                    let (mut fill_q, comp_q) =
+                        fq_cq.context("expected fill and completion queues")?;
 
-        Ok(XskSocket {
-            umem,
-            rx_q,
-            tx_q,
-            fill_q,
-            comp_q,
-        })
+                    // Seed the fill ring so the kernel has frames to write RX packets into.
+                    unsafe { fill_q.produce(&descs) };
+
+                    return Ok((
+                        XskSocket {
+                            umem,
+                            rx_q,
+                            tx_q,
+                            fill_q,
+                            comp_q,
+                        },
+                        mode,
+                    ));
+                }
+                Err(_) if mode == XdpMode::ZeroCopy => continue,
+                Err(e) => return Err(e).context("failed to create AF_XDP socket"),
+            }
+        }
+
+        unreachable!()
     }
 
     /// Socket file descriptor for XSKS map registration.
