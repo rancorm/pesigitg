@@ -134,7 +134,7 @@ fn print_size(path: &std::path::Path, release: bool) {
         eprintln!("warning: rust-size not found ({}), skipping size report", e);
     }
 
-    if release {
+    if release && !path.to_str().unwrap_or("").contains("ebpf"){
         let stripped = Command::new("rust-readobj")
             .args(["--sections", path.to_str().unwrap()])
             .output()
