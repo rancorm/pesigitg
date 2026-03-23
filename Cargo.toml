@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["pesigitg-daemon", "pesigitg-common", "xtask"]
+members = ["pesigitg-daemon", "pesigitg-common", "xtask", "contrib/quic-echo"]
 exclude = ["pesigitg-ebpf"]
 default-members = ["pesigitg-daemon", "pesigitg-common"]
 
