@@ -200,7 +200,9 @@ impl ConfigTable {
         let path = path.as_ref();
         let text = std::fs::read_to_string(path)?;
         let mut table = Self::from_str(&text)?;
+        
         table.path = path.to_path_buf();
+        
         Ok(table)
     }
 
@@ -219,12 +221,14 @@ impl ConfigTable {
         for raw_config in raw.configs {
             let config = RouteConfig::validate(raw_config)?;
             let id = config.config_id as usize;
+
             if slots[id].is_some() {
                 return Err(RouteConfigError::Validation(format!(
                     "duplicate config_id {}",
                     config.config_id,
                 )));
             }
+            
             slots[id] = Some(config);
         }
 
@@ -424,10 +428,12 @@ impl fmt::Display for RouteConfig {
         writeln!(f, "nonce_length:     {}", self.nonce_length)?;
         writeln!(f, "cid_length:       {} (1 + {})", self.cid_length(), self.cid_payload_length())?;
         writeln!(f, "encryption:       {}", self.encryption)?;
+        
         if self.servers.is_empty() {
             write!(f, "servers:          0")?;
         } else {
             writeln!(f, "servers:          {}", self.servers.len())?;
+            
             for (i, s) in self.servers.iter().enumerate() {
                 if i + 1 < self.servers.len() {
                     writeln!(f, "  {}", s)?;
@@ -436,6 +442,7 @@ impl fmt::Display for RouteConfig {
                 }
             }
         }
+        
         Ok(())
     }
 }
@@ -443,10 +450,13 @@ impl fmt::Display for RouteConfig {
 impl fmt::Display for ConfigTable {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let active: Vec<_> = self.slots.iter().flatten().collect();
-        write!(f, "Config Table ({} active):", active.len())?;
+        
+        write!(f, "config Table ({} active):", active.len())?;
+        
         for config in active {
             write!(f, "\n{}", config)?;
         }
+        
         Ok(())
     }
 }

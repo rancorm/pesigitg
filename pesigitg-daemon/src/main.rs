@@ -206,7 +206,7 @@ fn main() -> Result<()> {
     }
     .map_err(|e| anyhow!("failed to load route config: {}", e))?;
 
-    info!("Loaded route config: {}", route_config.path.display());
+    info!("loaded route config: {}", route_config.path.display());
     info!("{}", route_config);
 
     for config in route_config.configs_mut() {
