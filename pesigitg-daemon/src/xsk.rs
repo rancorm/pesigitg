@@ -130,7 +130,9 @@ impl XskSocket {
         }
 
         unsafe {
-            self.fill_q.produce(descs);
+            self.fill_q
+                .produce_and_wakeup(descs, self.rx_q.fd_mut(), 0)
+                .ok();
         }
     }
 
