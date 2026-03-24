@@ -221,9 +221,10 @@ fn worker_loop(
             pending_fill.extend_from_slice(&comp_descs[refilled..consumed]);
         }
 
+        conn.maybe_sweep();
+
         let n = xsk.poll_recv(&mut rx_descs, POLL_TIMEOUT_MS);
         if n == 0 {
-            conn.maybe_sweep();
             continue;
         }
 
