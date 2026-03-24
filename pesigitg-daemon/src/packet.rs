@@ -99,9 +99,13 @@ fn process_udp(
                 return Verdict::CidForward(config.config_id);
             }
         }
-        // CID was routable but server unknown or has no MAC — don't fallback
-        // to a random server; this is a stale/removed server, not a new client.
-        return Verdict::Pass;
+        // Only treat as a stale/removed server if the CID is the right
+        // length for this config. A too-short CID means this is a
+        // client-generated Initial whose random first byte happened to
+        // match our config_id bits — fall through to fallback routing.
+        if dcid.len() >= 1 + config.cid_payload_length() as usize {
+            return Verdict::Pass;
+        }
     }
 
     // Fallback path: CID is unroutable (client-generated Initial, config
@@ -663,6 +667,33 @@ mod tests {
         assert!(matches!(
             process_packet(&mut frame, &config, &mut conn),
             Verdict::CidForward(_)
+        ));
+        assert_eq!(&frame[..6], &[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01]);
+    }
+
+    #[test]
+    fn client_initial_with_matching_config_id_falls_through_to_fallback() {
+        // A client-generated Initial has a random DCID. If the first byte's
+        // top 3 bits happen to match config_id 0, the CID path enters
+        // lookup_config but the CID is too short to decrypt. This must fall
+        // through to fallback routing, not Verdict::Pass.
+        let config = make_config();
+        let mut conn = ConnectionTable::new();
+
+        // Client-generated DCID: 8 random bytes, first byte 0x05 (top 3 bits = 0 → config_id 0)
+        let client_dcid: &[u8] = &[0x05, 0xde, 0xad, 0xbe, 0xef, 0x01, 0x02, 0x03];
+        let mut quic = Vec::new();
+        quic.push(0xc0); // Long Header Initial
+        quic.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]); // version
+        quic.push(client_dcid.len() as u8); // DCID length = 8
+        quic.extend_from_slice(client_dcid);
+        quic.push(0x00); // SCID length = 0
+
+        let mut frame = build_ipv4_frame(&quic);
+
+        assert!(matches!(
+            process_packet(&mut frame, &config, &mut conn),
+            Verdict::FallbackForward
         ));
         assert_eq!(&frame[..6], &[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01]);
     }
