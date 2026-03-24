@@ -2,8 +2,16 @@
 name = "quic-echo"
 version = "0.1.0"
 edition = "2024"
-description = "Minimal QUIC echo server generating QUIC-LB compliant Connection IDs"
+description = "Minimal QUIC echo server and client with QUIC-LB compliant Connection IDs"
 publish = false
+
+[[bin]]
+name = "quic-echo-server"
+path = "src/server.rs"
+
+[[bin]]
+name = "quic-echo-client"
+path = "src/client.rs"
 
 [dependencies]
 # QUIC transport
