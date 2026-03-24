@@ -33,6 +33,10 @@ pub enum Verdict {
     FallbackForward,
     /// ICMP error routed back to the originating backend server.
     IcmpForward,
+    /// CID matched a config but could not be routed (decryption produced an
+    /// unknown server_id, server has no MAC, or the server was removed).
+    /// Frame is not modified; passed through to the kernel stack.
+    CidUnroutable,
     /// Packet not modified; pass through to the kernel stack.
     Pass,
 }
@@ -104,7 +108,7 @@ fn process_udp(
         // client-generated Initial whose random first byte happened to
         // match our config_id bits — fall through to fallback routing.
         if dcid.len() >= 1 + config.cid_payload_length() as usize {
-            return Verdict::Pass;
+            return Verdict::CidUnroutable;
         }
     }
 
@@ -628,7 +632,7 @@ mod tests {
         // client, so we do NOT fall back to consistent hash.
         assert!(matches!(
             process_packet(&mut frame, &config, &mut conn),
-            Verdict::Pass
+            Verdict::CidUnroutable
         ));
         assert_eq!(&frame[..6], &[0xff; 6]);
     }

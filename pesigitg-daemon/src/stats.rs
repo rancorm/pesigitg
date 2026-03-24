@@ -16,6 +16,7 @@ pub struct WorkerStats {
     cid_routed: AtomicU64,
     cid_by_config: [AtomicU64; 7],
     fallback_routed: AtomicU64,
+    cid_unroutable: AtomicU64,
     icmp_forwarded: AtomicU64,
     passed: AtomicU64,
 }
@@ -32,6 +33,7 @@ impl WorkerStats {
             forwarded: AtomicU64::new(0),
             cid_routed: AtomicU64::new(0),
             cid_by_config: std::array::from_fn(|_| AtomicU64::new(0)),
+            cid_unroutable: AtomicU64::new(0),
             fallback_routed: AtomicU64::new(0),
             icmp_forwarded: AtomicU64::new(0),
             passed: AtomicU64::new(0),
@@ -49,6 +51,11 @@ impl WorkerStats {
         inc(&self.cid_routed);
         inc(&self.cid_by_config[config_id as usize]);
         inc(&self.forwarded);
+    }
+
+    #[inline(always)]
+    pub fn record_cid_unroutable(&self) {
+        inc(&self.cid_unroutable);
     }
 
     #[inline(always)]
@@ -76,6 +83,7 @@ pub struct Snapshot {
     pub forwarded: u64,
     pub cid_routed: u64,
     pub cid_by_config: [u64; 7],
+    pub cid_unroutable: u64,
     pub fallback_routed: u64,
     pub icmp_forwarded: u64,
     pub passed: u64,
@@ -94,6 +102,7 @@ impl Snapshot {
             forwarded: self.forwarded.wrapping_sub(prev.forwarded),
             cid_routed: self.cid_routed.wrapping_sub(prev.cid_routed),
             cid_by_config,
+            cid_unroutable: self.cid_unroutable.wrapping_sub(prev.cid_unroutable),
             fallback_routed: self.fallback_routed.wrapping_sub(prev.fallback_routed),
             icmp_forwarded: self.icmp_forwarded.wrapping_sub(prev.icmp_forwarded),
             passed: self.passed.wrapping_sub(prev.passed),
@@ -132,6 +141,9 @@ impl fmt::Display for Snapshot {
             self.rx_packets, self.forwarded, self.cid_routed,
         )?;
         self.format_cid_by_config(f)?;
+        if self.cid_unroutable > 0 {
+            write!(f, " cid_unroutable={}", self.cid_unroutable)?;
+        }
         write!(
             f,
             " fallback={} icmp={}) pass={}",
@@ -171,6 +183,7 @@ impl StatsTable {
                 total.cid_by_config[i] += slot.cid_by_config[i].load(Ordering::Relaxed);
             }
             
+            total.cid_unroutable += slot.cid_unroutable.load(Ordering::Relaxed);
             total.fallback_routed += slot.fallback_routed.load(Ordering::Relaxed);
             total.icmp_forwarded += slot.icmp_forwarded.load(Ordering::Relaxed);
             total.passed += slot.passed.load(Ordering::Relaxed);

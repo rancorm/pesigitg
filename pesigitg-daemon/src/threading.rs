@@ -253,6 +253,10 @@ fn worker_loop(
                     stats.record_icmp_forward();
                     tx_batch.push(rx_descs[i]);
                 }
+                Verdict::CidUnroutable => {
+                    stats.record_cid_unroutable();
+                    recycle_batch.push(rx_descs[i]);
+                }
                 Verdict::Pass => {
                     stats.record_pass();
                     recycle_batch.push(rx_descs[i]);
