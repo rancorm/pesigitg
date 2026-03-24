@@ -206,8 +206,21 @@ fn worker_loop(
     let mut rx_descs = vec![FrameDesc::default(); BATCH_SIZE];
     let mut comp_descs = vec![FrameDesc::default(); BATCH_SIZE];
     let mut conn = ConnectionTable::new();
+    let mut pending_fill: Vec<FrameDesc> = Vec::new();
 
     while !shutdown.load(Ordering::Relaxed) {
+        // Drain frames that couldn't be refilled on prior iterations.
+        if !pending_fill.is_empty() {
+            let refilled = xsk.refill(&pending_fill);
+            pending_fill.drain(..refilled);
+        }
+
+        // Always drain TX completions, even when idle.
+        let (consumed, refilled) = xsk.complete(&mut comp_descs);
+        if refilled < consumed {
+            pending_fill.extend_from_slice(&comp_descs[refilled..consumed]);
+        }
+
         let n = xsk.poll_recv(&mut rx_descs, POLL_TIMEOUT_MS);
         if n == 0 {
             conn.maybe_sweep();
@@ -248,9 +261,15 @@ fn worker_loop(
 
         drop(config);
 
-        xsk.transmit(&tx_batch);
-        xsk.refill(&recycle_batch);
-        xsk.complete(&mut comp_descs);
+        let sent = xsk.transmit(&tx_batch);
+        if sent < tx_batch.len() {
+            pending_fill.extend_from_slice(&tx_batch[sent..]);
+        }
+
+        let refilled = xsk.refill(&recycle_batch);
+        if refilled < recycle_batch.len() {
+            pending_fill.extend_from_slice(&recycle_batch[refilled..]);
+        }
     }
 }
 

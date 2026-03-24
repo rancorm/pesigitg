@@ -451,7 +451,7 @@ impl fmt::Display for ConfigTable {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let active: Vec<_> = self.slots.iter().flatten().collect();
         
-        write!(f, "config Table ({} active):", active.len())?;
+        write!(f, "config table ({} active):", active.len())?;
         
         for config in active {
             write!(f, "\n{}", config)?;

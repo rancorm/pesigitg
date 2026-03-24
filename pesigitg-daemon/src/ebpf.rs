@@ -82,7 +82,7 @@ pub fn load_ebpf(path: Option<&Path>, interface: &str, ports: &[u16]) -> Result<
     program.load()
         .context("failed to load XDP program")?;
     program
-        .attach(interface, XdpFlags::default())
+        .attach(interface, XdpFlags::DRV_MODE)
         .context("failed to attach XDP program to interface")?;
 
     info!("XDP program attached to '{}'", interface);

@@ -9,7 +9,7 @@ use std::ops::DerefMut;
 use std::os::fd::{AsRawFd, RawFd};
 
 use anyhow::{Context, Result};
-use xsk_rs::config::{BindFlags, LibbpfFlags, SocketConfig, UmemConfig};
+use xsk_rs::config::{BindFlags, LibbpfFlags, QueueSize, SocketConfig, UmemConfig};
 use xsk_rs::{CompQueue, FillQueue, FrameDesc, RxQueue, Socket, TxQueue, Umem};
 
 const NUM_FRAMES: u32 = 4096;
@@ -53,8 +53,14 @@ impl XskSocket {
         ];
 
         for (bind_flags, mode) in modes {
+            let umem_config = UmemConfig::builder()
+                .fill_queue_size(QueueSize::new(NUM_FRAMES).unwrap())
+                .comp_queue_size(QueueSize::new(NUM_FRAMES).unwrap())
+                .build()
+                .expect("invalid UMEM config");
+
             let (umem, descs) = Umem::new(
-                UmemConfig::default(),
+                umem_config,
                 NonZeroU32::new(NUM_FRAMES).unwrap(),
                 false,
             )
@@ -113,35 +119,41 @@ impl XskSocket {
     }
 
     /// Submit frames for transmission out the interface.
-    pub fn transmit(&mut self, descs: &[FrameDesc]) {
+    /// Returns the number of frames actually enqueued.
+    pub fn transmit(&mut self, descs: &[FrameDesc]) -> usize {
         if descs.is_empty() {
-            return;
+            return 0;
         }
-
-        unsafe {
-            self.tx_q.produce_and_wakeup(descs).ok();
+        let n = unsafe { self.tx_q.produce(descs) };
+        if n > 0 && self.tx_q.needs_wakeup() {
+            let _ = self.tx_q.wakeup();
         }
+        n
     }
 
     /// Return frames to the fill ring for reuse by the kernel.
-    pub fn refill(&mut self, descs: &[FrameDesc]) {
+    /// Returns the number of frames actually enqueued.
+    pub fn refill(&mut self, descs: &[FrameDesc]) -> usize {
         if descs.is_empty() {
-            return;
+            return 0;
         }
-
-        unsafe {
-            self.fill_q
-                .produce_and_wakeup(descs, self.rx_q.fd_mut(), 0)
-                .ok();
+        let n = unsafe { self.fill_q.produce(descs) };
+        if n > 0 && self.fill_q.needs_wakeup() {
+            let _ = self.fill_q.wakeup(self.rx_q.fd_mut(), 0);
         }
+        n
     }
 
     /// Reclaim completed TX frames and return them to the fill ring.
-    pub fn complete(&mut self, scratch: &mut [FrameDesc]) {
-        let n = unsafe { self.comp_q.consume(scratch) };
-
-        if n > 0 {
-            unsafe { self.fill_q.produce(&scratch[..n]) };
-        }
+    /// Returns `(consumed, refilled)` — any orphaned frames sit in
+    /// `scratch[refilled..consumed]` and must be retried.
+    pub fn complete(&mut self, scratch: &mut [FrameDesc]) -> (usize, usize) {
+        let consumed = unsafe { self.comp_q.consume(scratch) };
+        let refilled = if consumed > 0 {
+            unsafe { self.fill_q.produce(&scratch[..consumed]) }
+        } else {
+            0
+        };
+        (consumed, refilled)
     }
 }
