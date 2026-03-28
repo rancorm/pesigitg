@@ -27,6 +27,7 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 rustc-hash = "2"
 xsk-rs = "0.4"
+rand = "0.10"
 
 [build-dependencies]
 chrono = "0.4"

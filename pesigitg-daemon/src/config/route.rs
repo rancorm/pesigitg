@@ -316,6 +316,7 @@ impl ConfigTable {
     /// Call after resolving MACs.
     pub fn rebuild_fallback_servers(&mut self) {
         self.fallback_servers.clear();
+
         for config in self.slots.iter().flatten() {
             for server in &config.servers {
                 if server.mac.is_some()
@@ -332,15 +333,18 @@ impl ConfigTable {
     #[cfg(test)]
     pub(crate) fn with_configs(configs: Vec<RouteConfig>) -> Self {
         let mut slots: [Option<RouteConfig>; 7] = Default::default();
+        
         for config in configs {
             let id = config.config_id as usize;
             slots[id] = Some(config);
         }
+        
         let mut table = ConfigTable {
             path: PathBuf::new(),
             slots,
             fallback_servers: Vec::new(),
         };
+        
         table.rebuild_fallback_servers();
         table
     }

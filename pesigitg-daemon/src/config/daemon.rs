@@ -32,6 +32,7 @@ impl FileConfig {
         for line in content.lines() {
             let line = line.trim();
 
+            // Skip empty or comment lines
             if line.is_empty() || line.starts_with('#') { continue; }
 
             if let Some((k, v)) = line.split_once('=') {

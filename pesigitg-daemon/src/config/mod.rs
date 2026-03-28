@@ -47,10 +47,12 @@ pub(crate) fn reload_config(args: &mut Args, route_config: &Arc<RwLock<ConfigTab
             for config in rc.configs_mut() {
                 neigh::resolve_macs(&mut config.servers);
             }
+
             rc.rebuild_fallback_servers();
 
             info!("route config reloaded: {}", rc.path.display());
             info!("{}", rc);
+            
             log_draining_servers(&rc);
 
             *route_config.write().unwrap() = rc;
