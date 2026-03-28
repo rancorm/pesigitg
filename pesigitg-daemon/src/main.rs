@@ -3,6 +3,7 @@ mod cid;
 mod config;
 mod conntable;
 mod ebpf;
+mod health;
 mod neigh;
 mod packet;
 mod pidfile;
@@ -24,11 +25,20 @@ use pesigitg_common::{PID_FILE, DEFAULT_ROUTE_CONFIG, current_pid, exit};
 
 use args::parse_args;
 use config::{log_draining_servers, reload_config};
+use health::HealthChecker;
 use config::route::ConfigTable;
 use pidfile::PidFile;
 use stats::{Snapshot, StatsTable};
 use threading::{get_hw_queues, plan_threads, WorkerPool};
-use utils::{daemonize, init_logging, is_aes_available, notify_ready, num_cores, running_under_systemd, systemd_notify};
+use utils::{
+    daemonize,
+    init_logging,
+    is_aes_available,
+    notify_ready,
+    num_cores,
+    running_under_systemd,
+    systemd_notify
+};
 
 fn main() -> Result<()> {
     let mut args = parse_args()?;
@@ -39,10 +49,9 @@ fn main() -> Result<()> {
     }
 
     // Setup logging: stderr in foreground mode (journald captures it), syslog otherwise
-    if args.foreground {
-        env_logger::init();
-    } else {
-        init_logging()?;
+    match args.foreground {
+        true => { env_logger::init(); }
+        false => { init_logging()?; }
     }
 
     // PID file (unnecessary under systemd) and signal hooks
@@ -68,11 +77,12 @@ fn main() -> Result<()> {
     //  - Early Atom Celeron/Pentium processors
     //  - Some Xeon Phi models
     //  - BIOS/firmware disabling (rare)
-    if is_aes_available() {
-        info!("AES-NI available");
-    } else {
-        error!("AES-NI not available - try again please");
-        bail!("AES-NI not available - try again please");
+    match is_aes_available() {
+        true => { info!("AES-NI available"); }
+        false => {
+            error!("AES-NI not available - try again please");
+            bail!("AES-NI not available - try again please");
+        }
     }
 
     info!("number of cores: {}", num_cores());
@@ -114,6 +124,7 @@ fn main() -> Result<()> {
     for config in route_config.configs_mut() {
         neigh::resolve_macs(&mut config.servers);
     }
+
     route_config.rebuild_fallback_servers();
     log_draining_servers(&route_config);
 
@@ -140,6 +151,7 @@ fn main() -> Result<()> {
         info!("thread planned: queue={} -> core={}", t.queue_id, t.core_id);
     }
 
+    // Resolve and log interface MAC
     let local_mac = utils::interface_mac(&args.interface)
         .map_err(|e| anyhow!("failed to get MAC for {}: {}", args.interface, e))?;
     info!("interface MAC: {}", utils::format_mac(&local_mac));
@@ -161,6 +173,9 @@ fn main() -> Result<()> {
         "listening on {} ports {:?}, queues: {}",
         args.interface, args.ports, args.queues
     ));
+
+    // Health checker probes backends on the first configured port.
+    let mut health = HealthChecker::new(args.ports[0]);
 
     // Poll for signals with a timeout to allow watchdog keepalives
     let mut prev_stats = Snapshot::default();
@@ -202,22 +217,33 @@ fn main() -> Result<()> {
             draining_had_traffic = true;
         } else if draining_had_traffic {
             let rc = route_config.read().unwrap();
+
             if rc.has_draining_servers() {
                 info!("all draining servers fully drained — safe to remove from config");
+                
                 draining_had_traffic = false;
             }
         }
 
         prev_stats = current;
 
-        // Retry MAC resolution for servers whose ARP entries weren't
-        // cached at startup (e.g. first boot, backend not yet pinged).
+        // Retry MAC resolution and run health probes.
         {
             let mut rc = route_config.write().unwrap();
+            let mut rebuild = false;
+
             if rc.has_unresolved_macs() {
                 for config in rc.configs_mut() {
                     neigh::resolve_macs(&mut config.servers);
                 }
+                rebuild = true;
+            }
+
+            if health.check(&mut rc) {
+                rebuild = true;
+            }
+
+            if rebuild {
                 rc.rebuild_fallback_servers();
             }
         }
