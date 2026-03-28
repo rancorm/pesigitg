@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::Duration;
 
-use log::{error, warn, info};
+use log::{error, warn, info, debug};
 use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM, SIGUSR1};
 use signal_hook::iterator::Signals;
 use anyhow::{anyhow, ensure, Result};
@@ -40,6 +40,8 @@ use utils::{
     running_under_systemd,
     systemd_notify
 };
+
+const LOOP_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn main() -> Result<()> {
     let mut args = parse_args()?;
@@ -190,7 +192,7 @@ fn main() -> Result<()> {
 
     loop {
         // Wait up to 5 seconds for a signal, then run periodic tasks
-        let mut got_signal = match sig_rx.recv_timeout(Duration::from_secs(5)) {
+        let mut got_signal = match sig_rx.recv_timeout(LOOP_TIMEOUT) {
             Ok(sig) => Some(sig),
             Err(mpsc::RecvTimeoutError::Timeout) => None,
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -272,11 +274,15 @@ fn check_and_rebuild(route_config: &RwLock<ConfigTable>, health: &mut HealthChec
         rebuild = true;
     }
 
+    debug!("sending health checks");
+
     if health.check(&mut rc) {
         rebuild = true;
     }
 
     if rebuild {
+        info!("rebuild fallback servers");
+
         rc.rebuild_fallback_servers();
     }
 }
