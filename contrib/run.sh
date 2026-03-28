@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 BUILD="${1:-release}"
-CONF_PATH="${2:-contrib/etc/enp2s0f0.conf}"
+CONF_PATH="${2:-contrib/etc/pesigitg/enp2s0f0.conf}"
 
 export RUST_LOG="${RUST_LOG:-pesigitgd=info}"
 

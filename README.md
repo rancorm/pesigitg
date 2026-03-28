@@ -53,7 +53,7 @@ sudo apt install \
 
 - **Linux kernel 5.8+** — AF_XDP socket support
 - **AES-NI** — the daemon checks for this CPU feature at startup and will refuse to run without it (Westmere / 2010+ x86_64 CPUs)
-- **systemd** (recommended) — `pesigitgd` uses `Type=notify` with watchdog; see `contrib/pesigitgd.service`
+- **systemd** (recommended) — `pesigitgd` uses `Type=notify` with watchdog; see `contrib/etc/systemd/system/pesigitgd.service`
 
 ### Building
 
@@ -100,8 +100,8 @@ answered on the data-plane NIC:
 sudo sysctl -w net.ipv4.conf.eth0.arp_ignore=1
 sudo sysctl -w net.ipv4.conf.eth0.arp_announce=2
 
-# persist across reboots (see contrib/etc/90-dsr.conf)
-sudo cp contrib/etc/90-dsr.conf /etc/sysctl.d/
+# persist across reboots (see contrib/etc/sysctl.d/90-dsr.conf)
+sudo cp contrib/etc/sysctl.d/90-dsr.conf /etc/sysctl.d/
 sudo sysctl --system
 ```
 
@@ -113,7 +113,7 @@ upstream router learns the backend's MAC for the VIP, and traffic bypasses the
 load balancer entirely.
 
 ```sh
-# bind the VIP to loopback (see contrib/etc/99-dsr-vip.yaml for netplan)
+# bind the VIP to loopback (see contrib/etc/netplan/99-dsr-vip.yaml)
 sudo ip addr add 198.51.100.1/32 dev lo
 
 # suppress ARP
@@ -139,14 +139,16 @@ Example configuration files, systemd units, and helper scripts.
 
 | File | Description |
 |------|-------------|
-| `etc/lb.toml` | Example route configuration defining CID encryption parameters and server-ID-to-address mappings. Documents both single-pass AES-ECB (when `server_id_length + nonce_length = 16`) and four-pass Feistel modes. |
-| `etc/enp2s0f0.conf` | Example daemon config file (`key=value` format) showing interface, port, queue count, and `route_config` pointer. |
-| `etc/90-dsr.conf` | Example sysctl configuration for DSR backend ARP settings (`/etc/sysctl.d/`). |
-| `etc/99-dsr-vip.yaml` | Example netplan configuration for VIP loopback addresses (`/etc/netplan/`). |
-| `pesigitgd.service` | Systemd `Type=notify` unit for running a single instance of `pesigitgd`. |
-| `pesigitgd@.service` | Systemd template unit for per-interface instances — `systemctl start pesigitgd@eth0` reads `/etc/pesigitg/eth0.conf` and binds the service lifetime to the network device. |
+| `etc/pesigitg/lb.toml` | Example route configuration defining CID encryption parameters and server-ID-to-address mappings. Documents both single-pass AES-ECB (when `server_id_length + nonce_length = 16`) and four-pass Feistel modes. |
+| `etc/pesigitg/enp2s0f0.conf` | Example daemon config file (`key=value` format) showing interface, port, queue count, and `route_config` pointer. |
+| `etc/sysctl.d/90-dsr.conf` | Sysctl ARP settings for DSR (load balancer and backends). |
+| `etc/sysctl.d/90-lb.conf` | Sysctl ARP settings for the load balancer management interface. |
+| `etc/netplan/99-dsr-vip.yaml` | Netplan configuration for VIP loopback addresses. |
+| `etc/systemd/system/pesigitgd.service` | Systemd `Type=notify` unit for running a single instance of `pesigitgd`. |
+| `etc/systemd/system/pesigitgd@.service` | Systemd template unit for per-interface instances — `systemctl start pesigitgd@eth0` reads `/etc/pesigitg/eth0.conf` and binds the service lifetime to the network device. |
 | `run.sh` | Developer convenience script. Builds and runs the daemon under `sudo` via `cargo xtask run`. Accepts a build mode (`release`/`debug`, default `release`) and interface name (default `eth0`) as positional arguments. |
 | `dns-rr.sh` | Generates HTTPS DNS resource records (RFC 9460) for advertising HTTP/3 support. Supports IP hints, non-standard ports, ECH, `--value-only` output for DNS providers, and `--query` to look up existing records via `dig`. |
+| `dsr-backend.sh` | Installs/removes DSR backend configuration (sysctl + netplan VIPs) on a backend server. |
 
 ## HTTPS DNS Records
 
