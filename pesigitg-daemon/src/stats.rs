@@ -17,6 +17,7 @@ pub struct WorkerStats {
     cid_by_config: [AtomicU64; 7],
     fallback_routed: AtomicU64,
     cid_unroutable: AtomicU64,
+    draining_forwarded: AtomicU64,
     icmp_forwarded: AtomicU64,
     passed: AtomicU64,
     pending_fill_peak: AtomicU64,
@@ -36,6 +37,7 @@ impl WorkerStats {
             cid_by_config: std::array::from_fn(|_| AtomicU64::new(0)),
             cid_unroutable: AtomicU64::new(0),
             fallback_routed: AtomicU64::new(0),
+            draining_forwarded: AtomicU64::new(0),
             icmp_forwarded: AtomicU64::new(0),
             passed: AtomicU64::new(0),
             pending_fill_peak: AtomicU64::new(0),
@@ -66,6 +68,7 @@ pub struct BatchStats {
     cid_by_config: [u64; 7],
     fallback_routed: u64,
     cid_unroutable: u64,
+    draining_forwarded: u64,
     icmp_forwarded: u64,
     passed: u64,
 }
@@ -79,6 +82,7 @@ impl BatchStats {
             cid_by_config: [0; 7],
             fallback_routed: 0,
             cid_unroutable: 0,
+            draining_forwarded: 0,
             icmp_forwarded: 0,
             passed: 0,
         }
@@ -101,6 +105,11 @@ impl BatchStats {
     pub fn record_icmp_forward(&mut self) {
         self.icmp_forwarded += 1;
         self.forwarded += 1;
+    }
+
+    #[inline(always)]
+    pub fn record_draining_forward(&mut self) {
+        self.draining_forwarded += 1;
     }
 
     #[inline(always)]
@@ -133,6 +142,9 @@ impl BatchStats {
         if self.cid_unroutable > 0 {
             add(&target.cid_unroutable, self.cid_unroutable);
         }
+        if self.draining_forwarded > 0 {
+            add(&target.draining_forwarded, self.draining_forwarded);
+        }
         if self.icmp_forwarded > 0 {
             add(&target.icmp_forwarded, self.icmp_forwarded);
         }
@@ -151,6 +163,7 @@ pub struct Snapshot {
     pub cid_by_config: [u64; 7],
     pub cid_unroutable: u64,
     pub fallback_routed: u64,
+    pub draining_forwarded: u64,
     pub icmp_forwarded: u64,
     pub passed: u64,
     pub pending_fill_peak: u64,
@@ -171,6 +184,7 @@ impl Snapshot {
             cid_by_config,
             cid_unroutable: self.cid_unroutable.wrapping_sub(prev.cid_unroutable),
             fallback_routed: self.fallback_routed.wrapping_sub(prev.fallback_routed),
+            draining_forwarded: self.draining_forwarded.wrapping_sub(prev.draining_forwarded),
             icmp_forwarded: self.icmp_forwarded.wrapping_sub(prev.icmp_forwarded),
             passed: self.passed.wrapping_sub(prev.passed),
             pending_fill_peak: self.pending_fill_peak,
@@ -211,6 +225,9 @@ impl fmt::Display for Snapshot {
         self.format_cid_by_config(f)?;
         if self.cid_unroutable > 0 {
             write!(f, " cid_unroutable={}", self.cid_unroutable)?;
+        }
+        if self.draining_forwarded > 0 {
+            write!(f, " draining={}", self.draining_forwarded)?;
         }
         write!(
             f,
@@ -257,6 +274,7 @@ impl StatsTable {
             
             total.cid_unroutable += slot.cid_unroutable.load(Ordering::Relaxed);
             total.fallback_routed += slot.fallback_routed.load(Ordering::Relaxed);
+            total.draining_forwarded += slot.draining_forwarded.load(Ordering::Relaxed);
             total.icmp_forwarded += slot.icmp_forwarded.load(Ordering::Relaxed);
             total.passed += slot.passed.load(Ordering::Relaxed);
             let peak = slot.pending_fill_peak.load(Ordering::Relaxed);

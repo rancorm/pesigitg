@@ -6,6 +6,8 @@ use std::sync::{Arc, RwLock};
 use log::{error, info};
 use pesigitg_common::DEFAULT_ROUTE_CONFIG;
 
+use log::warn;
+
 use crate::args::Args;
 use crate::neigh;
 use crate::utils::{notify_ready, systemd_notify};
@@ -49,6 +51,7 @@ pub(crate) fn reload_config(args: &mut Args, route_config: &Arc<RwLock<ConfigTab
 
             info!("route config reloaded: {}", rc.path.display());
             info!("{}", rc);
+            log_draining_servers(&rc);
 
             *route_config.write().unwrap() = rc;
         }
@@ -60,4 +63,15 @@ pub(crate) fn reload_config(args: &mut Args, route_config: &Arc<RwLock<ConfigTab
     notify_ready(&format!(
         "listening on {} ports {:?}", args.interface, args.ports
     ));
+}
+
+/// Log a warning for each server marked as draining.
+pub(crate) fn log_draining_servers(table: &ConfigTable) {
+    for config in table.configs() {
+        for server in &config.servers {
+            if server.draining {
+                warn!("server {} is draining (config_id={})", server, config.config_id);
+            }
+        }
+    }
 }

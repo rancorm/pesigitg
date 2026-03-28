@@ -253,6 +253,11 @@ fn worker_loop(
                     batch_stats.record_cid_forward(config_id);
                     tx_batch.push(rx_descs[i]);
                 }
+                Verdict::CidForwardDraining(config_id) => {
+                    batch_stats.record_cid_forward(config_id);
+                    batch_stats.record_draining_forward();
+                    tx_batch.push(rx_descs[i]);
+                }
                 Verdict::FallbackForward => {
                     batch_stats.record_fallback_forward();
                     tx_batch.push(rx_descs[i]);

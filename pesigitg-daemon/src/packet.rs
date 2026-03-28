@@ -30,6 +30,10 @@ pub enum Verdict {
     /// CID-routed: DCID decrypted and mapped to a backend server.
     /// Carries the config_id (0-6) for per-config stats tracking.
     CidForward(u8),
+    /// CID-routed to a server that is draining. The packet is still
+    /// forwarded (existing connections must finish), but counted
+    /// separately so the main loop can detect when draining completes.
+    CidForwardDraining(u8),
     /// Fallback-routed: connection table hit or consistent hash.
     FallbackForward,
     /// ICMP error routed back to the originating backend server.
@@ -106,7 +110,11 @@ fn process_udp(
                 conn.record_dcid(DcidKey::from_slice(dcid), mac, now);
                 frame[..6].copy_from_slice(&mac);
                 frame[6..12].copy_from_slice(local_mac);
-                return Verdict::CidForward(config.config_id);
+                return if server.draining {
+                    Verdict::CidForwardDraining(config.config_id)
+                } else {
+                    Verdict::CidForward(config.config_id)
+                };
             }
         }
         // Only treat as a stale/removed server if the CID is the right

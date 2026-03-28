@@ -290,9 +290,20 @@ impl ConfigTable {
             .map(|c| c.cid_length())
     }
 
+    /// Iterator over all active configs.
+    pub fn configs(&self) -> impl Iterator<Item = &RouteConfig> {
+        self.slots.iter().filter_map(|s| s.as_ref())
+    }
+
     /// Mutable iterator over all active configs.
     pub fn configs_mut(&mut self) -> impl Iterator<Item = &mut RouteConfig> {
         self.slots.iter_mut().filter_map(|s| s.as_mut())
+    }
+
+    /// Returns `true` if any server in any active config is draining.
+    pub fn has_draining_servers(&self) -> bool {
+        self.slots.iter().flatten()
+            .any(|c| c.servers.iter().any(|s| s.draining))
     }
 
     /// Returns `true` if any server in any active config has an unresolved MAC.

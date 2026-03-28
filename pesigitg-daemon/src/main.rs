@@ -23,7 +23,7 @@ use anyhow::{anyhow, bail, Result};
 use pesigitg_common::{PID_FILE, DEFAULT_ROUTE_CONFIG, current_pid, exit};
 
 use args::parse_args;
-use config::reload_config;
+use config::{log_draining_servers, reload_config};
 use config::route::ConfigTable;
 use pidfile::PidFile;
 use stats::{Snapshot, StatsTable};
@@ -113,6 +113,7 @@ fn main() -> Result<()> {
         neigh::resolve_macs(&mut config.servers);
     }
     route_config.rebuild_fallback_servers();
+    log_draining_servers(&route_config);
 
     let route_config = Arc::new(RwLock::new(route_config));
 
@@ -162,6 +163,7 @@ fn main() -> Result<()> {
 
     // Poll for signals with a timeout to allow watchdog keepalives
     let mut prev_stats = Snapshot::default();
+    let mut draining_had_traffic = false;
 
     loop {
         for sig in signals.pending() {
@@ -193,6 +195,18 @@ fn main() -> Result<()> {
             info!("stats: {}", delta);
         }
         
+        // Detect drain completion: once traffic was flowing to draining
+        // servers and then drops to zero, log that draining is complete.
+        if delta.draining_forwarded > 0 {
+            draining_had_traffic = true;
+        } else if draining_had_traffic {
+            let rc = route_config.read().unwrap();
+            if rc.has_draining_servers() {
+                info!("all draining servers fully drained — safe to remove from config");
+                draining_had_traffic = false;
+            }
+        }
+
         prev_stats = current;
 
         // Retry MAC resolution for servers whose ARP entries weren't
