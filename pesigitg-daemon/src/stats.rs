@@ -23,8 +23,8 @@ pub struct WorkerStats {
 }
 
 #[inline(always)]
-fn inc(counter: &AtomicU64) {
-    counter.store(counter.load(Ordering::Relaxed) + 1, Ordering::Relaxed);
+fn add(counter: &AtomicU64, n: u64) {
+    counter.store(counter.load(Ordering::Relaxed) + n, Ordering::Relaxed);
 }
 
 impl WorkerStats {
@@ -44,43 +44,100 @@ impl WorkerStats {
 
     #[inline(always)]
     pub fn record_rx(&self, n: u64) {
-        let v = self.rx_packets.load(Ordering::Relaxed);
-        self.rx_packets.store(v + n, Ordering::Relaxed);
-    }
-
-    #[inline(always)]
-    pub fn record_cid_forward(&self, config_id: u8) {
-        inc(&self.cid_routed);
-        inc(&self.cid_by_config[config_id as usize]);
-        inc(&self.forwarded);
-    }
-
-    #[inline(always)]
-    pub fn record_cid_unroutable(&self) {
-        inc(&self.cid_unroutable);
-    }
-
-    #[inline(always)]
-    pub fn record_fallback_forward(&self) {
-        inc(&self.fallback_routed);
-        inc(&self.forwarded);
-    }
-
-    #[inline(always)]
-    pub fn record_icmp_forward(&self) {
-        inc(&self.icmp_forwarded);
-        inc(&self.forwarded);
-    }
-
-    #[inline(always)]
-    pub fn record_pass(&self) {
-        inc(&self.passed);
+        add(&self.rx_packets, n);
     }
 
     #[inline(always)]
     pub fn record_pending_fill(&self, depth: u64) {
         if depth > self.pending_fill_peak.load(Ordering::Relaxed) {
             self.pending_fill_peak.store(depth, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Thread-local batch accumulator for verdict counters.
+///
+/// Collects per-packet stats using plain `u64` fields during the packet
+/// loop, then flushes to the shared `WorkerStats` atomics once per batch.
+/// This reduces atomic store traffic from O(packets) to O(1) per batch.
+pub struct BatchStats {
+    forwarded: u64,
+    cid_routed: u64,
+    cid_by_config: [u64; 7],
+    fallback_routed: u64,
+    cid_unroutable: u64,
+    icmp_forwarded: u64,
+    passed: u64,
+}
+
+impl BatchStats {
+    #[inline(always)]
+    pub fn new() -> Self {
+        Self {
+            forwarded: 0,
+            cid_routed: 0,
+            cid_by_config: [0; 7],
+            fallback_routed: 0,
+            cid_unroutable: 0,
+            icmp_forwarded: 0,
+            passed: 0,
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_cid_forward(&mut self, config_id: u8) {
+        self.cid_routed += 1;
+        self.cid_by_config[config_id as usize] += 1;
+        self.forwarded += 1;
+    }
+
+    #[inline(always)]
+    pub fn record_fallback_forward(&mut self) {
+        self.fallback_routed += 1;
+        self.forwarded += 1;
+    }
+
+    #[inline(always)]
+    pub fn record_icmp_forward(&mut self) {
+        self.icmp_forwarded += 1;
+        self.forwarded += 1;
+    }
+
+    #[inline(always)]
+    pub fn record_cid_unroutable(&mut self) {
+        self.cid_unroutable += 1;
+    }
+
+    #[inline(always)]
+    pub fn record_pass(&mut self) {
+        self.passed += 1;
+    }
+
+    /// Flush accumulated counters into the shared atomic stats.
+    #[inline(always)]
+    pub fn flush(self, target: &WorkerStats) {
+        if self.forwarded > 0 {
+            add(&target.forwarded, self.forwarded);
+        }
+        if self.cid_routed > 0 {
+            add(&target.cid_routed, self.cid_routed);
+            for (i, &n) in self.cid_by_config.iter().enumerate() {
+                if n > 0 {
+                    add(&target.cid_by_config[i], n);
+                }
+            }
+        }
+        if self.fallback_routed > 0 {
+            add(&target.fallback_routed, self.fallback_routed);
+        }
+        if self.cid_unroutable > 0 {
+            add(&target.cid_unroutable, self.cid_unroutable);
+        }
+        if self.icmp_forwarded > 0 {
+            add(&target.icmp_forwarded, self.icmp_forwarded);
+        }
+        if self.passed > 0 {
+            add(&target.passed, self.passed);
         }
     }
 }

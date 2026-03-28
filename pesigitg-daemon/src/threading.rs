@@ -15,7 +15,7 @@ use crate::config::route::ConfigTable;
 use crate::conntable::ConnectionTable;
 use crate::ebpf::EbpfHandle;
 use crate::packet::{self, Verdict};
-use crate::stats::{StatsTable, WorkerStats};
+use crate::stats::{BatchStats, StatsTable, WorkerStats};
 use crate::utils::num_cores;
 use crate::xsk::XskSocket;
 
@@ -241,6 +241,8 @@ fn worker_loop(
 
         stats.record_rx(n as u64);
 
+        let mut batch_stats = BatchStats::new();
+
         for i in 0..n {
             let verdict = {
                 let mut data = unsafe { xsk.frame_mut(&mut rx_descs[i]) };
@@ -248,27 +250,29 @@ fn worker_loop(
             };
             match verdict {
                 Verdict::CidForward(config_id) => {
-                    stats.record_cid_forward(config_id);
+                    batch_stats.record_cid_forward(config_id);
                     tx_batch.push(rx_descs[i]);
                 }
                 Verdict::FallbackForward => {
-                    stats.record_fallback_forward();
+                    batch_stats.record_fallback_forward();
                     tx_batch.push(rx_descs[i]);
                 }
                 Verdict::IcmpForward => {
-                    stats.record_icmp_forward();
+                    batch_stats.record_icmp_forward();
                     tx_batch.push(rx_descs[i]);
                 }
                 Verdict::CidUnroutable => {
-                    stats.record_cid_unroutable();
+                    batch_stats.record_cid_unroutable();
                     recycle_batch.push(rx_descs[i]);
                 }
                 Verdict::Pass => {
-                    stats.record_pass();
+                    batch_stats.record_pass();
                     recycle_batch.push(rx_descs[i]);
                 }
             }
         }
+
+        batch_stats.flush(stats);
 
         drop(config);
 
