@@ -184,7 +184,7 @@ fn main() -> Result<()> {
     ));
 
     // Health checker probes backends on the first configured port.
-    let mut health = HealthChecker::new(args.ports[0]);
+    let mut health = HealthChecker::new(args.ports[0])?;
 
     // Poll for signals with a timeout to allow watchdog keepalives
     let mut prev_stats = Snapshot::default();

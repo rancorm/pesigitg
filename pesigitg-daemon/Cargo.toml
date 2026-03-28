@@ -31,8 +31,8 @@ rand = "0.10"
 
 # QUIC health probes
 quinn = "0.11"
-tokio = "1.50"
-rustls = "0.23"
+tokio = { version = "1.50", features = ["rt", "time"] }
+rustls = { version = "0.23", features = ["ring"] }
 
 [build-dependencies]
 chrono = "0.4"
