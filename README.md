@@ -31,17 +31,23 @@ A high-performance QUIC-aware load balancer written in Rust, using eBPF and AF_X
 ```sh
 sudo apt install \
   build-essential \
-  linux-headers-generic \
+  libelf-dev \
   libsystemd-dev \
-  pkg-config
+  linux-headers-generic \
+  pkg-config \
+  rustup \
+  zlib1g-dev
 ```
 
 | Package | Why |
 |---------|-----|
-| `build-essential` | C compiler and libc headers (`libc6-dev`) needed by the `libc` and `nix` crates |
-| `linux-headers-generic` | Kernel headers for netlink, ethtool ioctl, and XDP structures |
+| `build-essential` | C compiler, `make`, and libc headers (`libc6-dev`) needed by the `libc` and `nix` crates and the vendored libbpf build |
+| `libelf-dev` | ELF library headers required by the vendored libbpf build (`libbpf-sys`) |
 | `libsystemd-dev` | Required by the `sd-notify` crate for systemd integration |
-| `pkg-config` | Locates system libraries during `cargo build` |
+| `linux-headers-generic` | Kernel headers for netlink, ethtool ioctl, and XDP structures |
+| `pkg-config` | Locates system libraries (`libelf`, `zlib`, `libsystemd`) during `cargo build` |
+| `rustup` | Rust toolchain manager; provides `rustup`, `cargo`, and `rustc` |
+| `zlib1g-dev` | Compression library required by the vendored libbpf build (`libbpf-sys`) |
 
 ### Runtime Requirements
 
