@@ -11,18 +11,15 @@
 //! --server-id selects which server identity this instance uses for CID
 //! generation (hex string matching a server id in the config).
 
-mod cid_gen;
-
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use quinn::Endpoint;
+use quic_lb_cid::{Encryption, QuicLbCidGenerator};
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use tokio::signal;
 use tokio::time;
-
-use cid_gen::{Encryption, QuicLbCidGenerator};
 
 // ---------------------------------------------------------------------------
 // Config parsing (reuses lb.toml format)

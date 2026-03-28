@@ -778,16 +778,25 @@ dependencies = [
 name = "quic-echo"
 version = "0.1.0"
 dependencies = [
- "aes",
  "anyhow",
+ "quic-lb-cid",
  "quinn",
  "quinn-proto",
- "rand",
  "rcgen",
  "rustls",
  "serde",
  "tokio",
  "toml",
+]
+
+[[package]]
+name = "quic-lb-cid"
+version = "0.1.0"
+dependencies = [
+ "aes",
+ "quinn",
+ "quinn-proto",
+ "rand",
 ]
 
 [[package]]

@@ -1,0 +1,17 @@
+[package]
+name = "quic-lb-cid"
+version = "0.1.0"
+edition = "2024"
+description = "QUIC-LB compliant Connection ID generator (draft-ietf-quic-load-balancers-21)"
+publish = false
+
+[dependencies]
+# CID encryption
+aes = "0.8"
+
+# Quinn trait for ConnectionIdGenerator
+quinn = "0.11"
+quinn-proto = "0.11"
+
+# RNG for nonce generation
+rand = "0.9"

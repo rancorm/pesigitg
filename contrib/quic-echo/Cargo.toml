@@ -22,15 +22,12 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 # TLS self-signed cert generation (dev/test convenience)
 rcgen = "0.13"
 
-# CID encryption (same crate family as pesigitgd)
-aes = "0.8"
+# QUIC-LB CID generation
+quic-lb-cid = { path = "../quic-lb-cid" }
 
 # Config parsing (reads a subset of lb.toml)
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
-
-# RNG for nonce generation
-rand = "0.9"
 
 # Async runtime
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
