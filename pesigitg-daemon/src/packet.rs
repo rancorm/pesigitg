@@ -189,23 +189,18 @@ fn process_icmp(
 
 /// Select a backend server via consistent hashing of the 4-tuple.
 ///
-/// Only considers servers that have a resolved MAC address. Returns the
-/// MAC address, or `None` if no server is routable.
+/// `servers` must only contain entries with a resolved MAC (guaranteed
+/// by [`ConfigTable::rebuild_fallback_servers`]).
 fn fallback_mac(flow: &FlowKey, servers: &[Server]) -> Option<[u8; 6]> {
-    let routable_count = servers.iter().filter(|s| s.mac.is_some()).count();
-    if routable_count == 0 {
+    if servers.is_empty() {
         return None;
     }
 
     let mut hasher = DefaultHasher::new();
     flow.hash(&mut hasher);
-    let target = (hasher.finish() as usize) % routable_count;
+    let target = (hasher.finish() as usize) % servers.len();
 
-    servers
-        .iter()
-        .filter(|s| s.mac.is_some())
-        .nth(target)
-        .and_then(|s| s.mac)
+    servers[target].mac
 }
 
 /// Parse a raw Ethernet frame to extract the QUIC payload offset and 4-tuple.
