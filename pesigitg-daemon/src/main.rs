@@ -297,12 +297,14 @@ fn main() -> Result<()> {
 
         // Retry MAC resolution for servers whose ARP entries weren't
         // cached at startup (e.g. first boot, backend not yet pinged).
-        if route_config.read().unwrap().has_unresolved_macs() {
+        {
             let mut rc = route_config.write().unwrap();
-            for config in rc.configs_mut() {
-                neigh::resolve_macs(&mut config.servers);
+            if rc.has_unresolved_macs() {
+                for config in rc.configs_mut() {
+                    neigh::resolve_macs(&mut config.servers);
+                }
+                rc.rebuild_fallback_servers();
             }
-            rc.rebuild_fallback_servers();
         }
 
         systemd_notify!(sd_notify::NotifyState::Watchdog);
