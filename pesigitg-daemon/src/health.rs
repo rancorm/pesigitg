@@ -124,7 +124,11 @@ impl HealthChecker {
             .with_custom_certificate_verifier(Arc::new(InsecureVerifier))
             .with_no_client_auth();
 
-        tls.alpn_protocols = vec![b"h3".to_vec()];
+        tls.alpn_protocols = vec![
+            b"h3".to_vec(),
+            b"hq-interop".to_vec(),
+            b"hq-29".to_vec(),
+        ];
 
         let quic_config = quinn::crypto::rustls::QuicClientConfig::try_from(tls)
             .map_err(|e| anyhow::anyhow!("QUIC client config: {e}"))?;
