@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: GPL-3.0-or-later OR Commercial
+// Copyright (c) 2026 Jonathan Cormier
+// This file is part of Pesigitg.
+
 macro_rules! rustc_env {
     ($key:expr, $value:expr) => {
         println!("cargo:rustc-env={}={}", $key, $value)

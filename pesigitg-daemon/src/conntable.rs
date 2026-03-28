@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: GPL-3.0-or-later OR Commercial
+// Copyright (c) 2026 Jonathan Cormier
+// This file is part of Pesigitg.
+
 //! Per-worker connection table for fallback routing of unroutable QUIC CIDs.
 //!
 //! When a packet's Connection ID cannot be decoded (e.g. a client-generated

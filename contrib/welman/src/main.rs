@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: GPL-3.0-or-later OR Commercial
+// Copyright (c) 2026 Jonathan Cormier
+// This file is part of Pesigitg.
+
 //! welman — Minimal HTTP/3 server with QUIC-LB compliant Connection IDs.
 //!
 //! Named after Welman Matrix from ReBoot — the father who spent most of the
@@ -25,10 +29,6 @@ use quic_lb_cid::{Encryption, QuicLbCidGenerator};
 use quinn::Endpoint;
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use tokio::signal;
-
-// ---------------------------------------------------------------------------
-// Config parsing (reuses lb.toml format — identical to quic-echo)
-// ---------------------------------------------------------------------------
 
 #[derive(serde::Deserialize)]
 struct ConfigFile {
@@ -177,21 +177,14 @@ fn resolve_config(path: &str, server_id_hex: &str) -> Result<CidGenParams> {
     bail!("server_id {server_id_hex} not found in any config in {path}");
 }
 
-// ---------------------------------------------------------------------------
-// TLS (self-signed for testing)
-// ---------------------------------------------------------------------------
-
 fn generate_self_signed_cert() -> Result<(Vec<CertificateDer<'static>>, PrivatePkcs8KeyDer<'static>)> {
     let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()])
         .context("generating self-signed cert")?;
     let cert_der = CertificateDer::from(cert.cert);
     let key_der = PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der());
+    
     Ok((vec![cert_der], key_der))
 }
-
-// ---------------------------------------------------------------------------
-// CLI
-// ---------------------------------------------------------------------------
 
 struct Args {
     config_path: String,
@@ -238,10 +231,6 @@ fn parse_args() -> Result<Args> {
         listen,
     })
 }
-
-// ---------------------------------------------------------------------------
-// HTTP/3 request handling
-// ---------------------------------------------------------------------------
 
 /// Diagnostic info embedded in every response.
 #[derive(Clone)]
@@ -369,21 +358,17 @@ or <a href="/health" style="color:#5588cc">/health</a>.</p>
     )
 }
 
-// ---------------------------------------------------------------------------
-// Server
-// ---------------------------------------------------------------------------
-
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = parse_args()?;
     let params = resolve_config(&args.config_path, &args.server_id)?;
-
     let enc_label = match &params.encryption {
         Encryption::Plaintext => "plaintext",
         Encryption::SinglePass { .. } => "single-pass AES-ECB",
         Encryption::FourPass { .. } => "four-pass Feistel",
     };
     let cid_len = 1 + params.server_id.len() + params.nonce_length as usize;
+
     eprintln!(
         "welman: config_id={}, server_id={}, cid_len={cid_len}, \
          encryption={enc_label}, listen={}",
@@ -398,7 +383,7 @@ async fn main() -> Result<()> {
         listen: args.listen,
     };
 
-    // -- TLS --
+    // TLS
     let (certs, key) = generate_self_signed_cert()?;
     let mut tls_config = rustls::ServerConfig::builder()
         .with_no_client_auth()
@@ -407,7 +392,7 @@ async fn main() -> Result<()> {
     tls_config.max_early_data_size = u32::MAX;
     tls_config.alpn_protocols = vec![b"h3".to_vec()];
 
-    // -- Quinn transport --
+    // Quinn transport
     let mut transport = quinn::TransportConfig::default();
     transport.max_idle_timeout(Some(
         quinn::IdleTimeout::try_from(std::time::Duration::from_secs(30)).unwrap(),
@@ -415,19 +400,21 @@ async fn main() -> Result<()> {
     transport.max_concurrent_bidi_streams(128u32.into());
     transport.max_concurrent_uni_streams(128u32.into());
 
+    // Server config
     let mut server_config = quinn::ServerConfig::with_crypto(Arc::new(
         quinn::crypto::rustls::QuicServerConfig::try_from(tls_config)
             .context("QUIC crypto config")?,
     ));
     server_config.transport_config(Arc::new(transport));
 
-    // -- Endpoint with QUIC-LB CID generator --
+    // Endpoint with QUIC-LB CID generator
     let config_id = params.config_id;
     let server_id = params.server_id;
     let nonce_length = params.nonce_length;
     let encryption = params.encryption;
     let encode_cid_length = params.encode_cid_length;
 
+    // Endpoint config
     let mut ep_config = quinn::EndpointConfig::default();
     ep_config.cid_generator(move || {
         Box::new(QuicLbCidGenerator::new(
@@ -439,7 +426,9 @@ async fn main() -> Result<()> {
         ))
     });
 
-    let socket = UdpSocket::bind(args.listen).context("binding UDP socket")?;
+    // Socket and endpoint
+    let socket = UdpSocket::bind(args.listen)
+        .context("binding UDP socket")?;
     let endpoint = Endpoint::new(
         ep_config,
         Some(server_config),
@@ -452,7 +441,7 @@ async fn main() -> Result<()> {
     eprintln!("welman: listening on {}", endpoint.local_addr()?);
     eprintln!("welman: serving HTTP/3 (h3) with QUIC-LB CIDs");
 
-    // -- Accept loop --
+    // Accept loop
     let info = Arc::new(info);
 
     let accept_loop = async {

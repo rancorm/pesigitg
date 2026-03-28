@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: GPL-3.0-or-later OR Commercial
+// Copyright (c) 2026 Jonathan Cormier
+// This file is part of Pesigitg.
+
 //! Neighbour table (ARP/NDP) lookup via netlink RTM_GETNEIGH.
 //!
 //! Resolves MAC addresses for backend servers that do not have a static MAC

@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: GPL-3.0-or-later OR Commercial
+// Copyright (c) 2026 Jonathan Cormier
+// This file is part of Pesigitg.
+
 //! QUIC-LB compliant Connection ID generator for Quinn.
 //!
 //! Implements the server-side CID generation per draft-ietf-quic-load-balancers-21

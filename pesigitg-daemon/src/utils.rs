@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: GPL-3.0-or-later OR Commercial
+// Copyright (c) 2026 Jonathan Cormier
+// This file is part of Pesigitg.
+
 /// Fire-and-forget wrapper around `sd_notify::notify`.
 ///
 /// Accepts one or more `sd_notify::NotifyState` values:

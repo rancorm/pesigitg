@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: GPL-3.0-or-later OR Commercial
+// Copyright (c) 2026 Jonathan Cormier
+// This file is part of Pesigitg.
+
 #![cfg_attr(not(feature = "std"), no_std)]
 
 pub const DEFAULT_PORT: u16 = 443;

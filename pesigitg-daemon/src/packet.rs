@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: GPL-3.0-or-later OR Commercial
+// Copyright (c) 2026 Jonathan Cormier
+// This file is part of Pesigitg.
+
 //! Packet processing pipeline for QUIC-LB load balancing.
 //!
 //! Given a raw Ethernet frame containing a QUIC/UDP packet (as filtered

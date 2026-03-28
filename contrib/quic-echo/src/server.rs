@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: GPL-3.0-or-later OR Commercial
+// Copyright (c) 2026 Jonathan Cormier
+// This file is part of Pesigitg.
+
 //! quic-echo — Minimal QUIC echo server with QUIC-LB compliant Connection IDs.
 //!
 //! A test backend for pesigitgd integration testing. Accepts QUIC connections,

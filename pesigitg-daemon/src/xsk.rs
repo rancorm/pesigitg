@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: GPL-3.0-or-later OR Commercial
+// Copyright (c) 2026 Jonathan Cormier
+// This file is part of Pesigitg.
+
 //! AF_XDP socket wrapper using xsk-rs.
 //!
 //! Each worker thread owns one `XskSocket` bound to a specific NIC RX queue.

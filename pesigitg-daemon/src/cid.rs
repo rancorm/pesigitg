@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: GPL-3.0-or-later OR Commercial
+// Copyright (c) 2026 Jonathan Cormier
+// This file is part of Pesigitg.
+
 //! QUIC-LB Connection ID extraction and decryption.
 //!
 //! Implements CID decryption per draft-ietf-quic-load-balancers-21:
