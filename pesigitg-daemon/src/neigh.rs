@@ -113,8 +113,7 @@ pub fn resolve_macs(servers: &mut Vec<Server>) {
 
         match table.get(&server.address) {
             Some(&mac) => {
-                let s = mac.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(":");
-                info!("resolved {} -> {}", server.address, s);
+                info!("resolved {} -> {}", server.address, crate::utils::format_mac(&mac));
                 server.mac = Some(mac);
             }
             None => {

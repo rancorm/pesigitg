@@ -81,6 +81,7 @@ fn main() -> Result<()> {
         args.interface, args.ports, args.queues
     );
 
+    // Handle NIC hardware queues
     match get_hw_queues(&args.interface) {
         Ok((current, max)) => {
             info!("current combined queues: {}", current);
@@ -109,6 +110,7 @@ fn main() -> Result<()> {
     info!("loaded route config: {}", route_config.path.display());
     info!("{}", route_config);
 
+    // Resolve config server MAC addresses
     for config in route_config.configs_mut() {
         neigh::resolve_macs(&mut config.servers);
     }
@@ -140,8 +142,7 @@ fn main() -> Result<()> {
 
     let local_mac = utils::interface_mac(&args.interface)
         .map_err(|e| anyhow!("failed to get MAC for {}: {}", args.interface, e))?;
-    let mac_str = local_mac.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(":");
-    info!("interface MAC: {}", mac_str);
+    info!("interface MAC: {}", utils::format_mac(&local_mac));
 
     let shutdown = Arc::new(AtomicBool::new(false));
     let stats = Arc::new(StatsTable::new(thread_plan.len()));
