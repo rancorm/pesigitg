@@ -15,7 +15,7 @@ fn main() {
             let total = Instant::now();
             let ebpf_obj = build_ebpf(release);
             build_daemon(release, &ebpf_obj);
-            eprintln!("total: {}", fmt_duration(total.elapsed()));
+            eprintln!("[x] total: {}", fmt_duration(total.elapsed()));
         }
         Some("build-ebpf") => {
             release = args.contains(&"--release".into());
@@ -26,7 +26,7 @@ fn main() {
             let total = Instant::now();
             let ebpf_obj = build_ebpf(release);
             build_daemon(release, &ebpf_obj);
-            eprintln!("total: {}", fmt_duration(total.elapsed()));
+            eprintln!("[x] total: {}", fmt_duration(total.elapsed()));
             run_daemon(release, &args[1..]);
         }
         _ => {
@@ -45,7 +45,7 @@ fn main() {
     }
 
     if release {
-        println!("[x] Release build v{}", env!("CARGO_PKG_VERSION"));
+        println!("[x] release build: {}", env!("CARGO_PKG_VERSION"));
     }
 }
 
@@ -75,11 +75,11 @@ fn build_ebpf(release: bool) -> PathBuf {
         .expect("failed to spawn cargo for eBPF build");
 
     if !status.success() {
-        eprintln!("eBPF build failed");
+        eprintln!("[*] eBPF build failed");
         process::exit(status.code().unwrap_or(1));
     }
 
-    eprintln!("ebpf: {}", fmt_duration(t.elapsed()));
+    eprintln!("[x] ebpf: {}", fmt_duration(t.elapsed()));
 
     let profile = if release { "release" } else { "debug" };
 
@@ -110,11 +110,11 @@ fn build_daemon(release: bool, ebpf_obj: &std::path::Path) {
         .expect("failed to spawn cargo for daemon build");
 
     if !status.success() {
-        eprintln!("daemon build failed");
+        eprintln!("[*] daemon build failed");
         process::exit(status.code().unwrap_or(1));
     }
 
-    eprintln!("daemon: {}", fmt_duration(t.elapsed()));
+    eprintln!("[x] daemon: {}", fmt_duration(t.elapsed()));
 
     let profile = if release { "release" } else { "debug" };
     let bin = workspace_root()
@@ -131,7 +131,7 @@ fn print_size(path: &std::path::Path, release: bool) {
         .status();
 
     if let Err(e) = status {
-        eprintln!("warning: rust-size not found ({}), skipping size report", e);
+        eprintln!("[x] warning: rust-size not found ({}), skipping size report", e);
     }
 
     let is_ebpf = path
@@ -150,9 +150,9 @@ fn print_size(path: &std::path::Path, release: bool) {
             .unwrap_or(false);
 
         if stripped {
-            eprintln!("note: binary is stripped (symbols removed)");
+            eprintln!("[x] note: binary is stripped (symbols removed)");
         } else {
-            eprintln!("warning: binary is NOT stripped — check [profile.release] strip setting");
+            eprintln!("[x] warning: binary is NOT stripped — check [profile.release] strip setting");
         }
     }
 }
@@ -163,7 +163,7 @@ fn print_toolchain(ebpf_dir: &std::path::Path) {
     let contents = match std::fs::read_to_string(&toolchain_file) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("warning: cannot read {}: {}", toolchain_file.display(), e);
+            eprintln!("[*] warning: cannot read {}: {}", toolchain_file.display(), e);
             return;
         }
     };
@@ -181,7 +181,7 @@ fn print_toolchain(ebpf_dir: &std::path::Path) {
     let components = parse_value("components");
 
     if let Some(ch) = channel {
-        eprint!("ebpf toolchain: {}", ch);
+        eprint!("[x] ebpf toolchain: {}", ch);
 
         if let Some(comp) = components {
             eprint!(" ({})", comp);
@@ -218,7 +218,7 @@ fn run_daemon(release: bool, args: &[String]) {
     cmd.env("RUST_LOG", std::env::var("RUST_LOG").unwrap_or_else(|_| "pesigitgd=info".into()))
         .args(&daemon_args);
 
-    eprintln!("running: {} {}", bin.display(), daemon_args.join(" "));
+    eprintln!("[x] running: {} {}", bin.display(), daemon_args.join(" "));
 
     let err = exec(&mut cmd);
     eprintln!("failed to exec {}: {}", bin.display(), err);
