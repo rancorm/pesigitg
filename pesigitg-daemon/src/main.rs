@@ -20,7 +20,7 @@ use std::time::Duration;
 use log::{error, warn, info};
 use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM, SIGUSR1};
 use signal_hook::iterator::Signals;
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, ensure, Result};
 use pesigitg_common::{PID_FILE, DEFAULT_ROUTE_CONFIG, current_pid, exit};
 
 use args::parse_args;
@@ -77,13 +77,8 @@ fn main() -> Result<()> {
     //  - Early Atom Celeron/Pentium processors
     //  - Some Xeon Phi models
     //  - BIOS/firmware disabling (rare)
-    match is_aes_available() {
-        true => { info!("AES-NI available"); }
-        false => {
-            error!("AES-NI not available - try again please");
-            bail!("AES-NI not available - try again please");
-        }
-    }
+    ensure!(is_aes_available(), "AES-NI not available - try again please");
+    info!("AES-NI available");
 
     info!("number of cores: {}", num_cores());
     info!(
