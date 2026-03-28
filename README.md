@@ -74,6 +74,65 @@ cargo xtask build-ebpf --release
 the daemon with the stable toolchain, passing the eBPF object path through the
 `PESIGITG_EBPF_OBJ` environment variable.
 
+## Network Configuration
+
+Pesigitg uses Direct Server Return (DSR): the load balancer forwards packets to
+backends by rewriting only the L2, the destination IP stays as the VIP. Backends
+respond directly to clients, bypassing the LB on the return path.
+
+Both the load balancer and the backend servers require ARP tuning to prevent
+Linux's default ARP behaviour ("ARP flux") from misdirecting traffic.
+
+### Load Balancer — management interface ARP
+
+When the LB host has a management interface (e.g. `eth0`) in addition to the
+data-plane interface where XDP is attached, the kernel will, by default, answer
+ARP requests for the VIP on **every** interface — including the management NIC.
+The upstream router then caches the management interface's MAC for the VIP and
+sends traffic there. Because XDP only runs on the data-plane interface, these
+packets hit the kernel stack instead and are never forwarded to backends.
+
+Set `arp_ignore=1` on the management interface so ARP for the VIP is only
+answered on the data-plane NIC:
+
+```sh
+# apply immediately (replace eth0 with your management interface)
+sudo sysctl -w net.ipv4.conf.eth0.arp_ignore=1
+sudo sysctl -w net.ipv4.conf.eth0.arp_announce=2
+
+# persist across reboots (see contrib/etc/90-dsr.conf)
+sudo cp contrib/etc/90-dsr.conf /etc/sysctl.d/
+sudo sysctl --system
+```
+
+### Backends — suppress ARP for the VIP
+
+Backend servers need the VIP on loopback to accept DSR packets. Without ARP
+suppression the backend answers ARP for the VIP on its physical NIC, the
+upstream router learns the backend's MAC for the VIP, and traffic bypasses the
+load balancer entirely.
+
+```sh
+# bind the VIP to loopback (see contrib/etc/99-dsr-vip.yaml for netplan)
+sudo ip addr add 198.51.100.1/32 dev lo
+
+# suppress ARP
+sudo sysctl -w net.ipv4.conf.all.arp_ignore=1
+sudo sysctl -w net.ipv4.conf.all.arp_announce=2
+```
+
+### Sysctl reference
+
+| Sysctl | Effect |
+|--------|--------|
+| `arp_ignore=1` | Only reply to ARP when the target IP is configured on the *incoming* interface. |
+| `arp_announce=2` | Use the best local address for the *outgoing* interface as the ARP source, preventing the VIP from leaking into upstream ARP caches. |
+
+Per-interface knobs (e.g. `net.ipv4.conf.eth0.arp_ignore`) work too — Linux
+takes the maximum of `conf.all` and `conf.<iface>`.  Use per-interface settings
+on the LB to leave the data-plane interface's ARP behaviour untouched; use
+`conf.all` on backends where every interface should be suppressed.
+
 ## contrib/
 
 Example configuration files, systemd units, and helper scripts.
