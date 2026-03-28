@@ -85,6 +85,9 @@ pub struct Server {
     /// When true, the server is draining: existing CID-routed connections
     /// continue, but new fallback connections are not assigned to it.
     pub draining: bool,
+    /// Health probe status. Servers start unhealthy and are marked healthy
+    /// once a QUIC probe succeeds.
+    pub healthy: bool,
 }
 
 #[derive(Debug)]
@@ -319,7 +322,8 @@ impl ConfigTable {
 
         for config in self.slots.iter().flatten() {
             for server in &config.servers {
-                if server.mac.is_some()
+                if server.healthy
+                    && server.mac.is_some()
                     && !server.draining
                     && !self.fallback_servers.iter().any(|s| s.address == server.address)
                 {
@@ -426,7 +430,7 @@ fn parse_server(raw: &RawServer, expected_id_len: u8) -> Result<Server, RouteCon
         RouteConfigError::Validation(format!("invalid server mac '{}': {e}", raw.mac.as_deref().unwrap_or("")))
     })?;
 
-    Ok(Server { id, address, mac, draining: raw.draining })
+    Ok(Server { id, address, mac, draining: raw.draining, healthy: false })
 }
 
 /// Minimal hex decoder (no external dependency).

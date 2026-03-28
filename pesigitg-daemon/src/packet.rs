@@ -105,16 +105,18 @@ fn process_udp(
     if let Some((dcid, config)) = cid::lookup_config(quic, table) {
         if let Some(server_idx) = cid::resolve_server_idx(dcid, config) {
             let server = &config.servers[server_idx];
-            if let Some(mac) = server.mac {
-                // Record DCID mapping for NAT rebinding resilience.
-                conn.record_dcid(DcidKey::from_slice(dcid), mac, now);
-                frame[..6].copy_from_slice(&mac);
-                frame[6..12].copy_from_slice(local_mac);
-                return if server.draining {
-                    Verdict::CidForwardDraining(config.config_id)
-                } else {
-                    Verdict::CidForward(config.config_id)
-                };
+            if server.healthy {
+                if let Some(mac) = server.mac {
+                    // Record DCID mapping for NAT rebinding resilience.
+                    conn.record_dcid(DcidKey::from_slice(dcid), mac, now);
+                    frame[..6].copy_from_slice(&mac);
+                    frame[6..12].copy_from_slice(local_mac);
+                    return if server.draining {
+                        Verdict::CidForwardDraining(config.config_id)
+                    } else {
+                        Verdict::CidForward(config.config_id)
+                    };
+                }
             }
         }
         // Only treat as a stale/removed server if the CID is the right
@@ -507,6 +509,7 @@ mod tests {
                 address: "10.0.1.10".parse().unwrap(),
                 mac: Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01]),
                 draining: false,
+                healthy: true,
             }],
         }])
     }
@@ -524,12 +527,14 @@ mod tests {
                     address: "10.0.1.10".parse().unwrap(),
                     mac: Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01]),
                     draining: false,
+                    healthy: true,
                 },
                 Server {
                     id: vec![0x00, 0x00, 0x02],
                     address: "10.0.1.11".parse().unwrap(),
                     mac: Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x02]),
                     draining: false,
+                    healthy: true,
                 },
             ],
         }])

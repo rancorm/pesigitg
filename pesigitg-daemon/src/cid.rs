@@ -231,12 +231,14 @@ mod tests {
                     address: "10.0.1.10".parse().unwrap(),
                     mac: Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01]),
                     draining: false,
+                    healthy: true,
                 },
                 Server {
                     id: vec![0x00, 0x00, 0x02],
                     address: "10.0.1.11".parse().unwrap(),
                     mac: Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x02]),
                     draining: false,
+                    healthy: true,
                 },
             ],
         }
