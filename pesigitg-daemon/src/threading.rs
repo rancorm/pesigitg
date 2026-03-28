@@ -210,6 +210,8 @@ fn worker_loop(
     let mut comp_descs = vec![FrameDesc::default(); BATCH_SIZE];
     let mut conn = ConnectionTable::new();
     let mut pending_fill: Vec<FrameDesc> = Vec::new();
+    let mut tx_batch: Vec<FrameDesc> = Vec::with_capacity(BATCH_SIZE);
+    let mut recycle_batch: Vec<FrameDesc> = Vec::with_capacity(BATCH_SIZE);
 
     while !shutdown.load(Ordering::Relaxed) {
         // Drain frames that couldn't be refilled on prior iterations.
@@ -234,8 +236,8 @@ fn worker_loop(
 
         let config = config.read().unwrap();
 
-        let mut tx_batch = Vec::with_capacity(n);
-        let mut recycle_batch = Vec::with_capacity(n);
+        tx_batch.clear();
+        recycle_batch.clear();
 
         stats.record_rx(n as u64);
 
