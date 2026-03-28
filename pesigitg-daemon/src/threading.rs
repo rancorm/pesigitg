@@ -122,6 +122,7 @@ impl WorkerPool {
     pub fn spawn(
         threads: Vec<ThreadConfig>,
         interface: &str,
+        local_mac: [u8; 6],
         config: Arc<RwLock<ConfigTable>>,
         ebpf: Arc<Mutex<EbpfHandle>>,
         shutdown: Arc<AtomicBool>,
@@ -152,7 +153,7 @@ impl WorkerPool {
                         tc.queue_id, tc.core_id
                     );
 
-                    worker_loop(&interface, tc.queue_id, &config, &ebpf, &shutdown, stats.slot(worker_idx));
+                    worker_loop(&interface, tc.queue_id, &local_mac, &config, &ebpf, &shutdown, stats.slot(worker_idx));
 
                     info!("worker q{}: exiting", tc.queue_id);
                 })
@@ -182,6 +183,7 @@ impl WorkerPool {
 fn worker_loop(
     interface: &str,
     queue_id: u32,
+    local_mac: &[u8; 6],
     config: &Arc<RwLock<ConfigTable>>,
     ebpf: &Arc<Mutex<EbpfHandle>>,
     shutdown: &AtomicBool,
@@ -238,7 +240,7 @@ fn worker_loop(
         for i in 0..n {
             let verdict = {
                 let mut data = unsafe { xsk.frame_mut(&mut rx_descs[i]) };
-                packet::process_packet(&mut *data, &config, &mut conn)
+                packet::process_packet(&mut *data, &config, &mut conn, local_mac)
             };
             match verdict {
                 Verdict::CidForward(config_id) => {

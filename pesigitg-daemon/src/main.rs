@@ -237,11 +237,17 @@ fn main() -> Result<()> {
         info!("thread planned: queue={} -> core={}", t.queue_id, t.core_id);
     }
 
+    let local_mac = utils::interface_mac(&args.interface)
+        .map_err(|e| anyhow!("failed to get MAC for {}: {}", args.interface, e))?;
+    let mac_str = local_mac.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(":");
+    info!("interface MAC: {}", mac_str);
+
     let shutdown = Arc::new(AtomicBool::new(false));
     let stats = Arc::new(StatsTable::new(thread_plan.len()));
     let mut workers = WorkerPool::spawn(
         thread_plan,
         &args.interface,
+        local_mac,
         Arc::clone(&route_config),
         Arc::clone(&ebpf),
         Arc::clone(&shutdown),

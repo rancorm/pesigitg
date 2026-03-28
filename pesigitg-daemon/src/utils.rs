@@ -29,6 +29,53 @@ pub fn running_under_systemd() -> bool {
     std::env::var_os("INVOCATION_ID").is_some()
 }
 
+/// Query the MAC address of a network interface via `SIOCGIFHWADDR`.
+pub fn interface_mac(interface: &str) -> std::io::Result<[u8; 6]> {
+    use std::ffi::CString;
+
+    const SIOCGIFHWADDR: libc::c_ulong = 0x8927;
+
+    #[repr(C)]
+    struct Ifreq {
+        ifr_name: [libc::c_char; 16],
+        ifr_hwaddr: libc::sockaddr,
+    }
+
+    let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+
+    let mut ifr: Ifreq = unsafe { std::mem::zeroed() };
+    let name = CString::new(interface).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid interface name")
+    })?;
+    let name_bytes = name.as_bytes_with_nul();
+    let copy_len = name_bytes.len().min(ifr.ifr_name.len());
+
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            name_bytes.as_ptr() as *const libc::c_char,
+            ifr.ifr_name.as_mut_ptr(),
+            copy_len,
+        );
+    }
+
+    let ret = unsafe { libc::ioctl(fd, SIOCGIFHWADDR as _, &mut ifr) };
+    unsafe { libc::close(fd) };
+
+    if ret < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+
+    let mut mac = [0u8; 6];
+    for i in 0..6 {
+        mac[i] = ifr.ifr_hwaddr.sa_data[i] as u8;
+    }
+
+    Ok(mac)
+}
+
 pub fn is_aes_available() -> bool {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
