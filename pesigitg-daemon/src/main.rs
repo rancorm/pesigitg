@@ -17,118 +17,18 @@ use std::thread;
 use std::time::Duration;
 
 use log::{error, warn, info};
-use nix::unistd::{chdir, dup2_stdin, dup2_stdout, dup2_stderr, fork, setsid, ForkResult};
 use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM, SIGUSR1};
 use signal_hook::iterator::Signals;
 use anyhow::{anyhow, bail, Result};
-use pesigitg_common::{PID_FILE, PROC_NAME, DEFAULT_ROUTE_CONFIG, current_pid, exit};
+use pesigitg_common::{PID_FILE, DEFAULT_ROUTE_CONFIG, current_pid, exit};
 
-use args::{Args, parse_args};
-use config::daemon::FileConfig;
+use args::parse_args;
+use config::reload_config;
 use config::route::ConfigTable;
 use pidfile::PidFile;
 use stats::{Snapshot, StatsTable};
 use threading::{get_hw_queues, plan_threads, WorkerPool};
-use utils::{is_aes_available, notify_ready, num_cores, running_under_systemd, systemd_notify};
-
-fn daemonize() -> Result<()> {
-    // First fork: parent exits, child continues
-    match unsafe { fork() }? {
-        ForkResult::Parent { .. } => exit!(),
-        ForkResult::Child => {}
-    }
-
-    // Create a new session, detach from controlling terminal
-    setsid()?;
-
-    // Second fork: session leader exits, grandchild can never acquire a terminal
-    match unsafe { fork() }? {
-        ForkResult::Parent { .. } => exit!(),
-        ForkResult::Child => {}
-    }
-
-    chdir("/")?;
-
-    // Redirect stdin/stdout/stderr to /dev/null
-    let devnull = nix::fcntl::open(
-        "/dev/null",
-        nix::fcntl::OFlag::O_RDWR,
-        nix::sys::stat::Mode::empty(),
-    )?;
-
-    dup2_stdin(&devnull)?;
-    dup2_stdout(&devnull)?;
-    dup2_stderr(&devnull)?;
-
-    Ok(())
-}
-
-fn init_logging() -> Result<()> {
-    let formatter = syslog::Formatter3164 {
-        facility: syslog::Facility::LOG_DAEMON,
-        hostname: None,
-        process: PROC_NAME.into(),
-        pid: current_pid(),
-    };
-
-    let logger = syslog::unix(formatter)
-        .map_err(|e| anyhow!("failed to connect to syslog: {}", e))?;
-
-    log::set_boxed_logger(Box::new(syslog::BasicLogger::new(logger)))
-        .map_err(|e| anyhow!(e))?;
-    log::set_max_level(log::LevelFilter::Info);
-
-    Ok(())
-}
-
-fn reload_config(args: &mut Args, route_config: &Arc<RwLock<ConfigTable>>) {
-    systemd_notify!(sd_notify::NotifyState::Reloading);
-
-    if let Some(ref path) = args.config.clone() {
-        match FileConfig::from_file(path) {
-            Ok(fc) => {
-                args.ports = fc.ports;
-                args.interface = fc.interface;
-                args.queues = fc.queues;
-
-                info!(
-                    "config reloaded: interface='{}', ports={:?}, queues={}",
-                    args.interface, args.ports, args.queues
-                );
-            }
-            Err(e) => {
-                error!("failed to reload config: {}; keeping current settings", e);
-            }
-        }
-    }
-
-    let rc_path = args.routeconfig.as_ref();
-    let new_rc = match rc_path {
-        Some(path) => ConfigTable::from_file(path),
-        None => ConfigTable::from_file(DEFAULT_ROUTE_CONFIG),
-    };
-
-    match new_rc {
-        Ok(mut rc) => {
-            for config in rc.configs_mut() {
-                neigh::resolve_macs(&mut config.servers);
-            }
-            rc.rebuild_fallback_servers();
-
-            info!("route config reloaded: {}", rc.path.display());
-            info!("{}", rc);
-
-            *route_config.write().unwrap() = rc;
-        }
-        Err(e) => {
-            error!("failed to reload route config: {}; keeping current settings", e);
-        }
-    }
-
-    notify_ready(&format!(
-        "listening on {} ports {:?}", args.interface, args.ports
-    ));
-}
+use utils::{daemonize, init_logging, is_aes_available, notify_ready, num_cores, running_under_systemd, systemd_notify};
 
 fn main() -> Result<()> {
     let mut args = parse_args()?;

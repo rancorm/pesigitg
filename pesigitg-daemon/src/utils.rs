@@ -86,3 +86,58 @@ pub fn is_aes_available() -> bool {
         false
     }
 }
+
+pub(crate) fn daemonize() -> anyhow::Result<()> {
+    use nix::unistd::{chdir, dup2_stdin, dup2_stdout, dup2_stderr, fork, setsid, ForkResult};
+    use pesigitg_common::exit;
+
+    // First fork: parent exits, child continues
+    match unsafe { fork() }? {
+        ForkResult::Parent { .. } => exit!(),
+        ForkResult::Child => {}
+    }
+
+    // Create a new session, detach from controlling terminal
+    setsid()?;
+
+    // Second fork: session leader exits, grandchild can never acquire a terminal
+    match unsafe { fork() }? {
+        ForkResult::Parent { .. } => exit!(),
+        ForkResult::Child => {}
+    }
+
+    chdir("/")?;
+
+    // Redirect stdin/stdout/stderr to /dev/null
+    let devnull = nix::fcntl::open(
+        "/dev/null",
+        nix::fcntl::OFlag::O_RDWR,
+        nix::sys::stat::Mode::empty(),
+    )?;
+
+    dup2_stdin(&devnull)?;
+    dup2_stdout(&devnull)?;
+    dup2_stderr(&devnull)?;
+
+    Ok(())
+}
+
+pub(crate) fn init_logging() -> anyhow::Result<()> {
+    use pesigitg_common::{PROC_NAME, current_pid};
+
+    let formatter = syslog::Formatter3164 {
+        facility: syslog::Facility::LOG_DAEMON,
+        hostname: None,
+        process: PROC_NAME.into(),
+        pid: current_pid(),
+    };
+
+    let logger = syslog::unix(formatter)
+        .map_err(|e| anyhow::anyhow!("failed to connect to syslog: {}", e))?;
+
+    log::set_boxed_logger(Box::new(syslog::BasicLogger::new(logger)))
+        .map_err(|e| anyhow::anyhow!(e))?;
+    log::set_max_level(log::LevelFilter::Info);
+
+    Ok(())
+}
