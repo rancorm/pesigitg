@@ -21,7 +21,10 @@ use rustc_hash::FxHashMap;
 const ENTRY_TTL: Duration = Duration::from_secs(5);
 
 /// How often to sweep expired entries from the table.
-const SWEEP_INTERVAL: Duration = Duration::from_secs(10);
+///
+/// Matches ENTRY_TTL so expired entries are evicted promptly rather than
+/// lingering for an extra interval.
+const SWEEP_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Pre-allocated capacity for each hash map. Sized above expected peak
 /// concurrent handshakes so the maps never resize during normal operation.
