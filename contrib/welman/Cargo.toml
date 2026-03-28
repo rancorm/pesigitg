@@ -1,0 +1,38 @@
+[package]
+name = "welman"
+version = "0.1.0"
+edition = "2024"
+description = "Minimal HTTP/3 server with QUIC-LB compliant Connection IDs"
+publish = false
+
+[[bin]]
+name = "welman"
+path = "src/main.rs"
+
+[dependencies]
+# QUIC transport
+quinn = "0.11"
+quinn-proto = "0.11"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+
+# HTTP/3
+h3 = "0.0.8"
+h3-quinn = "0.0.10"
+http = "1"
+bytes = "1"
+
+# TLS self-signed cert generation (dev/test convenience)
+rcgen = "0.13"
+
+# QUIC-LB CID generation
+quic-lb-cid = { path = "../quic-lb-cid" }
+
+# Config parsing (reads a subset of lb.toml)
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+# Async runtime
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
+
+# Error handling
+anyhow = "1"
