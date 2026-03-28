@@ -13,6 +13,7 @@ mod utils;
 mod xsk;
 
 use std::sync::atomic::AtomicBool;
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::Duration;
@@ -62,6 +63,16 @@ fn main() -> Result<()> {
     };
 
     let mut signals = Signals::new([SIGINT, SIGTERM, SIGHUP, SIGUSR1])?;
+    let sig_handle = signals.handle();
+    let (sig_tx, sig_rx) = mpsc::sync_channel(10);
+
+    thread::spawn(move || {
+        for sig in signals.forever() {
+            if sig_tx.send(sig).is_err() {
+                break;
+            }
+        }
+    });
 
     // Output details
     info!("PID: {}", current_pid());
@@ -151,6 +162,7 @@ fn main() -> Result<()> {
         .map_err(|e| anyhow!("failed to get MAC for {}: {}", args.interface, e))?;
     info!("interface MAC: {}", utils::format_mac(&local_mac));
 
+    // Thread safe
     let shutdown = Arc::new(AtomicBool::new(false));
     let stats = Arc::new(StatsTable::new(thread_plan.len()));
     let mut workers = WorkerPool::spawn(
@@ -177,35 +189,52 @@ fn main() -> Result<()> {
     let mut draining_had_traffic = false;
 
     loop {
-        for sig in signals.pending() {
-            match sig {
-                SIGHUP => reload_config(&mut args, &route_config),
-                SIGUSR1 => {
-                    info!("stats dump: {}", stats.aggregate());
+        // Wait up to 5 seconds for a signal, then run periodic tasks
+        let mut got_signal = match sig_rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(sig) => Some(sig),
+            Err(mpsc::RecvTimeoutError::Timeout) => None,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        };
+
+        // Process all pending signals
+        loop {
+            if let Some(sig) = got_signal.take() {
+                match sig {
+                    SIGHUP => reload_config(&mut args, &route_config),
+                    SIGUSR1 => {
+                        info!("stats dump: {}", stats.aggregate());
+                    }
+                    SIGINT | SIGTERM => {
+                        systemd_notify!(sd_notify::NotifyState::Stopping);
+
+                        info!("received signal {}, shutting down", sig);
+
+                        sig_handle.close();
+                        workers.shutdown();
+
+                        info!("all workers stopped");
+
+                        return Ok(());
+                    }
+                    _ => unreachable!(),
                 }
-                SIGINT | SIGTERM => {
-                    systemd_notify!(sd_notify::NotifyState::Stopping);
+            }
 
-                    info!("received signal {}, shutting down", sig);
-
-                    workers.shutdown();
-
-                    info!("all workers stopped");
-
-                    return Ok(());
-                }
-                _ => unreachable!(),
+            // Drain any additional queued signals
+            match sig_rx.try_recv() {
+                Ok(sig) => got_signal = Some(sig),
+                Err(_) => break,
             }
         }
 
         // Statistics
         let current = stats.aggregate();
         let delta = current.delta(&prev_stats);
-        
+
         if delta.rx_packets > 0 {
             info!("stats: {}", delta);
         }
-        
+
         // Detect drain completion: once traffic was flowing to draining
         // servers and then drops to zero, log that draining is complete.
         if delta.draining_forwarded > 0 {
@@ -215,7 +244,7 @@ fn main() -> Result<()> {
 
             if rc.has_draining_servers() {
                 info!("all draining servers fully drained — safe to remove from config");
-                
+
                 draining_had_traffic = false;
             }
         }
@@ -231,6 +260,7 @@ fn main() -> Result<()> {
                 for config in rc.configs_mut() {
                     neigh::resolve_macs(&mut config.servers);
                 }
+
                 rebuild = true;
             }
 
@@ -244,6 +274,7 @@ fn main() -> Result<()> {
         }
 
         systemd_notify!(sd_notify::NotifyState::Watchdog);
-        thread::sleep(Duration::from_secs(5));
     }
+
+    Ok(())
 }
