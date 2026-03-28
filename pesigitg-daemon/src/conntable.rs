@@ -69,15 +69,15 @@ struct Entry {
 }
 
 impl Entry {
-    fn new(mac: [u8; 6]) -> Self {
+    fn new(mac: [u8; 6], now: Instant) -> Self {
         Entry {
             mac,
-            expires: Instant::now() + ENTRY_TTL,
+            expires: now + ENTRY_TTL,
         }
     }
 
-    fn is_expired(&self) -> bool {
-        Instant::now() >= self.expires
+    fn is_expired(&self, now: Instant) -> bool {
+        now >= self.expires
     }
 }
 
@@ -98,16 +98,16 @@ impl ConnectionTable {
     }
 
     /// Look up a MAC address by 4-tuple, falling back to DCID.
-    pub fn lookup(&self, flow: &FlowKey, dcid: Option<&DcidKey>) -> Option<[u8; 6]> {
+    pub fn lookup(&self, flow: &FlowKey, dcid: Option<&DcidKey>, now: Instant) -> Option<[u8; 6]> {
         if let Some(entry) = self.by_flow.get(flow) {
-            if !entry.is_expired() {
+            if !entry.is_expired(now) {
                 return Some(entry.mac);
             }
         }
 
         if let Some(key) = dcid {
             if let Some(entry) = self.by_dcid.get(key) {
-                if !entry.is_expired() {
+                if !entry.is_expired(now) {
                     return Some(entry.mac);
                 }
             }
@@ -117,10 +117,10 @@ impl ConnectionTable {
     }
 
     /// Record a fallback routing decision in both indexes.
-    pub fn insert(&mut self, flow: FlowKey, dcid: Option<DcidKey>, mac: [u8; 6]) {
-        self.by_flow.insert(flow, Entry::new(mac));
+    pub fn insert(&mut self, flow: FlowKey, dcid: Option<DcidKey>, mac: [u8; 6], now: Instant) {
+        self.by_flow.insert(flow, Entry::new(mac, now));
         if let Some(key) = dcid {
-            self.by_dcid.insert(key, Entry::new(mac));
+            self.by_dcid.insert(key, Entry::new(mac, now));
         }
     }
 
@@ -128,19 +128,18 @@ impl ConnectionTable {
     ///
     /// This enables NAT rebinding resilience: if the client's source IP
     /// changes mid-handshake, the DCID still maps to the correct server.
-    pub fn record_dcid(&mut self, dcid: DcidKey, mac: [u8; 6]) {
-        self.by_dcid.insert(dcid, Entry::new(mac));
+    pub fn record_dcid(&mut self, dcid: DcidKey, mac: [u8; 6], now: Instant) {
+        self.by_dcid.insert(dcid, Entry::new(mac, now));
     }
 
     /// Evict expired entries if the sweep interval has elapsed.
-    pub fn maybe_sweep(&mut self) {
-        let now = Instant::now();
+    pub fn maybe_sweep(&mut self, now: Instant) {
         if now.duration_since(self.last_sweep) < SWEEP_INTERVAL {
             return;
         }
         self.last_sweep = now;
-        self.by_flow.retain(|_, e| !e.is_expired());
-        self.by_dcid.retain(|_, e| !e.is_expired());
+        self.by_flow.retain(|_, e| !e.is_expired(now));
+        self.by_dcid.retain(|_, e| !e.is_expired(now));
     }
 }
 
@@ -148,9 +147,14 @@ impl ConnectionTable {
 mod tests {
     use super::*;
 
+    fn now() -> Instant {
+        Instant::now()
+    }
+
     #[test]
     fn insert_and_lookup_by_flow() {
         let mut table = ConnectionTable::new();
+        let t = now();
         let flow = FlowKey {
             src_addr: "10.0.0.1".parse().unwrap(),
             dst_addr: "10.0.1.10".parse().unwrap(),
@@ -159,7 +163,7 @@ mod tests {
         };
 
         let mac = [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01];
-        table.insert(flow, None, mac);
+        table.insert(flow, None, mac, t);
 
         let lookup_flow = FlowKey {
             src_addr: "10.0.0.1".parse().unwrap(),
@@ -168,12 +172,13 @@ mod tests {
             dst_port: 443,
         };
 
-        assert_eq!(table.lookup(&lookup_flow, None), Some(mac));
+        assert_eq!(table.lookup(&lookup_flow, None, t), Some(mac));
     }
 
     #[test]
     fn lookup_by_dcid_fallback() {
         let mut table = ConnectionTable::new();
+        let t = now();
         let dcid = DcidKey::from_slice(&[0x01, 0x02, 0x03]);
 
         table.insert(
@@ -185,6 +190,7 @@ mod tests {
             },
             Some(DcidKey::from_slice(&[0x01, 0x02, 0x03])),
             [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x05],
+            t,
         );
 
         // Different 4-tuple, same DCID -> still resolves
@@ -195,16 +201,17 @@ mod tests {
             dst_port: 443,
         };
 
-        assert_eq!(table.lookup(&other_flow, Some(&dcid)), Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x05]));
+        assert_eq!(table.lookup(&other_flow, Some(&dcid), t), Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x05]));
     }
 
     #[test]
     fn record_dcid_from_cid_route() {
         let mut table = ConnectionTable::new();
+        let t = now();
         let dcid = DcidKey::from_slice(&[0xaa, 0xbb]);
 
         let mac = [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x03];
-        table.record_dcid(dcid, mac);
+        table.record_dcid(dcid, mac, t);
 
         let lookup_dcid = DcidKey::from_slice(&[0xaa, 0xbb]);
         let unrelated_flow = FlowKey {
@@ -214,7 +221,7 @@ mod tests {
             dst_port: 443,
         };
 
-        assert_eq!(table.lookup(&unrelated_flow, Some(&lookup_dcid)), Some(mac));
+        assert_eq!(table.lookup(&unrelated_flow, Some(&lookup_dcid), t), Some(mac));
     }
 
     #[test]
@@ -227,7 +234,7 @@ mod tests {
             dst_port: 443,
         };
 
-        assert_eq!(table.lookup(&flow, None), None);
+        assert_eq!(table.lookup(&flow, None, now()), None);
     }
 
     #[test]

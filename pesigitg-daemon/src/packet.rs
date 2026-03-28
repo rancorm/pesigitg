@@ -12,6 +12,7 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::time::Instant;
 
 use pesigitg_common::{
     ETH_HDR_LEN, ETH_P_IP, ETH_P_IPV6, ICMP_DEST_UNREACH, ICMP_HDR_LEN, ICMP_TIME_EXCEEDED,
@@ -67,6 +68,7 @@ pub fn process_packet(
     table: &ConfigTable,
     conn: &mut ConnectionTable,
     local_mac: &[u8; 6],
+    now: Instant,
 ) -> Verdict {
     let meta = match parse_frame(frame) {
         Some(m) => m,
@@ -75,10 +77,10 @@ pub fn process_packet(
 
     match meta {
         FrameMeta::Udp { quic_offset, flow } => {
-            process_udp(frame, table, conn, quic_offset, flow, local_mac)
+            process_udp(frame, table, conn, quic_offset, flow, local_mac, now)
         }
         FrameMeta::Icmp { inner_quic_offset, reversed_flow } => {
-            process_icmp(frame, table, conn, inner_quic_offset, reversed_flow, local_mac)
+            process_icmp(frame, table, conn, inner_quic_offset, reversed_flow, local_mac, now)
         }
     }
 }
@@ -91,6 +93,7 @@ fn process_udp(
     quic_offset: usize,
     flow: FlowKey,
     local_mac: &[u8; 6],
+    now: Instant,
 ) -> Verdict {
     let quic = &frame[quic_offset..];
 
@@ -100,7 +103,7 @@ fn process_udp(
             let server = &config.servers[server_idx];
             if let Some(mac) = server.mac {
                 // Record DCID mapping for NAT rebinding resilience.
-                conn.record_dcid(DcidKey::from_slice(dcid), mac);
+                conn.record_dcid(DcidKey::from_slice(dcid), mac, now);
                 frame[..6].copy_from_slice(&mac);
                 frame[6..12].copy_from_slice(local_mac);
                 return Verdict::CidForward(config.config_id);
@@ -122,7 +125,7 @@ fn process_udp(
     let dcid_key = raw_dcid.map(DcidKey::from_slice);
 
     // Check connection table: 4-tuple index first, then DCID index.
-    if let Some(mac) = conn.lookup(&flow, dcid_key.as_ref()) {
+    if let Some(mac) = conn.lookup(&flow, dcid_key.as_ref(), now) {
         frame[..6].copy_from_slice(&mac);
         frame[6..12].copy_from_slice(local_mac);
         return Verdict::FallbackForward;
@@ -130,7 +133,7 @@ fn process_udp(
 
     // Consistent hash over 4-tuple to select a backend.
     if let Some(mac) = fallback_mac(&flow, &table.fallback_servers) {
-        conn.insert(flow, dcid_key, mac);
+        conn.insert(flow, dcid_key, mac, now);
         frame[..6].copy_from_slice(&mac);
         frame[6..12].copy_from_slice(local_mac);
         return Verdict::FallbackForward;
@@ -152,6 +155,7 @@ fn process_icmp(
     inner_quic_offset: usize,
     reversed_flow: FlowKey,
     local_mac: &[u8; 6],
+    now: Instant,
 ) -> Verdict {
     let inner_quic = &frame[inner_quic_offset..];
 
@@ -174,7 +178,7 @@ fn process_icmp(
     }
 
     // Strategy 2: Reversed 4-tuple connection table lookup.
-    if let Some(mac) = conn.lookup(&reversed_flow, None) {
+    if let Some(mac) = conn.lookup(&reversed_flow, None, now) {
         frame[..6].copy_from_slice(&mac);
         frame[6..12].copy_from_slice(local_mac);
         return Verdict::IcmpForward;
@@ -484,6 +488,10 @@ mod tests {
 
     const LOCAL_MAC: [u8; 6] = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66];
 
+    fn now() -> Instant {
+        Instant::now()
+    }
+
     fn make_config() -> ConfigTable {
         ConfigTable::with_configs(vec![RouteConfig {
             config_id: 0,
@@ -610,7 +618,7 @@ mod tests {
         let mut conn = ConnectionTable::new();
 
         assert!(matches!(
-            process_packet(&mut frame, &config, &mut conn, &LOCAL_MAC),
+            process_packet(&mut frame, &config, &mut conn, &LOCAL_MAC, now()),
             Verdict::CidForward(_)
         ));
         assert_eq!(&frame[..6], &[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01]);
@@ -625,7 +633,7 @@ mod tests {
         let mut conn = ConnectionTable::new();
 
         assert!(matches!(
-            process_packet(&mut frame, &config, &mut conn, &LOCAL_MAC),
+            process_packet(&mut frame, &config, &mut conn, &LOCAL_MAC, now()),
             Verdict::CidForward(_)
         ));
         assert_eq!(&frame[..6], &[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01]);
@@ -643,7 +651,7 @@ mod tests {
         // after decryption — this is a stale/removed server, not a new
         // client, so we do NOT fall back to consistent hash.
         assert!(matches!(
-            process_packet(&mut frame, &config, &mut conn, &LOCAL_MAC),
+            process_packet(&mut frame, &config, &mut conn, &LOCAL_MAC, now()),
             Verdict::CidUnroutable
         ));
         assert_eq!(&frame[..6], &[0xff; 6]);
@@ -660,7 +668,7 @@ mod tests {
         frame.extend_from_slice(&[0x00; 28]);
 
         assert!(matches!(
-            process_packet(&mut frame, &config, &mut conn, &LOCAL_MAC),
+            process_packet(&mut frame, &config, &mut conn, &LOCAL_MAC, now()),
             Verdict::Pass
         ));
     }
@@ -681,7 +689,7 @@ mod tests {
         let mut frame = build_ipv4_frame(&quic);
 
         assert!(matches!(
-            process_packet(&mut frame, &config, &mut conn, &LOCAL_MAC),
+            process_packet(&mut frame, &config, &mut conn, &LOCAL_MAC, now()),
             Verdict::CidForward(_)
         ));
         assert_eq!(&frame[..6], &[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01]);
@@ -709,7 +717,7 @@ mod tests {
         let mut frame = build_ipv4_frame(&quic);
 
         assert!(matches!(
-            process_packet(&mut frame, &config, &mut conn, &LOCAL_MAC),
+            process_packet(&mut frame, &config, &mut conn, &LOCAL_MAC, now()),
             Verdict::FallbackForward
         ));
         assert_eq!(&frame[..6], &[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01]);
@@ -727,7 +735,7 @@ mod tests {
         let mut conn = ConnectionTable::new();
 
         assert!(matches!(
-            process_packet(&mut frame, &config, &mut conn, &LOCAL_MAC),
+            process_packet(&mut frame, &config, &mut conn, &LOCAL_MAC, now()),
             Verdict::FallbackForward
         ));
         // Only one server with a MAC, so it must be selected.
@@ -745,7 +753,7 @@ mod tests {
 
         let mut frame1 = build_ipv4_frame(&quic);
         assert!(matches!(
-            process_packet(&mut frame1, &config, &mut conn, &LOCAL_MAC),
+            process_packet(&mut frame1, &config, &mut conn, &LOCAL_MAC, now()),
             Verdict::FallbackForward
         ));
         let mac1 = frame1[..6].to_vec();
@@ -753,7 +761,7 @@ mod tests {
         // Second packet, same 4-tuple — should get same server from table.
         let mut frame2 = build_ipv4_frame(&quic);
         assert!(matches!(
-            process_packet(&mut frame2, &config, &mut conn, &LOCAL_MAC),
+            process_packet(&mut frame2, &config, &mut conn, &LOCAL_MAC, now()),
             Verdict::FallbackForward
         ));
         assert_eq!(&frame2[..6], &mac1[..]);
@@ -770,7 +778,7 @@ mod tests {
         // First packet from 10.0.0.1:12345
         let mut frame1 = build_ipv4_frame_ex(&quic, [10, 0, 0, 1], 12345);
         assert!(matches!(
-            process_packet(&mut frame1, &config, &mut conn, &LOCAL_MAC),
+            process_packet(&mut frame1, &config, &mut conn, &LOCAL_MAC, now()),
             Verdict::FallbackForward
         ));
         let mac1 = frame1[..6].to_vec();
@@ -778,7 +786,7 @@ mod tests {
         // Retransmit from 10.0.0.99:54321 (NAT rebinding) — same DCID.
         let mut frame2 = build_ipv4_frame_ex(&quic, [10, 0, 0, 99], 54321);
         assert!(matches!(
-            process_packet(&mut frame2, &config, &mut conn, &LOCAL_MAC),
+            process_packet(&mut frame2, &config, &mut conn, &LOCAL_MAC, now()),
             Verdict::FallbackForward
         ));
         // Same server via DCID index.
@@ -795,7 +803,7 @@ mod tests {
         let mut conn = ConnectionTable::new();
 
         assert!(matches!(
-            process_packet(&mut frame, &config, &mut conn, &LOCAL_MAC),
+            process_packet(&mut frame, &config, &mut conn, &LOCAL_MAC, now()),
             Verdict::CidForward(_)
         ));
 
@@ -813,7 +821,7 @@ mod tests {
             dst_port: 9999,
         };
 
-        assert_eq!(conn.lookup(&unrelated_flow, Some(&dcid_key)), Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01]));
+        assert_eq!(conn.lookup(&unrelated_flow, Some(&dcid_key), now()), Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01]));
     }
 
     #[test]
@@ -828,8 +836,8 @@ mod tests {
         let mut conn1 = ConnectionTable::new();
         let mut conn2 = ConnectionTable::new();
 
-        process_packet(&mut frame1, &config, &mut conn1, &LOCAL_MAC);
-        process_packet(&mut frame2, &config, &mut conn2, &LOCAL_MAC);
+        process_packet(&mut frame1, &config, &mut conn1, &LOCAL_MAC, now());
+        process_packet(&mut frame2, &config, &mut conn2, &LOCAL_MAC, now());
 
         // Same 4-tuple → same consistent hash → same server.
         assert_eq!(&frame1[..6], &frame2[..6]);
@@ -935,7 +943,7 @@ mod tests {
         let mut conn = ConnectionTable::new();
 
         assert!(matches!(
-            process_packet(&mut frame, &config, &mut conn, &LOCAL_MAC),
+            process_packet(&mut frame, &config, &mut conn, &LOCAL_MAC, now()),
             Verdict::IcmpForward
         ));
         assert_eq!(&frame[..6], &[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01]);
@@ -956,7 +964,7 @@ mod tests {
         let quic = build_quic_long_header(3, &[0x00, 0x00, 0x01], &[0x00; 13]);
         let mut normal_frame = build_ipv4_frame_ex(&quic, [10, 0, 0, 1], 12345);
         assert!(matches!(
-            process_packet(&mut normal_frame, &config, &mut conn, &LOCAL_MAC),
+            process_packet(&mut normal_frame, &config, &mut conn, &LOCAL_MAC, now()),
             Verdict::FallbackForward
         ));
 
@@ -973,7 +981,7 @@ mod tests {
         );
 
         assert!(matches!(
-            process_packet(&mut icmp_frame, &config, &mut conn, &LOCAL_MAC),
+            process_packet(&mut icmp_frame, &config, &mut conn, &LOCAL_MAC, now()),
             Verdict::IcmpForward
         ));
         assert_eq!(&icmp_frame[..6], &[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01]);
@@ -995,7 +1003,7 @@ mod tests {
         );
 
         assert!(matches!(
-            process_packet(&mut frame, &config, &mut conn, &LOCAL_MAC),
+            process_packet(&mut frame, &config, &mut conn, &LOCAL_MAC, now()),
             Verdict::Pass
         ));
         // MAC not rewritten.
@@ -1018,7 +1026,7 @@ mod tests {
         );
 
         assert!(matches!(
-            process_packet(&mut frame, &config, &mut conn, &LOCAL_MAC),
+            process_packet(&mut frame, &config, &mut conn, &LOCAL_MAC, now()),
             Verdict::Pass
         ));
     }

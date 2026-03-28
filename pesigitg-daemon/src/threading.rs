@@ -3,6 +3,7 @@ use std::os::fd::BorrowedFd;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread::{self, JoinHandle};
+use std::time::Instant;
 
 use libc::{ioctl, socket, AF_INET, SOCK_DGRAM, c_char};
 use log::{error, info};
@@ -223,7 +224,8 @@ fn worker_loop(
             pending_fill.extend_from_slice(&comp_descs[refilled..consumed]);
         }
 
-        conn.maybe_sweep();
+        let now = Instant::now();
+        conn.maybe_sweep(now);
 
         let n = xsk.poll_recv(&mut rx_descs, POLL_TIMEOUT_MS);
         if n == 0 {
@@ -240,7 +242,7 @@ fn worker_loop(
         for i in 0..n {
             let verdict = {
                 let mut data = unsafe { xsk.frame_mut(&mut rx_descs[i]) };
-                packet::process_packet(&mut *data, &config, &mut conn, local_mac)
+                packet::process_packet(&mut *data, &config, &mut conn, local_mac, now)
             };
             match verdict {
                 Verdict::CidForward(config_id) => {
