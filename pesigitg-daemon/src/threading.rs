@@ -275,6 +275,8 @@ fn worker_loop(
         if refilled < recycle_batch.len() {
             pending_fill.extend_from_slice(&recycle_batch[refilled..]);
         }
+
+        stats.record_pending_fill(pending_fill.len() as u64);
     }
 }
 

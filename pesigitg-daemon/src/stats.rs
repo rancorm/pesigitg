@@ -19,6 +19,7 @@ pub struct WorkerStats {
     cid_unroutable: AtomicU64,
     icmp_forwarded: AtomicU64,
     passed: AtomicU64,
+    pending_fill_peak: AtomicU64,
 }
 
 #[inline(always)]
@@ -37,6 +38,7 @@ impl WorkerStats {
             fallback_routed: AtomicU64::new(0),
             icmp_forwarded: AtomicU64::new(0),
             passed: AtomicU64::new(0),
+            pending_fill_peak: AtomicU64::new(0),
         }
     }
 
@@ -74,6 +76,13 @@ impl WorkerStats {
     pub fn record_pass(&self) {
         inc(&self.passed);
     }
+
+    #[inline(always)]
+    pub fn record_pending_fill(&self, depth: u64) {
+        if depth > self.pending_fill_peak.load(Ordering::Relaxed) {
+            self.pending_fill_peak.store(depth, Ordering::Relaxed);
+        }
+    }
 }
 
 /// Snapshot of aggregate counters at a point in time.
@@ -87,6 +96,7 @@ pub struct Snapshot {
     pub fallback_routed: u64,
     pub icmp_forwarded: u64,
     pub passed: u64,
+    pub pending_fill_peak: u64,
 }
 
 impl Snapshot {
@@ -106,6 +116,7 @@ impl Snapshot {
             fallback_routed: self.fallback_routed.wrapping_sub(prev.fallback_routed),
             icmp_forwarded: self.icmp_forwarded.wrapping_sub(prev.icmp_forwarded),
             passed: self.passed.wrapping_sub(prev.passed),
+            pending_fill_peak: self.pending_fill_peak,
         }
     }
 
@@ -148,7 +159,11 @@ impl fmt::Display for Snapshot {
             f,
             " fallback={} icmp={}) pass={}",
             self.fallback_routed, self.icmp_forwarded, self.passed,
-        )
+        )?;
+        if self.pending_fill_peak > 0 {
+            write!(f, " pending_fill_peak={}", self.pending_fill_peak)?;
+        }
+        Ok(())
     }
 }
 
@@ -187,6 +202,10 @@ impl StatsTable {
             total.fallback_routed += slot.fallback_routed.load(Ordering::Relaxed);
             total.icmp_forwarded += slot.icmp_forwarded.load(Ordering::Relaxed);
             total.passed += slot.passed.load(Ordering::Relaxed);
+            let peak = slot.pending_fill_peak.load(Ordering::Relaxed);
+            if peak > total.pending_fill_peak {
+                total.pending_fill_peak = peak;
+            }
         }
 
         total
