@@ -7,6 +7,9 @@
 use std::fmt;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
+
+use aes::Aes128;
+use aes::cipher::{KeyInit, generic_array::GenericArray};
 use serde::Deserialize;
 
 /// Per-config-id configuration, validated and ready for use.
@@ -33,14 +36,41 @@ pub struct ConfigTable {
 }
 
 /// Encryption mode derived from `server_id_length + nonce_length`.
-#[derive(Debug, Clone)]
+///
+/// The pre-computed [`Aes128`] cipher avoids key expansion on every packet.
 pub enum Encryption {
     /// Plaintext - no key supplied. Not recommended for production.
     Plaintext,
     /// Single-pass AES-128-ECB (server_id_length + nonce_length == 16).
-    SinglePass { key: [u8; 16] },
+    SinglePass { key: [u8; 16], cipher: Aes128 },
     /// Four-pass block cipher (server_id_length + nonce_length != 16, <= 19).
-    FourPass { key: [u8; 16] },
+    FourPass { key: [u8; 16], cipher: Aes128 },
+}
+
+impl Clone for Encryption {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Plaintext => Self::Plaintext,
+            Self::SinglePass { key, .. } => Self::SinglePass {
+                key: *key,
+                cipher: Aes128::new(GenericArray::from_slice(key)),
+            },
+            Self::FourPass { key, .. } => Self::FourPass {
+                key: *key,
+                cipher: Aes128::new(GenericArray::from_slice(key)),
+            },
+        }
+    }
+}
+
+impl fmt::Debug for Encryption {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Plaintext => write!(f, "Plaintext"),
+            Self::SinglePass { .. } => write!(f, "SinglePass"),
+            Self::FourPass { .. } => write!(f, "FourPass"),
+        }
+    }
 }
 
 /// A backend QUIC server
@@ -150,10 +180,11 @@ impl RouteConfig {
             None => Encryption::Plaintext,
             Some(ref hex) => {
                 let key = parse_hex_key(hex)?;
+                let cipher = Aes128::new(GenericArray::from_slice(&key));
                 if sum == 16 {
-                    Encryption::SinglePass { key }
+                    Encryption::SinglePass { key, cipher }
                 } else {
-                    Encryption::FourPass { key }
+                    Encryption::FourPass { key, cipher }
                 }
             }
         };

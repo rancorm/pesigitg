@@ -6,7 +6,7 @@
 //! - Four-pass block cipher (Feistel construction)
 
 use aes::Aes128;
-use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit, generic_array::GenericArray};
+use aes::cipher::{BlockDecrypt, BlockEncrypt, generic_array::GenericArray};
 
 use crate::config::route::{ConfigTable, Encryption, RouteConfig};
 
@@ -146,11 +146,11 @@ pub fn resolve_server_idx(dcid: &[u8], config: &RouteConfig) -> Option<usize> {
 
     match &config.encryption {
         Encryption::Plaintext => {}
-        Encryption::SinglePass { key } => {
-            decrypt_single_pass(&mut buf, key);
+        Encryption::SinglePass { cipher, .. } => {
+            decrypt_single_pass(&mut buf, cipher);
         }
-        Encryption::FourPass { key } => {
-            decrypt_four_pass(&mut buf, sid_len, payload_len - sid_len, key);
+        Encryption::FourPass { cipher, .. } => {
+            decrypt_four_pass(&mut buf, sid_len, payload_len - sid_len, cipher);
         }
     }
 
@@ -158,12 +158,11 @@ pub fn resolve_server_idx(dcid: &[u8], config: &RouteConfig) -> Option<usize> {
 }
 
 /// AES-128-ECB decrypt a 16-byte block in place.
-fn decrypt_single_pass(buf: &mut [u8; 19], key: &[u8; 16]) {
-    let cipher = Aes128::new(GenericArray::from_slice(key));
+fn decrypt_single_pass(buf: &mut [u8; 19], cipher: &Aes128) {
     let mut block = *GenericArray::from_slice(&buf[..16]);
-    
+
     cipher.decrypt_block(&mut block);
-    
+
     buf[..16].copy_from_slice(&block);
 }
 
@@ -171,8 +170,7 @@ fn decrypt_single_pass(buf: &mut [u8; 19], key: &[u8; 16]) {
 ///
 /// Reverses the encryption by running passes 3, 2, 1, 0. Each pass
 /// uses AES-ECB *encrypt* (Feistel round functions are always forward).
-fn decrypt_four_pass(buf: &mut [u8; 19], sid_len: usize, nonce_len: usize, key: &[u8; 16]) {
-    let cipher = Aes128::new(GenericArray::from_slice(key));
+fn decrypt_four_pass(buf: &mut [u8; 19], sid_len: usize, nonce_len: usize, cipher: &Aes128) {
 
     for i in (0..4u8).rev() {
         let mut block = [0u8; 16];
@@ -208,12 +206,17 @@ fn decrypt_four_pass(buf: &mut [u8; 19], sid_len: usize, nonce_len: usize, key: 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aes::cipher::KeyInit;
     use crate::config::route::Server;
 
     const TEST_KEY: [u8; 16] = [
         0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
         0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
     ];
+
+    fn test_cipher() -> Aes128 {
+        Aes128::new(GenericArray::from_slice(&TEST_KEY))
+    }
 
     fn make_config(encryption: Encryption, config_id: u8, sid_len: u8, nonce_len: u8) -> RouteConfig {
         RouteConfig {
@@ -299,7 +302,7 @@ mod tests {
     #[test]
     fn resolve_single_pass_round_trip() {
         let config = make_config(
-            Encryption::SinglePass { key: TEST_KEY },
+            Encryption::SinglePass { key: TEST_KEY, cipher: test_cipher() },
             0, 3, 13,
         );
 
@@ -326,7 +329,7 @@ mod tests {
     #[test]
     fn resolve_four_pass_round_trip() {
         let config = make_config(
-            Encryption::FourPass { key: TEST_KEY },
+            Encryption::FourPass { key: TEST_KEY, cipher: test_cipher() },
             1, 3, 4,
         );
 
@@ -427,7 +430,7 @@ mod tests {
         let mut dbuf = [0u8; 19];
         
         dbuf[..7].copy_from_slice(&buf[..7]);
-        decrypt_four_pass(&mut dbuf, sid_len, nonce_len, &TEST_KEY);
+        decrypt_four_pass(&mut dbuf, sid_len, nonce_len, &test_cipher());
 
         assert_eq!(&dbuf[..7], &original);
     }
