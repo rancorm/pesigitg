@@ -20,6 +20,7 @@ use anyhow::{Context, Result, bail};
 use quinn::Endpoint;
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use tokio::signal;
+use tokio::time;
 
 use cid_gen::{Encryption, QuicLbCidGenerator};
 
@@ -224,6 +225,8 @@ async fn main() -> Result<()> {
     transport.max_idle_timeout(Some(
         quinn::IdleTimeout::try_from(std::time::Duration::from_secs(30)).unwrap(),
     ));
+    transport.max_concurrent_bidi_streams(64u32.into());
+    transport.max_concurrent_uni_streams(0u32.into());
 
     let mut server_config = quinn::ServerConfig::with_crypto(Arc::new(
         quinn::crypto::rustls::QuicServerConfig::try_from(tls_config)
@@ -297,14 +300,24 @@ async fn handle_connection(incoming: quinn::Incoming) -> Result<()> {
         match conn.accept_bi().await {
             Ok((mut send, mut recv)) => {
                 tokio::spawn(async move {
-                    match recv.read_to_end(64 * 1024).await {
-                        Ok(data) => {
+                    let result = time::timeout(
+                        std::time::Duration::from_secs(10),
+                        async {
+                            let data = recv.read_to_end(64 * 1024).await?;
                             eprintln!("quic-echo: [{remote}] echo {len} bytes", len = data.len());
-                            let _ = send.write_all(&data).await;
-                            let _ = send.finish();
+                            send.write_all(&data).await?;
+                            send.finish()?;
+                            Ok::<(), anyhow::Error>(())
+                        },
+                    )
+                    .await;
+                    match result {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => {
+                            eprintln!("quic-echo: [{remote}] stream error: {e}");
                         }
-                        Err(e) => {
-                            eprintln!("quic-echo: [{remote}] recv error: {e}");
+                        Err(_) => {
+                            eprintln!("quic-echo: [{remote}] stream timed out");
                         }
                     }
                 });
