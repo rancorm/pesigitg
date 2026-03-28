@@ -259,6 +259,12 @@ impl ConfigTable {
         self.slots.iter_mut().filter_map(|s| s.as_mut())
     }
 
+    /// Returns `true` if any server in any active config has an unresolved MAC.
+    pub fn has_unresolved_macs(&self) -> bool {
+        self.slots.iter().flatten()
+            .any(|c| c.servers.iter().any(|s| s.mac.is_none()))
+    }
+
     /// Rebuild the merged fallback server list from all active configs.
     /// Call after resolving MACs.
     pub fn rebuild_fallback_servers(&mut self) {
