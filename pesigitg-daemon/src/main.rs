@@ -252,29 +252,31 @@ fn main() -> Result<()> {
         prev_stats = current;
 
         // Retry MAC resolution and run health probes.
-        {
-            let mut rc = route_config.write().unwrap();
-            let mut rebuild = false;
-
-            if rc.has_unresolved_macs() {
-                for config in rc.configs_mut() {
-                    neigh::resolve_macs(&mut config.servers);
-                }
-
-                rebuild = true;
-            }
-
-            if health.check(&mut rc) {
-                rebuild = true;
-            }
-
-            if rebuild {
-                rc.rebuild_fallback_servers();
-            }
-        }
+        check_and_rebuild(&route_config, &mut health);
 
         systemd_notify!(sd_notify::NotifyState::Watchdog);
     }
 
     Ok(())
+}
+
+fn check_and_rebuild(route_config: &RwLock<ConfigTable>, health: &mut HealthChecker) {
+    let mut rc = route_config.write().unwrap();
+    let mut rebuild = false;
+
+    if rc.has_unresolved_macs() {
+        for config in rc.configs_mut() {
+            neigh::resolve_macs(&mut config.servers);
+        }
+
+        rebuild = true;
+    }
+
+    if health.check(&mut rc) {
+        rebuild = true;
+    }
+
+    if rebuild {
+        rc.rebuild_fallback_servers();
+    }
 }
