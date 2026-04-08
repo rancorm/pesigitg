@@ -12,6 +12,15 @@ grounding the answers to internal project knowledge.
 
 This is an implementation of those concepts with the help of Claude Code. 
 
+### Essentials
+
+- Small code size
+- Least amount of dependencies
+- Single programming language
+- Few items as possible to release
+- Behave like a traditional UNIX tool
+- Documentation for project and code history
+
 ## Architecture
 
 - **pesigitg-common** — `no_std`-compatible library shared across crates.
