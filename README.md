@@ -21,6 +21,41 @@ This is an implementation of those concepts with the help of Claude Code.
 - Behave like a traditional UNIX tool
 - Documentation for project and code history
 
+### Knowledge
+
+QUIC & HTTP/3 related RFCs and drafts.
+
+#### Core QUIC
+- [RFC 9000: QUIC – A UDP-Based Multiplexed and Secure Transport](https://www.rfc-editor.org/rfc/rfc9000)
+- [RFC 9001: Using TLS to Secure QUIC](https://www.rfc-editor.org/rfc/rfc9001)
+- [RFC 9002: QUIC Loss Detection and Congestion Control](https://www.rfc-editor.org/rfc/rfc9002)
+- [RFC 8999: Version-Independent Properties of QUIC](https://www.rfc-editor.org/rfc/rfc8999)
+
+#### HTTP/3
+- [RFC 9114: HTTP/3](https://www.rfc-editor.org/rfc/rfc9114)
+
+#### QUIC Extensions
+- [RFC 9221: QUIC DATAGRAM Extension](https://www.rfc-editor.org/rfc/rfc9221)
+
+#### MASQUE & Proxying
+- [RFC 9308: Generic UDP Proxying (MASQUE)](https://www.rfc-editor.org/rfc/rfc9308)
+- [RFC 9312: CONNECT-UDP (QUIC-based proxying)](https://www.rfc-editor.org/rfc/rfc9312)
+
+#### HTTP Datagrams
+- [RFC 9368: HTTP Datagrams and Capsule Protocol](https://www.rfc-editor.org/rfc/rfc9368)
+
+#### DNS over QUIC & HTTP/3
+- [RFC 9250: DNS over Dedicated QUIC Connections (DoQ)](https://www.rfc-editor.org/rfc/rfc9250)
+- [RFC 9369: DNS over HTTP/3 (DoH3)](https://www.rfc-editor.org/rfc/rfc9369)
+- [RFC 9460: SVCB and HTTPS DNS Resource Records](https://www.rfc-editor.org/rfc/rfc9460)
+
+#### Web Enhancements
+- [RFC 9443: Bootstrapping WebSockets with HTTP/3](https://www.rfc-editor.org/rfc/rfc9443)
+
+#### Drafts
+- [QUIC-LB: Load Balancers for QUIC](https://datatracker.ietf.org/doc/draft-ietf-quic-load-balancers/)
+- [QUIC Retry Offload](https://datatracker.ietf.org/doc/draft-ietf-quic-retry-offload/)
+
 ## Architecture
 
 - **pesigitg-common** — `no_std`-compatible library shared across crates.
