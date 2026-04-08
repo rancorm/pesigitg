@@ -6,6 +6,12 @@
 
 A high-performance QUIC-aware load balancer written in Rust, using eBPF and AF_XDP for kernel-bypass packet forwarding.
 
+I brainstorm this idea with Claude Projects (RFCs, project configs, snippets, etc.) to avoid 
+the cold start problem when returning to an idea or concept and having to start over,
+grounding the answers to internal project knowledge.
+
+This is an implementation of those concepts with the help of Claude Code. 
+
 ## Architecture
 
 - **pesigitg-common** — `no_std`-compatible library shared across crates.
