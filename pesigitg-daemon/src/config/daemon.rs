@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Jonathan Cormier
 // This file is part of Pesigitg.
 
+use core::fmt;
 use std::path::PathBuf;
 
 use anyhow::{bail, Result};
@@ -64,6 +65,28 @@ impl FileConfig {
         }
 
         Ok(FileConfig { ports, interface, queues, route_config })
+    }
+}
+
+impl fmt::Display for FileConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "daemon config:")?;
+        writeln!(f, "  interface: {}", self.interface)?;
+        writeln!(f, "  queues: {}", self.queues)?;
+        write!(f, "  ports:")?;
+
+        for port in self.ports.iter() {
+            write!(f, " {}", port)?;
+        }
+
+        writeln!(f, "")?; 
+        writeln!(f, "  route config: {}",
+            self.route_config
+            .as_deref()
+            .and_then(|p| p.to_str())
+            .unwrap_or("<none>"))?;
+
+        Ok(())
     }
 }
 

@@ -20,7 +20,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use log::{error, warn, info, debug};
 use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM, SIGUSR1};
@@ -49,6 +49,7 @@ const LOOP_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn main() -> Result<()> {
     let mut args = parse_args()?;
+    let epoch = Instant::now();
 
     // To be, or not to be a daemon.
     if !args.foreground && !running_under_systemd() {
@@ -131,6 +132,7 @@ fn main() -> Result<()> {
 
     info!("loaded route config: {}", route_config.path.display());
     info!("{}", route_config);
+    debug!("route config parsed: T+{:.2?}", epoch.elapsed());
 
     // Resolve config server MAC addresses
     for config in route_config.configs_mut() {
@@ -139,6 +141,11 @@ fn main() -> Result<()> {
 
     route_config.rebuild_fallback_servers();
     log_draining_servers(&route_config);
+    debug!(
+        "initial MAC resolution complete: T+{:.2?} ({} fallback server(s))",
+        epoch.elapsed(),
+        route_config.fallback_servers.len()
+    );
 
     let route_config = Arc::new(RwLock::new(route_config));
 
@@ -151,6 +158,7 @@ fn main() -> Result<()> {
         &args.interface,
         &args.ports,
     )?;
+    debug!("eBPF loaded and attached: T+{:.2?}", epoch.elapsed());
 
     let ebpf = Arc::new(Mutex::new(ebpf));
 
@@ -162,6 +170,7 @@ fn main() -> Result<()> {
     for t in &thread_plan {
         info!("thread planned: queue={} -> core={}", t.queue_id, t.core_id);
     }
+    debug!("thread plan ready: T+{:.2?}", epoch.elapsed());
 
     // Resolve and log interface MAC
     let local_mac = utils::interface_mac(&args.interface)
@@ -180,6 +189,7 @@ fn main() -> Result<()> {
         Arc::clone(&shutdown),
         Arc::clone(&stats),
     );
+    debug!("worker pool spawned: T+{:.2?}", epoch.elapsed());
 
     // Notify systemd that we're ready with a status string
     notify_ready(&format!(
@@ -189,10 +199,13 @@ fn main() -> Result<()> {
 
     // Health checker probes backends on the first configured port.
     let mut health = HealthChecker::new(args.ports[0])?;
+    debug!("health checker ready: T+{:.2?}", epoch.elapsed());
 
     // Poll for signals with a timeout to allow watchdog keepalives
     let mut prev_stats = Snapshot::default();
     let mut draining_had_traffic = false;
+
+    debug!("entering main loop: T+{:.2?}", epoch.elapsed());
 
     loop {
         // Wait up to 5 seconds for a signal, then run periodic tasks
@@ -205,6 +218,8 @@ fn main() -> Result<()> {
         // Process all pending signals
         loop {
             if let Some(sig) = got_signal.take() {
+                debug!("signal received: {}", sig);
+
                 match sig {
                     SIGHUP => reload_config(&mut args, &route_config),
                     SIGUSR1 => {
@@ -239,6 +254,8 @@ fn main() -> Result<()> {
 
         if delta.rx_packets > 0 {
             info!("stats: {}", delta);
+        } else {
+            debug!("idle loop: no RX in last {:?}", LOOP_TIMEOUT);
         }
 
         // Detect drain completion: once traffic was flowing to draining
@@ -271,6 +288,8 @@ fn check_and_rebuild(route_config: &RwLock<ConfigTable>, health: &mut HealthChec
     let mut rebuild = false;
 
     if rc.has_unresolved_macs() {
+        debug!("Trying to resolve {} neighbors", rc.unresolved_macs_count());
+
         for config in rc.configs_mut() {
             neigh::resolve_macs(&mut config.servers);
         }

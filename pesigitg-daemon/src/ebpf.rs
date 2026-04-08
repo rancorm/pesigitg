@@ -4,12 +4,13 @@
 
 use std::os::fd::AsRawFd;
 use std::path::Path;
+use std::time::Instant;
 
 use anyhow::{anyhow, bail, Context, Result};
 use aya::maps::{HashMap, XskMap};
 use aya::programs::{Xdp, XdpFlags};
 use aya::Ebpf;
-use log::info;
+use log::{debug, info};
 
 /// Force 8-byte alignment for the embedded eBPF ELF object.
 /// `include_bytes!` does not guarantee alignment, but the ELF parser requires it.
@@ -58,6 +59,8 @@ impl EbpfHandle {
 /// The returned [`EbpfHandle`] must be kept alive — dropping it
 /// detaches the XDP program.
 pub fn load_ebpf(path: Option<&Path>, interface: &str, ports: &[u16]) -> Result<EbpfHandle> {
+    let load_start = Instant::now();
+
     let mut ebpf = match path {
         #[cfg(debug_assertions)]
         Some(p) => {
@@ -77,12 +80,15 @@ pub fn load_ebpf(path: Option<&Path>, interface: &str, ports: &[u16]) -> Result<
         }
     };
 
+    debug!("eBPF object parsed in {:.2?}", load_start.elapsed());
+
     let program: &mut Xdp = ebpf
         .program_mut("pesigitg")
         .ok_or_else(|| anyhow!("XDP program 'pesigitg' not found in eBPF object"))?
         .try_into()
         .context("'pesigitg' is not an XDP program")?;
 
+    let attach_start = Instant::now();
     program.load()
         .context("failed to load XDP program")?;
     program
@@ -90,6 +96,7 @@ pub fn load_ebpf(path: Option<&Path>, interface: &str, ports: &[u16]) -> Result<
         .context("failed to attach XDP program to interface")?;
 
     info!("XDP program attached to '{}'", interface);
+    debug!("XDP program load+attach took {:.2?}", attach_start.elapsed());
 
     {
         let mut port_map: HashMap<_, u16, u8> = HashMap::try_from(

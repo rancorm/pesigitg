@@ -10,7 +10,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
 use libc::{ioctl, socket, AF_INET, SOCK_DGRAM, c_char};
-use log::{error, info};
+use log::{debug, error, info};
 use nix::sched::{sched_setaffinity, CpuSet};
 use nix::unistd::Pid;
 use xsk_rs::FrameDesc;
@@ -217,6 +217,9 @@ fn worker_loop(
     let mut tx_batch: Vec<FrameDesc> = Vec::with_capacity(BATCH_SIZE);
     let mut recycle_batch: Vec<FrameDesc> = Vec::with_capacity(BATCH_SIZE);
 
+    let worker_start = Instant::now();
+    let mut first_packet_logged = false;
+
     while !shutdown.load(Ordering::Relaxed) {
         // Drain frames that couldn't be refilled on prior iterations.
         if !pending_fill.is_empty() {
@@ -236,6 +239,15 @@ fn worker_loop(
         let n = xsk.poll_recv(&mut rx_descs, POLL_TIMEOUT_MS);
         if n == 0 {
             continue;
+        }
+
+        if !first_packet_logged {
+            debug!(
+                "worker q{}: first packet at T+{:.2?}",
+                queue_id,
+                worker_start.elapsed()
+            );
+            first_packet_logged = true;
         }
 
         let config = config.read().unwrap();

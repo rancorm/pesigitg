@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-use log::{info, warn};
+use log::{debug, info, warn};
 
 use crate::config::route::Server;
 
@@ -102,6 +102,14 @@ impl Drop for NetlinkSocket {
 /// Servers with a statically configured MAC are left unchanged.
 /// A warning is logged for any server whose MAC cannot be resolved.
 pub fn resolve_macs(servers: &mut Vec<Server>) {
+    let to_resolve = servers.iter().filter(|s| s.mac.is_none()).count();
+
+    if to_resolve == 0 {
+        return;
+    }
+
+    debug!("resolve_macs: {} server(s) need MAC resolution", to_resolve);
+
     let table = match query_neighbour_table() {
         Ok(t) => t,
         Err(e) => {
@@ -109,6 +117,8 @@ pub fn resolve_macs(servers: &mut Vec<Server>) {
             return;
         }
     };
+
+    debug!("resolve_macs: neighbour table has {} entries", table.len());
 
     for server in servers.iter_mut() {
         if server.mac.is_some() {
@@ -128,6 +138,13 @@ pub fn resolve_macs(servers: &mut Vec<Server>) {
             }
         }
     }
+
+    let remaining = servers.iter().filter(|s| s.mac.is_none()).count();
+    debug!(
+        "resolve_macs: {} resolved, {} still unresolved",
+        to_resolve - remaining,
+        remaining
+    );
 }
 
 /// Send `RTM_GETNEIGH | NLM_F_DUMP` and collect all valid entries into a map.

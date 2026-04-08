@@ -12,10 +12,11 @@
 //! All backends are probed concurrently using a single-threaded tokio
 //! runtime, keeping total probe time close to one timeout period.
 
+use core::fmt;
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use log::{debug, info, warn};
 use quinn::Endpoint;
@@ -151,7 +152,10 @@ impl HealthChecker {
             .into_iter()
             .collect();
 
+        debug!("probing {} backend(s)", addrs.len());
+        let batch_start = Instant::now();
         let probes = self.probe_all(&addrs);
+        debug!("probe batch complete in {:.2?}", batch_start.elapsed());
 
         // Phase 2: update per-address health state, log transitions.
         let mut changed = false;
@@ -245,5 +249,29 @@ impl HealthChecker {
 
             results
         })
+    }
+}
+
+impl fmt::Display for ServerHealth {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "failures: {} / healthy: {}", self.consecutive_failures, self.healthy)?;
+
+        Ok(())
+    }
+}
+
+impl fmt::Display for HealthChecker {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "HealthChecker:")?;
+        writeln!(f, "  Port: {}", self.port)?;
+        writeln!(f, "  Endpoint v4: {:?}", self.endpoint_v4)?;
+        writeln!(f, "  Endpoint v6: {:?}", self.endpoint_v6)?;
+        writeln!(f, "  Servers:")?;
+
+        for (ip, health) in &self.state {
+            writeln!(f, "    {} -> {}", ip, health)?;
+        }
+
+        Ok(())
     }
 }

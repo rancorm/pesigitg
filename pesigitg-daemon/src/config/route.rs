@@ -319,6 +319,14 @@ impl ConfigTable {
             .any(|c| c.servers.iter().any(|s| s.mac.is_none()))
     }
 
+    /// Returns `usize` of unresolved MAC addresses
+    pub fn unresolved_macs_count(&self) -> usize {
+        self.slots.iter().flatten()
+            .flat_map(|rc| rc.servers.iter())
+            .filter(|s| s.mac.is_none())
+            .count()
+    }
+    
     /// Rebuild the merged fallback server list from all active configs.
     /// Call after resolving MACs.
     pub fn rebuild_fallback_servers(&mut self) {

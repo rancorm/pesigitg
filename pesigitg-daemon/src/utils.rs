@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later OR Commercial
 // Copyright (c) 2026 Jonathan Cormier
 // This file is part of Pesigitg.
+use log::debug;
 
 /// Fire-and-forget wrapper around `sd_notify::notify`.
 ///
@@ -130,6 +131,8 @@ pub(crate) fn daemonize() -> anyhow::Result<()> {
     dup2_stdin(&devnull)?;
     dup2_stdout(&devnull)?;
     dup2_stderr(&devnull)?;
+
+    debug!("daemon mode");
 
     Ok(())
 }

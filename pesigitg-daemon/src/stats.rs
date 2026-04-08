@@ -226,21 +226,27 @@ impl fmt::Display for Snapshot {
             "rx={} fwd={} (cid={}",
             self.rx_packets, self.forwarded, self.cid_routed,
         )?;
+
         self.format_cid_by_config(f)?;
+        
         if self.cid_unroutable > 0 {
             write!(f, " cid_unroutable={}", self.cid_unroutable)?;
         }
+        
         if self.draining_forwarded > 0 {
             write!(f, " draining={}", self.draining_forwarded)?;
         }
+        
         write!(
             f,
             " fallback={} icmp={}) pass={}",
             self.fallback_routed, self.icmp_forwarded, self.passed,
         )?;
+        
         if self.pending_fill_peak > 0 {
             write!(f, " pending_fill_peak={}", self.pending_fill_peak)?;
         }
+        
         Ok(())
     }
 }

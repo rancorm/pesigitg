@@ -6,11 +6,10 @@ pub mod daemon;
 pub mod route;
 
 use std::sync::{Arc, RwLock};
+use std::time::Instant;
 
-use log::{error, info};
+use log::{debug, error, info, warn};
 use pesigitg_common::DEFAULT_ROUTE_CONFIG;
-
-use log::warn;
 
 use crate::args::Args;
 use crate::neigh;
@@ -20,6 +19,9 @@ use daemon::FileConfig;
 use route::ConfigTable;
 
 pub(crate) fn reload_config(args: &mut Args, route_config: &Arc<RwLock<ConfigTable>>) {
+    debug!("reload_config: starting");
+    let reload_start = Instant::now();
+
     systemd_notify!(sd_notify::NotifyState::Reloading);
 
     if let Some(ref path) = args.config.clone() {
@@ -69,6 +71,8 @@ pub(crate) fn reload_config(args: &mut Args, route_config: &Arc<RwLock<ConfigTab
     notify_ready(&format!(
         "listening on {} ports {:?}", args.interface, args.ports
     ));
+
+    debug!("reload_config: complete in {:.2?}", reload_start.elapsed());
 }
 
 /// Log a warning for each server marked as draining.
