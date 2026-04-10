@@ -23,7 +23,9 @@ fn main() {
         }
         Some("build-ebpf") => {
             release = args.contains(&"--release".into());
+            let total = Instant::now();
             build_ebpf(release);
+            eprintln!("[x] total: {}", fmt_duration(total.elapsed()));
         }
         Some("run") => {
             release = args.contains(&"--release".into());
@@ -33,12 +35,19 @@ fn main() {
             eprintln!("[x] total: {}", fmt_duration(total.elapsed()));
             run_daemon(release, &args[1..]);
         }
+        Some("build-man") => {
+            release = false;
+            let total = Instant::now();
+            build_man();
+            eprintln!("[x] man total: {}", fmt_duration(total.elapsed()));
+        }
         _ => {
             eprintln!(
                 "Usage: cargo xtask <COMMAND>\n\n\
                  Commands:\n  \
                    build        Build the eBPF program and daemon\n  \
                    build-ebpf   Build only the eBPF program\n  \
+                   build-man    Render man pages from man/*.md via pandoc\n  \
                    run          Build and run the daemon (use sudo)\n\n\
                  Options:\n  \
                    --release    Build in release mode"
@@ -203,6 +212,79 @@ fn fmt_duration(d: std::time::Duration) -> String {
     } else {
         format!("{}.{:02}s", secs, d.subsec_millis() / 10)
     }
+}
+
+fn build_man() {
+    let root = workspace_root();
+    let src_dir = root.join("man");
+    let out_dir = root.join("target").join("man");
+
+    if let Err(e) = std::fs::create_dir_all(&out_dir) {
+        eprintln!("[*] cannot create {}: {}", out_dir.display(), e);
+        process::exit(1);
+    }
+
+    let entries = match std::fs::read_dir(&src_dir) {
+        Ok(it) => it,
+        Err(e) => {
+            eprintln!("[*] cannot read {}: {}", src_dir.display(), e);
+            process::exit(1);
+        }
+    };
+
+    let mut sources: Vec<PathBuf> = entries
+        .filter_map(|r| r.ok().map(|e| e.path()))
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.ends_with(".md"))
+                .unwrap_or(false)
+        })
+        .collect();
+
+    sources.sort();
+
+    if sources.is_empty() {
+        eprintln!("[*] no *.md files found in {}", src_dir.display());
+        process::exit(1);
+    }
+
+    for src in &sources {
+        // pesigitgd.8.md -> pesigitgd.8
+        let stem = src
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.strip_suffix(".md"))
+            .expect("non-md file slipped through filter");
+        let out = out_dir.join(stem);
+
+        let t = Instant::now();
+        let status = Command::new("pandoc")
+            .args(["-s", "-f", "markdown", "-t", "man"])
+            .arg(src)
+            .arg("-o")
+            .arg(&out)
+            .status();
+
+        match status {
+            Ok(s) if s.success() => {
+                eprintln!("[x] {}: {}", stem, fmt_duration(t.elapsed()));
+            }
+            Ok(s) => {
+                eprintln!("[*] pandoc failed for {}: exit {}", src.display(), s);
+                process::exit(s.code().unwrap_or(1));
+            }
+            Err(e) => {
+                eprintln!(
+                    "[*] failed to spawn pandoc ({}); install it via your package manager",
+                    e
+                );
+                process::exit(1);
+            }
+        }
+    }
+
+    eprintln!("[x] man pages written to {}", out_dir.display());
 }
 
 fn run_daemon(release: bool, args: &[String]) {
