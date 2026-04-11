@@ -8,7 +8,7 @@ members = [
 	"contrib/quic-echo",
 	"contrib/welman"
 ]
-exclude = ["pesigitg-ebpf"]
+exclude = ["pesigitg-ebpf", "pesigitg-daemon/fuzz"]
 default-members = ["pesigitg-daemon", "pesigitg-common"]
 
 [profile.release]
