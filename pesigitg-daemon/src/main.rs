@@ -11,6 +11,7 @@ mod health;
 mod neigh;
 mod packet;
 mod pidfile;
+mod quic;
 mod stats;
 mod threading;
 mod utils;
