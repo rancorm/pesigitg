@@ -12,6 +12,7 @@ mod neigh;
 mod packet;
 mod pidfile;
 mod quic;
+mod retry;
 mod stats;
 mod threading;
 mod utils;
