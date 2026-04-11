@@ -9,8 +9,14 @@
 //! consecutive probe failures a server is marked unhealthy, which
 //! removes it from both the CID and fallback routing paths.
 //!
-//! All backends are probed concurrently using a single-threaded tokio
-//! runtime, keeping total probe time close to one timeout period.
+//! Each backend is probed on its own schedule. Healthy servers are
+//! probed every [`PROBE_INTERVAL`]; once a server transitions to
+//! unhealthy, subsequent probes back off according to
+//! [`BACKOFF_SCHEDULE`] so long-dead backends stop burning handshakes
+//! while still allowing automatic recovery.
+//!
+//! All due backends are probed concurrently using a single-threaded
+//! tokio runtime, keeping total probe time close to one timeout period.
 
 use core::fmt;
 use std::collections::{HashMap, HashSet};
@@ -33,9 +39,24 @@ const FAILURE_THRESHOLD: u32 = 3;
 /// Per-probe timeout (connect + TLS handshake).
 const PROBE_TIMEOUT: Duration = Duration::from_millis(500);
 
+/// Probe cadence while a server is healthy (or still within the
+/// failure threshold window).
+const PROBE_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Backoff applied to probes after a server is marked unhealthy. The
+/// Nth entry is used after N failures past [`FAILURE_THRESHOLD`]; once
+/// the schedule is exhausted the final entry is used as a cap.
+const BACKOFF_SCHEDULE: &[Duration] = &[
+    Duration::from_secs(10),
+    Duration::from_secs(30),
+    Duration::from_secs(60),
+    Duration::from_secs(300),
+];
+
 struct ServerHealth {
     consecutive_failures: u32,
     healthy: bool,
+    next_probe_at: Instant,
 }
 
 pub struct HealthChecker {
@@ -141,33 +162,51 @@ impl HealthChecker {
         Ok(quinn::ClientConfig::new(Arc::new(quic_config)))
     }
 
-    /// Probe all servers and update health flags for any that changed state.
+    /// Probe due servers and update health flags for any that changed state.
     /// Returns `true` if the caller should rebuild fallback servers.
     pub fn check(&mut self, config: &mut ConfigTable) -> bool {
-        // Phase 1: collect unique addresses and probe concurrently.
-        let addrs: Vec<IpAddr> = config
+        let now = Instant::now();
+
+        // Phase 1: collect unique addresses, ensure state exists, and
+        // pick the ones whose next probe is due.
+        let all_addrs: HashSet<IpAddr> = config
             .configs()
             .flat_map(|rc| rc.servers.iter().map(|s| s.address))
-            .collect::<HashSet<_>>()
-            .into_iter()
             .collect();
 
-        debug!("probing {} backend(s)", addrs.len());
+        let mut due: Vec<IpAddr> = Vec::with_capacity(all_addrs.len());
+
+        for &addr in &all_addrs {
+            let s = self.state.entry(addr).or_insert(ServerHealth {
+                consecutive_failures: 0,
+                healthy: false,
+                next_probe_at: now,
+            });
+
+            if now >= s.next_probe_at {
+                due.push(addr);
+            }
+        }
+
+        if due.is_empty() {
+            debug!("no backends due for probing ({} tracked)", all_addrs.len());
+            return false;
+        }
+
+        debug!("probing {} of {} backend(s)", due.len(), all_addrs.len());
         let batch_start = Instant::now();
-        let probes = self.probe_all(&addrs);
+        let probes = self.probe_all(&due);
         debug!("probe batch complete in {:.2?}", batch_start.elapsed());
 
         // Phase 2: update per-address health state, log transitions.
         let mut changed = false;
 
         for (&addr, &ok) in &probes {
-            let s = self.state.entry(addr).or_insert(ServerHealth {
-                consecutive_failures: 0,
-                healthy: false,
-            });
+            let s = self.state.get_mut(&addr).expect("state inserted above");
 
             if ok {
                 s.consecutive_failures = 0;
+                s.next_probe_at = now + PROBE_INTERVAL;
 
                 if !s.healthy {
                     info!("{} is back up", addr);
@@ -177,6 +216,7 @@ impl HealthChecker {
                 }
             } else {
                 s.consecutive_failures += 1;
+                s.next_probe_at = now + Self::backoff_for(s.consecutive_failures);
 
                 if s.healthy && s.consecutive_failures >= FAILURE_THRESHOLD {
                     warn!(
@@ -202,6 +242,18 @@ impl HealthChecker {
         }
 
         changed
+    }
+
+    /// Returns the delay until the next probe for a server with the
+    /// given number of consecutive failures. Entries past the end of
+    /// [`BACKOFF_SCHEDULE`] are clamped to the final entry.
+    fn backoff_for(failures: u32) -> Duration {
+        if failures < FAILURE_THRESHOLD {
+            PROBE_INTERVAL
+        } else {
+            let idx = (failures - FAILURE_THRESHOLD) as usize;
+            BACKOFF_SCHEDULE[idx.min(BACKOFF_SCHEDULE.len() - 1)]
+        }
     }
 
     /// Probe all addresses concurrently and return results.
