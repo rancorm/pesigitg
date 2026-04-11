@@ -16,6 +16,8 @@ use aes::Aes128;
 use aes::cipher::{KeyInit, generic_array::GenericArray};
 use serde::Deserialize;
 
+use crate::retry::token::TokenKey;
+
 /// Per-config-id configuration, validated and ready for use.
 #[derive(Debug, Clone)]
 pub struct RouteConfig {
@@ -37,6 +39,80 @@ pub struct ConfigTable {
     slots: [Option<RouteConfig>; 7],
     /// Merged, deduplicated server list for fallback consistent hashing.
     pub fallback_servers: Vec<Server>,
+    /// Optional QUIC Retry service settings. `None` = no `[retry]` section
+    /// in the TOML; datapath should short-circuit the classifier branch.
+    // Read by the Retry classifier added in Phase 4b of quic-retry-offload.
+    #[allow(dead_code)]
+    pub retry: Option<RetryConfig>,
+}
+
+/// QUIC Retry service enablement mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetryMode {
+    /// Count what would have been retried but don't emit Retry packets.
+    /// Used to shake out classifier false positives before going live.
+    Observe,
+    /// Every non-token-bearing Initial is Retried.
+    Always,
+    /// Retry only when the Initial-packet rate crosses
+    /// [`RetryConfig::load_trigger_rate`] packets per second.
+    Load,
+}
+
+impl fmt::Display for RetryMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Observe => write!(f, "observe"),
+            Self::Always => write!(f, "always"),
+            Self::Load => write!(f, "load"),
+        }
+    }
+}
+
+/// Validated `[retry]` settings. Held inside [`ConfigTable`] so it
+/// rides the same RwLock swap as the rest of the route config on SIGHUP.
+#[derive(Debug, Clone)]
+pub struct RetryConfig {
+    /// Master switch. When `false` every other field is ignored and the
+    /// datapath does not consult the Retry module at all.
+    pub enabled: bool,
+    /// HMAC-SHA256 signing key for mint/verify. Redacted in Debug.
+    // Consumed by the Retry mint/verify path in Phase 4b.
+    #[allow(dead_code)]
+    pub token_key: TokenKey,
+    /// Token lifetime used by [`TokenKey::verify`]. Stored in ms so the
+    /// verify path doesn't re-multiply every packet.
+    pub token_lifetime_ms: u64,
+    /// Policy for when to emit Retry packets.
+    pub mode: RetryMode,
+    /// Optional restriction to specific UDP destination ports. Empty =
+    /// apply to every port the daemon is listening on.
+    pub ports: Vec<u16>,
+    /// For [`RetryMode::Load`]: packets/sec threshold above which Retry
+    /// engages. `None` for other modes.
+    pub load_trigger_rate: Option<u64>,
+}
+
+impl fmt::Display for RetryConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "enabled:          {}", self.enabled)?;
+        writeln!(f, "mode:             {}", self.mode)?;
+        writeln!(f, "token_lifetime:   {} ms", self.token_lifetime_ms)?;
+
+        if self.ports.is_empty() {
+            writeln!(f, "ports:            all")?;
+        } else {
+            writeln!(f, "ports:            {:?}", self.ports)?;
+        }
+
+        if let Some(rate) = self.load_trigger_rate {
+            write!(f, "load_trigger:     {} pps", rate)?;
+        } else {
+            write!(f, "load_trigger:     n/a")?;
+        }
+
+        Ok(())
+    }
 }
 
 /// Encryption mode derived from `server_id_length + nonce_length`.
@@ -129,6 +205,34 @@ impl From<toml::de::Error> for RouteConfigError {
 struct RawConfigFile {
     #[serde(default)]
     configs: Vec<RawConfig>,
+    retry: Option<RawRetry>,
+}
+
+#[derive(Deserialize)]
+struct RawRetry {
+    #[serde(default)]
+    enabled: bool,
+    token_key: Option<String>,
+    #[serde(default = "default_token_lifetime_secs")]
+    token_lifetime_secs: u64,
+    #[serde(default = "default_retry_mode")]
+    mode: String,
+    #[serde(default)]
+    ports: Vec<u16>,
+    load: Option<RawRetryLoad>,
+}
+
+#[derive(Deserialize)]
+struct RawRetryLoad {
+    trigger_rate: u64,
+}
+
+fn default_token_lifetime_secs() -> u64 {
+    10
+}
+
+fn default_retry_mode() -> String {
+    "observe".to_string()
 }
 
 #[derive(Deserialize)]
@@ -237,6 +341,92 @@ impl RouteConfig {
     }
 }
 
+impl RetryConfig {
+    fn validate(raw: RawRetry) -> Result<Self, RouteConfigError> {
+        let mode = match raw.mode.as_str() {
+            "observe" => RetryMode::Observe,
+            "always" => RetryMode::Always,
+            "load" => RetryMode::Load,
+            other => {
+                return Err(RouteConfigError::Validation(format!(
+                    "retry.mode must be one of observe|always|load, got '{}'",
+                    other,
+                )));
+            }
+        };
+
+        // token_lifetime_secs: 1..=86400 (1s to 24h). Zero would reject
+        // every token immediately; more than a day outlives any sane
+        // handshake and leaves replay windows open for no benefit.
+        if raw.token_lifetime_secs == 0 || raw.token_lifetime_secs > 86_400 {
+            return Err(RouteConfigError::Validation(format!(
+                "retry.token_lifetime_secs must be 1..=86400, got {}",
+                raw.token_lifetime_secs,
+            )));
+        }
+        let token_lifetime_ms = raw.token_lifetime_secs * 1_000;
+
+        // Token key is mandatory when the service is enabled. When
+        // disabled we still require a parseable key if the user supplied
+        // one, but accept all-zeros so an operator can pre-stage the
+        // section before flipping `enabled = true`.
+        let token_key = match raw.token_key.as_deref() {
+            Some(hex) => TokenKey::from_bytes(parse_hex_retry_key(hex)?),
+            None if raw.enabled => {
+                return Err(RouteConfigError::Validation(
+                    "retry.token_key is required when retry.enabled = true".into(),
+                ));
+            }
+            None => TokenKey::from_bytes([0u8; 32]),
+        };
+
+        let load_trigger_rate = match mode {
+            RetryMode::Load => {
+                let load = raw.load.ok_or_else(|| {
+                    RouteConfigError::Validation(
+                        "retry.mode = 'load' requires a [retry.load] section".into(),
+                    )
+                })?;
+
+                if load.trigger_rate == 0 {
+                    return Err(RouteConfigError::Validation(
+                        "retry.load.trigger_rate must be > 0".into(),
+                    ));
+                }
+
+                Some(load.trigger_rate)
+            }
+            _ => {
+                // A [retry.load] block under mode=observe/always is
+                // almost certainly a misconfiguration — fail loud so
+                // the operator fixes it rather than silently ignoring it.
+                if raw.load.is_some() {
+                    return Err(RouteConfigError::Validation(format!(
+                        "[retry.load] is only valid when retry.mode = 'load' (got '{}')",
+                        mode,
+                    )));
+                }
+                None
+            }
+        };
+
+        // Dedupe + sort port list so downstream membership checks can
+        // use binary search and log output is stable across reloads.
+        let mut ports = raw.ports;
+        ports.sort_unstable();
+        ports.dedup();
+
+        Ok(RetryConfig {
+            enabled: raw.enabled,
+            token_key,
+            token_lifetime_ms,
+            mode,
+            ports,
+            load_trigger_rate,
+        })
+    }
+}
+
 impl ConfigTable {
     /// Load and validate configuration from a TOML file.
     pub fn from_file(path: impl AsRef<Path>) -> Result<Self, RouteConfigError> {
@@ -275,10 +465,13 @@ impl ConfigTable {
             slots[id] = Some(config);
         }
 
+        let retry = raw.retry.map(RetryConfig::validate).transpose()?;
+
         Ok(ConfigTable {
             path: PathBuf::new(),
             slots,
             fallback_servers: Vec::new(),
+            retry,
         })
     }
 
@@ -359,11 +552,35 @@ impl ConfigTable {
             path: PathBuf::new(),
             slots,
             fallback_servers: Vec::new(),
+            retry: None,
         };
         
         table.rebuild_fallback_servers();
         table
     }
+}
+
+/// Parse a hex-encoded 32-byte HMAC-SHA256 Retry signing key.
+///
+/// Distinct from [`parse_hex_key`] (16 bytes / AES-128) so the two keys
+/// can never be mistakenly swapped: the lengths don't collide and the
+/// error message names the service.
+fn parse_hex_retry_key(hex: &str) -> Result<[u8; 32], RouteConfigError> {
+    let bytes = hex_decode(hex).map_err(|e| {
+        RouteConfigError::Validation(format!("invalid hex retry token key: {e}"))
+    })?;
+
+    if bytes.len() != 32 {
+        return Err(RouteConfigError::Validation(format!(
+            "retry.token_key must be exactly 32 bytes (256 bits), got {} bytes",
+            bytes.len(),
+        )));
+    }
+
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&bytes);
+
+    Ok(key)
 }
 
 /// Parse a hex-encoded 16-byte (128-bit) AES key.
@@ -737,5 +954,168 @@ address = "10.0.1.10"
     fn fallback_cid_length_from_first_active() {
         let table = ConfigTable::from_str(SAMPLE_TOML).unwrap();
         assert_eq!(table.fallback_cid_length(), Some(17));
+    }
+
+    // -- [retry] section ----------------------------------------------------
+
+    /// Base config appended to every retry test so `from_str` doesn't
+    /// trip on the "no [[configs]]" guard.
+    const BASE_CFG: &str = r#"
+[[configs]]
+config_id = 0
+server_id_length = 3
+nonce_length = 13
+"#;
+
+    const RETRY_KEY_HEX: &str =
+        "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20";
+
+    #[test]
+    fn retry_absent_is_none() {
+        let table = ConfigTable::from_str(BASE_CFG).unwrap();
+        assert!(table.retry.is_none());
+    }
+
+    #[test]
+    fn retry_disabled_defaults() {
+        let toml = format!("{BASE_CFG}\n[retry]\n");
+        let table = ConfigTable::from_str(&toml).unwrap();
+        let r = table.retry.unwrap();
+        assert!(!r.enabled);
+        assert_eq!(r.mode, RetryMode::Observe);
+        assert_eq!(r.token_lifetime_ms, 10_000);
+        assert!(r.ports.is_empty());
+        assert_eq!(r.load_trigger_rate, None);
+    }
+
+    #[test]
+    fn retry_enabled_always_mode() {
+        let toml = format!(
+            "{BASE_CFG}\n[retry]\nenabled = true\nmode = \"always\"\n\
+             token_key = \"{RETRY_KEY_HEX}\"\ntoken_lifetime_secs = 30\n"
+        );
+        let table = ConfigTable::from_str(&toml).unwrap();
+        let r = table.retry.unwrap();
+        assert!(r.enabled);
+        assert_eq!(r.mode, RetryMode::Always);
+        assert_eq!(r.token_lifetime_ms, 30_000);
+    }
+
+    #[test]
+    fn retry_load_mode_requires_trigger_rate() {
+        let toml = format!(
+            "{BASE_CFG}\n[retry]\nenabled = true\nmode = \"load\"\n\
+             token_key = \"{RETRY_KEY_HEX}\"\n\n[retry.load]\ntrigger_rate = 50000\n"
+        );
+        let table = ConfigTable::from_str(&toml).unwrap();
+        let r = table.retry.unwrap();
+        assert_eq!(r.mode, RetryMode::Load);
+        assert_eq!(r.load_trigger_rate, Some(50_000));
+    }
+
+    #[test]
+    fn retry_load_mode_without_section_rejected() {
+        let toml = format!(
+            "{BASE_CFG}\n[retry]\nenabled = true\nmode = \"load\"\ntoken_key = \"{RETRY_KEY_HEX}\"\n"
+        );
+        let err = ConfigTable::from_str(&toml).unwrap_err();
+        assert!(err.to_string().contains("[retry.load]"));
+    }
+
+    #[test]
+    fn retry_load_block_under_wrong_mode_rejected() {
+        // A stray [retry.load] under observe/always is almost always a typo —
+        // fail loud rather than silently ignore.
+        let toml = format!(
+            "{BASE_CFG}\n[retry]\nenabled = true\nmode = \"always\"\n\
+             token_key = \"{RETRY_KEY_HEX}\"\n\n[retry.load]\ntrigger_rate = 1\n"
+        );
+        let err = ConfigTable::from_str(&toml).unwrap_err();
+        assert!(err.to_string().contains("only valid when retry.mode = 'load'"));
+    }
+
+    #[test]
+    fn retry_load_zero_trigger_rate_rejected() {
+        let toml = format!(
+            "{BASE_CFG}\n[retry]\nenabled = true\nmode = \"load\"\n\
+             token_key = \"{RETRY_KEY_HEX}\"\n\n[retry.load]\ntrigger_rate = 0\n"
+        );
+        let err = ConfigTable::from_str(&toml).unwrap_err();
+        assert!(err.to_string().contains("trigger_rate"));
+    }
+
+    #[test]
+    fn retry_enabled_without_token_key_rejected() {
+        let toml = format!("{BASE_CFG}\n[retry]\nenabled = true\n");
+        let err = ConfigTable::from_str(&toml).unwrap_err();
+        assert!(err.to_string().contains("token_key is required"));
+    }
+
+    #[test]
+    fn retry_disabled_without_key_ok() {
+        // Staging: operator writes an empty [retry] block first, flips
+        // enabled to true after sharing the signing key out-of-band.
+        let toml = format!("{BASE_CFG}\n[retry]\nenabled = false\n");
+        let table = ConfigTable::from_str(&toml).unwrap();
+        assert!(table.retry.is_some());
+    }
+
+    #[test]
+    fn retry_bad_mode_rejected() {
+        let toml = format!("{BASE_CFG}\n[retry]\nmode = \"sometimes\"\n");
+        let err = ConfigTable::from_str(&toml).unwrap_err();
+        assert!(err.to_string().contains("observe|always|load"));
+    }
+
+    #[test]
+    fn retry_bad_key_length_rejected() {
+        let toml = format!(
+            "{BASE_CFG}\n[retry]\nenabled = true\ntoken_key = \"deadbeef\"\n"
+        );
+        let err = ConfigTable::from_str(&toml).unwrap_err();
+        assert!(err.to_string().contains("32 bytes"));
+    }
+
+    #[test]
+    fn retry_zero_lifetime_rejected() {
+        let toml = format!(
+            "{BASE_CFG}\n[retry]\nenabled = true\ntoken_key = \"{RETRY_KEY_HEX}\"\n\
+             token_lifetime_secs = 0\n"
+        );
+        let err = ConfigTable::from_str(&toml).unwrap_err();
+        assert!(err.to_string().contains("token_lifetime_secs"));
+    }
+
+    #[test]
+    fn retry_excessive_lifetime_rejected() {
+        let toml = format!(
+            "{BASE_CFG}\n[retry]\nenabled = true\ntoken_key = \"{RETRY_KEY_HEX}\"\n\
+             token_lifetime_secs = 86401\n"
+        );
+        let err = ConfigTable::from_str(&toml).unwrap_err();
+        assert!(err.to_string().contains("token_lifetime_secs"));
+    }
+
+    #[test]
+    fn retry_ports_dedupe_and_sort() {
+        let toml = format!(
+            "{BASE_CFG}\n[retry]\nenabled = true\ntoken_key = \"{RETRY_KEY_HEX}\"\n\
+             ports = [4433, 443, 4433, 443, 8443]\n"
+        );
+        let table = ConfigTable::from_str(&toml).unwrap();
+        let r = table.retry.unwrap();
+        assert_eq!(r.ports, vec![443, 4433, 8443]);
+    }
+
+    #[test]
+    fn retry_token_key_redacted_in_debug() {
+        // A full RetryConfig Debug print must not leak key bytes.
+        let toml = format!(
+            "{BASE_CFG}\n[retry]\nenabled = true\ntoken_key = \"{RETRY_KEY_HEX}\"\n"
+        );
+        let table = ConfigTable::from_str(&toml).unwrap();
+        let dbg = format!("{:?}", table.retry.unwrap());
+        assert!(dbg.contains("<redacted>"));
+        assert!(!dbg.contains("0102030405"));
     }
 }

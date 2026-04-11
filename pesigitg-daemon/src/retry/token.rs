@@ -24,6 +24,7 @@
 //! LB is the only party that signs or checks tokens. Backends trust
 //! any Initial that reaches them.
 
+use std::fmt;
 use std::net::IpAddr;
 
 use hmac::{Hmac, Mac};
@@ -73,6 +74,12 @@ pub enum VerifyError {
 #[derive(Clone)]
 pub struct TokenKey {
     key: [u8; 32],
+}
+
+impl fmt::Debug for TokenKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TokenKey").field("key", &"<redacted>").finish()
+    }
 }
 
 impl TokenKey {
