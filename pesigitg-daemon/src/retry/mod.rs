@@ -24,3 +24,5 @@
 // plan; until then they are only reachable from their own tests.
 #[allow(dead_code)]
 pub mod packet;
+#[allow(dead_code)]
+pub mod token;

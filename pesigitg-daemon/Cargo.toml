@@ -14,6 +14,8 @@ pesigitg-common = { path = "../pesigitg-common", features = ["std"] }
 aya = "0.13"
 aes = "0.8"
 aes-gcm = "0.10"
+hmac = "0.12"
+sha2 = "0.10"
 anyhow = "1"
 env_logger = "0.11"
 log = "0.4"
