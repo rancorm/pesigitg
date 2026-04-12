@@ -67,6 +67,49 @@ an entry in that configuration's **[[configs.servers]]** sub-array.
 :   When *true*, existing CID-routed flows continue to reach this server
     but new fallback connections are not assigned to it. Default: *false*.
 
+## [retry] keys
+
+The optional **[retry]** section enables QUIC Retry address-validation
+offload. When active, the LB inspects every QUIC v1 Initial packet and
+may emit a Retry back to the client, absorbing spoofed-source floods
+before they reach backends.
+
+**enabled** = *true* | *false*
+:   Master kill switch. When *false* (the default) the datapath skips
+    the Retry module entirely — zero hot-path cost.
+
+**token_key** = *"<64 hex chars>"*
+:   32-byte HMAC-SHA256 signing key, hex-encoded. Required when
+    **enabled** = *true*. Tokens bind the client's source IP, the
+    original DCID, and a millisecond timestamp; the key is the only
+    secret and should be treated like the CID encryption key.
+
+**token_lifetime_secs** = *N*
+:   How long a minted token remains valid, in seconds. Must be 1-3600.
+    Default: *10*.
+
+**mode** = *"observe"* | *"always"* | *"load"*
+:   Policy for when Retry packets are emitted. Default: *"observe"*.
+
+    - **observe** — run the full classify path and advance
+      `retry_*` counters, but never emit a Retry. Use this to
+      validate the parser before going live.
+    - **always** — every Initial without a valid token gets a Retry.
+    - **load** — emit Retry only when the Initial rate exceeds
+      **[retry.load] trigger_rate**. *(Not yet implemented; degrades
+      to observe.)*
+
+**ports** = *[443, 8443]*
+:   Optional list of UDP destination ports to scope Retry to. When
+    empty or omitted, Retry applies to every port the daemon handles.
+    Ports are deduplicated and sorted on load.
+
+## [retry.load] keys
+
+**trigger_rate** = *N*
+:   Initials per second above which Retry engages. Required when
+    **mode** = *"load"*; rejected under other modes.
+
 # ENCRYPTION MODES
 
 The sum *sum = server_id_length + nonce_length* selects the mode used
@@ -127,6 +170,23 @@ backend:
     id = "000004"
     address = "2001:db8::1"
 
+Enabling Retry in observe mode on port 443:
+
+    [retry]
+    enabled = true
+    token_key = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+    mode = "observe"
+    ports = [443]
+
+Once `retry_parse_error` stays zero and `retry_initials_seen` matches
+expectations, switch to always mode:
+
+    [retry]
+    enabled = true
+    token_key = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+    mode = "always"
+    ports = [443]
+
 Running two configurations in parallel for key rotation:
 
     [[configs]]
@@ -159,7 +219,13 @@ Running two configurations in parallel for key rotation:
   4-18, or their sum exceeds 19;
 - a **key** is not a valid 16-byte hex string;
 - a server **id** has the wrong length for its configuration;
-- a server **address** or **mac** cannot be parsed.
+- a server **address** or **mac** cannot be parsed;
+- **[retry]** is enabled but **token_key** is missing or not a valid
+  64-hex-char (32-byte) string;
+- **token_lifetime_secs** is 0 or exceeds 3600;
+- **mode** is not one of "observe", "always", or "load";
+- **mode** = "load" but **[retry.load] trigger_rate** is absent or 0;
+- **[retry.load]** is present but **mode** is not "load".
 
 Servers start marked unhealthy and become eligible for fallback hashing
 only after a QUIC probe succeeds and their MAC is resolved.
@@ -172,6 +238,11 @@ only after a QUIC probe succeeds and their MAC is resolved.
 
 draft-ietf-quic-load-balancers-21, *QUIC-LB: Generating Routable QUIC
 Connection IDs*.
+
+RFC 9000, *QUIC: A UDP-Based Multiplexed and Secure Transport* —
+§8.1 (Address Validation), §17.2.5 (Retry Packet).
+
+RFC 9001, *Using TLS to Secure QUIC* — §5.8 (Retry Integrity Tag).
 
 # AUTHOR
 

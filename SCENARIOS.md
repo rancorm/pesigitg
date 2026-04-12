@@ -124,3 +124,145 @@ These are wire-format changes — same problem as keys. Add a second `config_id`
 - **Don't `systemctl restart`.** That tears down XDP, drops the socket, and breaks every flow. SIGHUP is the correct verb.
 - **Key material lives in `lb.toml`.** Make sure the file is `chmod 600 root:root` (or equivalent) — a 128-bit AES key sitting world-readable in `/etc/` defeats the point of rotating it.
 - **Backend cutover is the slow part.** The LB reload is instant; waiting for your backend fleet to start minting CIDs under the new `config_id` is where the rollover actually spends its time.
+
+---
+
+# QUIC Retry rollout
+
+The `[retry]` section in `lb.toml` offloads QUIC address validation to the LB. Under a spoofed-source Initial flood the LB absorbs the blast; backends never see unvalidated connection attempts.
+
+Retry is **no-shared-state**: the LB signs HMAC-SHA256 tokens over `(client_ip, timestamp, ODCID)`. Backends don't need to know the key — they trust any Initial that reaches them.
+
+## Staged rollout procedure
+
+### Step 1 — Ship disabled (default)
+
+Deploy a `pesigitgd` build that includes the Retry code with no changes to `lb.toml`. The `[retry]` section is absent, so the datapath never enters the Retry path — zero hot-path cost.
+
+### Step 2 — Observe mode, one port
+
+Generate a 32-byte key:
+
+```sh
+openssl rand -hex 32
+```
+
+Add to `lb.toml`:
+
+```toml
+[retry]
+enabled = true
+token_key = "<64 hex chars from above>"
+mode = "observe"
+ports = [443]
+```
+
+```sh
+sudo systemctl reload pesigitgd
+```
+
+Observe mode runs the full classify path — parse, token verify, mode decision — and advances `retry_*` counters, but **never emits a Retry**. This lets you validate the parser against real traffic.
+
+Watch the counters:
+
+```sh
+sudo kill -USR1 $(cat /run/pesigitgd.pid)
+journalctl -u pesigitgd -n 5 | grep retry
+```
+
+Expected output:
+
+```
+retry(seen=N issued=0 valid=0 invalid=0 expired=0 parse_err=0)
+```
+
+**Gate**: `retry_parse_error` must be near zero for at least a week before proceeding. Non-zero `parse_err` means the Initial parser is rejecting traffic that might be valid — investigate before enforcing.
+
+### Step 3 — Always mode
+
+Once `parse_err` is confirmed stable:
+
+```toml
+[retry]
+enabled = true
+token_key = "<same key>"
+mode = "always"
+ports = [443]
+```
+
+```sh
+sudo systemctl reload pesigitgd
+```
+
+Every Initial on port 443 without a valid token now gets a Retry. Watch:
+
+- `retry_issued` climbs (normal)
+- `retry_token_validated` climbs as returning clients present valid tokens
+- Handshake success rates via your backend monitoring — any regression means something is wrong
+
+### Step 4 — Expand to remaining ports
+
+Repeat Step 2-3 per port, or remove the `ports` filter to apply globally:
+
+```toml
+[retry]
+enabled = true
+token_key = "<same key>"
+mode = "always"
+```
+
+### Step 5 — (Future) Switch to load-triggered mode
+
+Once stable at 100%, switch to `mode = "load"` with a conservative `trigger_rate`:
+
+```toml
+[retry]
+enabled = true
+token_key = "<same key>"
+mode = "load"
+
+[retry.load]
+trigger_rate = 50000
+```
+
+Normal traffic flows without Retry overhead; only floods above 50K initials/sec activate enforcement. *(Load mode is not yet implemented — currently degrades to observe.)*
+
+### Kill switch
+
+Instant rollback at any step:
+
+```toml
+[retry]
+enabled = false
+```
+
+```sh
+sudo systemctl reload pesigitgd
+```
+
+No XDP teardown, no flow disruption — pure forwarding resumes immediately.
+
+## Token key rotation
+
+Token keys live in `lb.toml` alongside the CID encryption keys and should be rotated on the same cadence. Unlike CID keys, Retry token keys **do not** require a two-config overlap: a mid-handshake key rotation simply invalidates in-flight tokens. The client retries the Initial, gets a fresh token signed with the new key, and completes normally. The worst case is one extra RTT for connections that happened to be mid-Retry when the SIGHUP landed.
+
+```sh
+# Generate new key
+NEW_KEY=$(openssl rand -hex 32)
+
+# Edit lb.toml: replace token_key value
+sudo systemctl reload pesigitgd
+
+# Verify
+journalctl -u pesigitgd -n 10 | grep "route config reloaded"
+```
+
+The old key is gone immediately — `retry_token_invalid` may tick up briefly as stale tokens are rejected and re-issued. This is benign and self-resolving.
+
+## Gotchas
+
+- **`token_key` is 32 bytes (64 hex), not 16.** The CID `key` is 16-byte AES; the Retry `token_key` is 32-byte HMAC-SHA256. Don't mix them up.
+- **Observe mode is the safety net.** Never skip it. The `parse_err` counter is the "don't flip this on yet" signal.
+- **`token_lifetime_secs` default is 10.** Raise it if your clients are behind lossy links with >10s retransmit delays. Lower it if you want tighter replay protection. Must be 1-3600.
+- **IPv6 extension headers are rejected.** The Retry path only handles plain IPv4 and IPv6 (next header = UDP). Packets with extension headers fall through to the normal CID path without being classified.
+- **Key material lives in `lb.toml`.** Same `chmod 600 root:root` advice as for CID keys.
