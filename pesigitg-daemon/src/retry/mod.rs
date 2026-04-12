@@ -15,8 +15,8 @@
 //! This module is organized around the pieces that can be tested in
 //! isolation:
 //!
-//! - [`packet`]: Retry wire format, including the RFC 9001 §5.8
-//!   integrity tag.
+//! - [`packet`]: Retry wire format, including the RFC 9001 §5.8 (v1)
+//!   and RFC 9369 §3.2 (v2) integrity tag.
 //! - [`token`]: HMAC-SHA256 mint/verify.
 //! - [`datapath`]: Classifier + in-place Retry rewrite, wired into the
 //!   worker loop before CID routing.

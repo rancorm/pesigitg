@@ -12,8 +12,8 @@
 //!
 //! The function's contract is:
 //!
-//! - Returns [`Outcome::Skip`] for anything that isn't a v1 Initial we
-//!   want to touch (wrong family, short header, unsupported version,
+//! - Returns [`Outcome::Skip`] for anything that isn't a v1/v2 Initial
+//!   we want to touch (wrong family, short header, unsupported version,
 //!   retry disabled by config, mode that doesn't emit, etc.).
 //!   The worker then falls through to the existing CID/fallback path.
 //! - Returns [`Outcome::Forward`] for an Initial whose token proves the
@@ -111,22 +111,24 @@ pub fn try_handle(
     let mut scid_buf = [0u8; 20];
     let dcid_len;
     let scid_len;
+    let version;
     let (decision, detail) = {
         let quic = &data.contents()[layout.quic_offset..];
         let initial = match initial::parse_strict(quic) {
             Ok(i) => i,
-            // Short headers, non-Initial long headers, and non-v1
-            // packets are not Initials — skip silently, no counter.
+            // Short headers, non-Initial long headers, and
+            // unsupported versions — skip silently, no counter.
             Err(ParseError::NotLongHeader)
             | Err(ParseError::NotInitial)
             | Err(ParseError::FixedBitUnset)
             | Err(ParseError::UnsupportedVersion(_))
             | Err(ParseError::Truncated) => return (Outcome::Skip, Detail::None),
-            // Anything else looked like a v1 Initial but was malformed.
+            // Anything else looked like a v1/v2 Initial but was malformed.
             Err(_) => return (Outcome::Skip, Detail::ParseError),
         };
         dcid_len = initial.dcid.len();
         scid_len = initial.scid.len();
+        version = initial.version;
         dcid_buf[..dcid_len].copy_from_slice(initial.dcid);
         scid_buf[..scid_len].copy_from_slice(initial.scid);
         classify(&initial, layout.src_ip, retry, now_ms)
@@ -139,6 +141,7 @@ pub fn try_handle(
             let outcome = emit(
                 data,
                 &layout,
+                version,
                 &dcid_buf[..dcid_len],
                 &scid_buf[..scid_len],
                 retry,
@@ -353,6 +356,7 @@ fn classify(
 fn emit(
     data: &mut DataMut<'_>,
     layout: &FrameLayout,
+    version: u32,
     odcid: &[u8],
     client_scid: &[u8],
     retry: &RetryConfig,
@@ -375,6 +379,7 @@ fn emit(
     // keeps the rewrite alloc-free and matches other LB implementations.
     let n = match build_retry(
         &mut retry_buf,
+        version,
         odcid,
         client_scid,
         odcid,
@@ -619,13 +624,16 @@ nonce_length = 13
         ConfigTable::from_str(&toml).expect("valid toml")
     }
 
-    fn build_v1_initial(dcid: &[u8], scid: &[u8], token: &[u8]) -> Vec<u8> {
-        // Minimum viable v1 Initial: byte0 = 0xc0 (long header, fixed
-        // bit, type=Initial, PN length 1), version 0x00000001, DCID,
-        // SCID, token (varint length + bytes), length varint, PN+payload.
+    fn build_quic_initial(
+        first_byte: u8,
+        version: u32,
+        dcid: &[u8],
+        scid: &[u8],
+        token: &[u8],
+    ) -> Vec<u8> {
         let mut q = Vec::new();
-        q.push(0xc0);
-        q.extend_from_slice(&0x0000_0001u32.to_be_bytes());
+        q.push(first_byte);
+        q.extend_from_slice(&version.to_be_bytes());
         q.push(dcid.len() as u8);
         q.extend_from_slice(dcid);
         q.push(scid.len() as u8);
@@ -638,6 +646,14 @@ nonce_length = 13
         q.extend_from_slice(&[0x40, 0x14]);
         q.extend_from_slice(&[0u8; 20]);
         q
+    }
+
+    fn build_v1_initial(dcid: &[u8], scid: &[u8], token: &[u8]) -> Vec<u8> {
+        build_quic_initial(0xc0, 0x0000_0001, dcid, scid, token)
+    }
+
+    fn build_v2_initial(dcid: &[u8], scid: &[u8], token: &[u8]) -> Vec<u8> {
+        build_quic_initial(0xd0, 0x6b33_43cf, dcid, scid, token)
     }
 
     /// A UMEM-sized buffer: way larger than any real frame, mirrors the
@@ -681,6 +697,7 @@ nonce_length = 13
             let mut scid_buf = [0u8; 20];
             let dcid_len;
             let scid_len;
+            let version;
             let (decision, detail) = {
                 let quic = &self.buf[layout.quic_offset..self.len];
                 let initial = match initial::parse_strict(quic) {
@@ -694,6 +711,7 @@ nonce_length = 13
                 };
                 dcid_len = initial.dcid.len();
                 scid_len = initial.scid.len();
+                version = initial.version;
                 dcid_buf[..dcid_len].copy_from_slice(initial.dcid);
                 scid_buf[..scid_len].copy_from_slice(initial.scid);
                 classify(&initial, layout.src_ip, retry, now_ms)
@@ -705,6 +723,7 @@ nonce_length = 13
                 Decision::Emit => {
                     let outcome = self.emit_slice(
                         &layout,
+                        version,
                         &dcid_buf[..dcid_len],
                         &scid_buf[..scid_len],
                         retry,
@@ -719,6 +738,7 @@ nonce_length = 13
         fn emit_slice(
             &mut self,
             layout: &FrameLayout,
+            version: u32,
             odcid: &[u8],
             client_scid: &[u8],
             retry: &RetryConfig,
@@ -732,6 +752,7 @@ nonce_length = 13
             let mut retry_buf = [0u8; 128];
             let n = match build_retry(
                 &mut retry_buf,
+                version,
                 odcid,
                 client_scid,
                 odcid,
@@ -1126,5 +1147,103 @@ nonce_length = 13
         // Valid token forwards in every mode.
         assert_eq!(outcome, Outcome::Forward);
         assert_eq!(detail, Detail::TokenValid);
+    }
+
+    // -- QUIC v2 integration tests -------------------------------------------
+
+    #[test]
+    fn v2_initial_emits_v2_retry() {
+        let table = make_table(&format!(
+            "[retry]\nenabled = true\nmode = \"always\"\ntoken_key = \"{KEY_HEX}\""
+        ));
+        let quic = build_v2_initial(&[0xaa; 8], &[0xbb; 4], &[]);
+        let frame = build_udp_v4(&quic, [203, 0, 113, 1], [10, 0, 0, 1], 12345, 4433);
+        let mut f = TestFrame::new(&frame);
+        assert_eq!(
+            f.try_handle_slice(&table, &LOCAL_MAC, 1_000),
+            (Outcome::Emitted, Detail::Issued),
+        );
+
+        // Payload should be a v2 Retry: first byte 0xc0 (type 0b00),
+        // version 0x6b3343cf.
+        let payload_off = 14 + 20 + 8;
+        assert_eq!(f.buf[payload_off], 0xc0);
+        assert_eq!(
+            &f.buf[payload_off + 1..payload_off + 5],
+            &0x6b33_43cfu32.to_be_bytes(),
+        );
+    }
+
+    #[test]
+    fn v2_emitted_token_round_trips() {
+        let table = make_table(&format!(
+            "[retry]\nenabled = true\nmode = \"always\"\ntoken_key = \"{KEY_HEX}\""
+        ));
+        let dcid = [0xaa; 8];
+        let quic = build_v2_initial(&dcid, &[0xbb; 4], &[]);
+        let src_ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7));
+        let frame = build_udp_v4(&quic, [203, 0, 113, 7], [10, 0, 0, 1], 12345, 4433);
+        let mut f = TestFrame::new(&frame);
+        assert_eq!(f.try_handle_slice(&table, &LOCAL_MAC, 2_000).0, Outcome::Emitted);
+
+        // Extract token from the emitted v2 Retry and verify it.
+        let payload_off = 14 + 20 + 8;
+        let retry = &f.buf[payload_off..f.len];
+        let token_start = 1 + 4 + 1 + 4 + 1 + 8;
+        let token_end = retry.len() - INTEGRITY_TAG_LEN;
+        assert_eq!(token_end - token_start, TOKEN_LEN);
+        let token = &retry[token_start..token_end];
+
+        let retry_cfg = table.retry.as_ref().unwrap();
+        retry_cfg
+            .token_key
+            .verify(token, src_ip, &dcid, 2_050, 10_000)
+            .expect("v2 minted token must verify");
+    }
+
+    #[test]
+    fn v2_ipv6_emits_reflected_frame() {
+        let table = make_table(&format!(
+            "[retry]\nenabled = true\nmode = \"always\"\ntoken_key = \"{KEY_HEX}\""
+        ));
+        let quic = build_v2_initial(&[0xaa; 8], &[0xbb; 4], &[]);
+        let client = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1).octets();
+        let vip = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 2).octets();
+        let frame = build_udp_v6(&quic, client, vip, 12345, 4433);
+        let mut f = TestFrame::new(&frame);
+        assert_eq!(
+            f.try_handle_slice(&table, &LOCAL_MAC, 1_000),
+            (Outcome::Emitted, Detail::Issued),
+        );
+
+        // v2 Retry header check.
+        let payload_off = 14 + 40 + 8;
+        assert_eq!(f.buf[payload_off], 0xc0);
+        assert_eq!(
+            &f.buf[payload_off + 1..payload_off + 5],
+            &0x6b33_43cfu32.to_be_bytes(),
+        );
+
+        // IPv6 UDP checksum is mandatory.
+        let udp_off = 14 + 40;
+        let cksum = u16::from_be_bytes([f.buf[udp_off + 6], f.buf[udp_off + 7]]);
+        assert_ne!(cksum, 0, "IPv6 UDP checksum is mandatory");
+    }
+
+    #[test]
+    fn v2_valid_token_forwards() {
+        let table = make_table(&format!(
+            "[retry]\nenabled = true\nmode = \"always\"\ntoken_key = \"{KEY_HEX}\""
+        ));
+        let retry = table.retry.as_ref().unwrap();
+        let src = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1));
+        let dcid = [0xaa; 8];
+        let tok = retry.token_key.mint(src, &dcid, 1_000).unwrap();
+        let quic = build_v2_initial(&dcid, &[0xbb; 4], &tok);
+        let initial = initial::parse(&quic).unwrap();
+        assert_eq!(
+            classify(&initial, src, retry, 1_100),
+            (Decision::Forward, Detail::TokenValid),
+        );
     }
 }
