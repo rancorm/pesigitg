@@ -50,6 +50,4 @@ Only bump outside the monthly window when there's a concrete reason:
 ## Tradeoffs
 
 Monthly means you occasionally hit a multi-month-old regression that was fixed
-two weeks after your pin, but the stability is worth it. If the crate were in
-heavy flux you'd want biweekly; since `pesigitg-ebpf` is mature, monthly is the
-sweet spot.
+two weeks after your pin, but the stability is worth it.
