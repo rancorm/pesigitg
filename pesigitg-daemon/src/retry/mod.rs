@@ -17,14 +17,10 @@
 //!
 //! - [`packet`]: Retry wire format, including the RFC 9001 §5.8
 //!   integrity tag.
-//! - `token` (Phase 3): HMAC-SHA256 mint/verify.
-//! - Classifier + datapath branch (Phase 4b).
+//! - [`token`]: HMAC-SHA256 mint/verify.
+//! - [`datapath`]: Classifier + in-place Retry rewrite, wired into the
+//!   worker loop before CID routing.
 
-// Items are wired into `process_udp` in Phase 4b of the quic-retry-offload
-// plan; until then they are only reachable from their own tests.
-#[allow(dead_code)]
 pub mod datapath;
-#[allow(dead_code)]
 pub mod packet;
-#[allow(dead_code)]
 pub mod token;

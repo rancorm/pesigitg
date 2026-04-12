@@ -52,6 +52,28 @@ pub enum Outcome {
     Emitted,
 }
 
+/// Fine-grained classification detail for stats recording. Returned
+/// alongside [`Outcome`] so the worker loop can advance the appropriate
+/// `retry_*` counters without the retry module depending on stats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Detail {
+    /// Not a packet the retry path touches (disabled, wrong protocol,
+    /// port filtered, short header). No retry counters to advance.
+    None,
+    /// `initial::parse` failed on what appeared to be a QUIC payload.
+    ParseError,
+    /// Token HMAC valid and fresh — forwarding to backend.
+    TokenValid,
+    /// Token HMAC mismatch (attack or bug). May have re-issued a Retry.
+    TokenInvalid,
+    /// Token HMAC valid but expired. May have re-issued a Retry.
+    TokenExpired,
+    /// No token present (or wrong length), Retry issued.
+    Issued,
+    /// No token present (or wrong length), mode doesn't emit (observe/load).
+    Observed,
+}
+
 /// Entry point called from the worker loop.
 ///
 /// `now_ms` is the current wall-clock time in milliseconds; threaded
@@ -63,10 +85,10 @@ pub fn try_handle(
     table: &ConfigTable,
     local_mac: &[u8; 6],
     now_ms: u64,
-) -> Outcome {
+) -> (Outcome, Detail) {
     let retry = match table.retry.as_ref() {
         Some(r) if r.enabled => r,
-        _ => return Outcome::Skip,
+        _ => return (Outcome::Skip, Detail::None),
     };
 
     // Carve out a read-only view of the frame so we can parse and run
@@ -74,12 +96,12 @@ pub fn try_handle(
     // `data.cursor()` later, after we've committed to emitting.
     let layout = match parse_layout(data.contents()) {
         Some(l) => l,
-        None => return Outcome::Skip,
+        None => return (Outcome::Skip, Detail::None),
     };
 
     // Optional per-port scoping. Empty list = every port.
     if !retry.ports.is_empty() && !retry.ports.contains(&layout.dst_port) {
-        return Outcome::Skip;
+        return (Outcome::Skip, Detail::None);
     }
 
     // Scope the immutable borrow of `data`: parse the Initial and
@@ -89,10 +111,10 @@ pub fn try_handle(
     let mut scid_buf = [0u8; 20];
     let dcid_len;
     let scid_len;
-    let decision = {
+    let (decision, detail) = {
         let initial = match initial::parse(&data.contents()[layout.quic_offset..]) {
             Some(i) => i,
-            None => return Outcome::Skip,
+            None => return (Outcome::Skip, Detail::ParseError),
         };
         dcid_len = initial.dcid.len();
         scid_len = initial.scid.len();
@@ -102,17 +124,20 @@ pub fn try_handle(
     };
 
     match decision {
-        Decision::Forward => Outcome::Forward,
-        Decision::Skip => Outcome::Skip,
-        Decision::Emit => emit(
-            data,
-            &layout,
-            &dcid_buf[..dcid_len],
-            &scid_buf[..scid_len],
-            retry,
-            local_mac,
-            now_ms,
-        ),
+        Decision::Forward => (Outcome::Forward, detail),
+        Decision::Skip => (Outcome::Skip, detail),
+        Decision::Emit => {
+            let outcome = emit(
+                data,
+                &layout,
+                &dcid_buf[..dcid_len],
+                &scid_buf[..scid_len],
+                retry,
+                local_mac,
+                now_ms,
+            );
+            (outcome, detail)
+        }
     }
 }
 
@@ -129,6 +154,7 @@ struct FrameLayout {
     udp_offset: usize,
     quic_offset: usize,
     src_mac: [u8; 6],
+    #[allow(dead_code)] // populated for completeness; reflected headers use local_mac instead
     dst_mac: [u8; 6],
     src_ip: IpAddr,
     dst_ip: IpAddr,
@@ -273,7 +299,7 @@ fn classify(
     src_ip: IpAddr,
     retry: &RetryConfig,
     now_ms: u64,
-) -> Decision {
+) -> (Decision, Detail) {
     // A client that already has a valid token skips Retry in every mode.
     // An invalid/expired token is treated as "no token" — re-Retry so
     // the honest case (stale token after rotation) recovers naturally.
@@ -285,19 +311,29 @@ fn classify(
             now_ms,
             retry.token_lifetime_ms,
         ) {
-            Ok(()) => return Decision::Forward,
-            Err(VerifyError::Invalid) | Err(VerifyError::Expired) => {}
+            Ok(()) => return (Decision::Forward, Detail::TokenValid),
+            Err(VerifyError::Invalid) => {
+                return match retry.mode {
+                    RetryMode::Always => (Decision::Emit, Detail::TokenInvalid),
+                    RetryMode::Observe | RetryMode::Load => (Decision::Skip, Detail::TokenInvalid),
+                };
+            }
+            Err(VerifyError::Expired) => {
+                return match retry.mode {
+                    RetryMode::Always => (Decision::Emit, Detail::TokenExpired),
+                    RetryMode::Observe | RetryMode::Load => (Decision::Skip, Detail::TokenExpired),
+                };
+            }
         }
     }
 
     match retry.mode {
-        RetryMode::Always => Decision::Emit,
+        RetryMode::Always => (Decision::Emit, Detail::Issued),
         // Observe mode walks the whole classify path so counters
-        // (Phase 5) reflect real decisions, but never emits. Load mode
-        // will be wired to a rate tracker in a later phase — until
-        // then it degrades to Skip so shipping the datapath doesn't
-        // imply shipping a half-working rate limiter.
-        RetryMode::Observe | RetryMode::Load => Decision::Skip,
+        // reflect real decisions, but never emits. Load mode will be
+        // wired to a rate tracker in a later phase — until then it
+        // degrades to Skip.
+        RetryMode::Observe | RetryMode::Load => (Decision::Skip, Detail::Observed),
     }
 }
 
@@ -620,26 +656,26 @@ nonce_length = 13
             table: &ConfigTable,
             local_mac: &[u8; 6],
             now_ms: u64,
-        ) -> Outcome {
+        ) -> (Outcome, Detail) {
             let retry = match table.retry.as_ref() {
                 Some(r) if r.enabled => r,
-                _ => return Outcome::Skip,
+                _ => return (Outcome::Skip, Detail::None),
             };
             let layout = match parse_layout(&self.buf[..self.len]) {
                 Some(l) => l,
-                None => return Outcome::Skip,
+                None => return (Outcome::Skip, Detail::None),
             };
             if !retry.ports.is_empty() && !retry.ports.contains(&layout.dst_port) {
-                return Outcome::Skip;
+                return (Outcome::Skip, Detail::None);
             }
             let mut dcid_buf = [0u8; 20];
             let mut scid_buf = [0u8; 20];
             let dcid_len;
             let scid_len;
-            let decision = {
+            let (decision, detail) = {
                 let initial = match initial::parse(&self.buf[layout.quic_offset..self.len]) {
                     Some(i) => i,
-                    None => return Outcome::Skip,
+                    None => return (Outcome::Skip, Detail::ParseError),
                 };
                 dcid_len = initial.dcid.len();
                 scid_len = initial.scid.len();
@@ -649,16 +685,19 @@ nonce_length = 13
             };
 
             match decision {
-                Decision::Forward => Outcome::Forward,
-                Decision::Skip => Outcome::Skip,
-                Decision::Emit => self.emit_slice(
-                    &layout,
-                    &dcid_buf[..dcid_len],
-                    &scid_buf[..scid_len],
-                    retry,
-                    local_mac,
-                    now_ms,
-                ),
+                Decision::Forward => (Outcome::Forward, detail),
+                Decision::Skip => (Outcome::Skip, detail),
+                Decision::Emit => {
+                    let outcome = self.emit_slice(
+                        &layout,
+                        &dcid_buf[..dcid_len],
+                        &scid_buf[..scid_len],
+                        retry,
+                        local_mac,
+                        now_ms,
+                    );
+                    (outcome, detail)
+                }
             }
         }
 
@@ -782,7 +821,10 @@ nonce_length = 13
         let quic = build_v1_initial(&[0xaa; 8], &[0xbb; 4], &[]);
         let initial = initial::parse(&quic).unwrap();
         let src = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1));
-        assert_eq!(classify(&initial, src, retry, 1_000), Decision::Emit);
+        assert_eq!(
+            classify(&initial, src, retry, 1_000),
+            (Decision::Emit, Detail::Issued),
+        );
     }
 
     #[test]
@@ -796,7 +838,10 @@ nonce_length = 13
         let tok = retry.token_key.mint(src, &dcid, 1_000).unwrap();
         let quic = build_v1_initial(&dcid, &[0xbb; 4], &tok);
         let initial = initial::parse(&quic).unwrap();
-        assert_eq!(classify(&initial, src, retry, 1_100), Decision::Forward);
+        assert_eq!(
+            classify(&initial, src, retry, 1_100),
+            (Decision::Forward, Detail::TokenValid),
+        );
     }
 
     #[test]
@@ -812,7 +857,10 @@ nonce_length = 13
         let quic = build_v1_initial(&dcid, &[0xbb; 4], &tok);
         let initial = initial::parse(&quic).unwrap();
         // Lifetime = 1000 ms, verify at +5s → expired → re-Retry.
-        assert_eq!(classify(&initial, src, retry, 6_000), Decision::Emit);
+        assert_eq!(
+            classify(&initial, src, retry, 6_000),
+            (Decision::Emit, Detail::TokenExpired),
+        );
     }
 
     #[test]
@@ -827,7 +875,10 @@ nonce_length = 13
         let tok = retry.token_key.mint(minted_for, &dcid, 1_000).unwrap();
         let quic = build_v1_initial(&dcid, &[0xbb; 4], &tok);
         let initial = initial::parse(&quic).unwrap();
-        assert_eq!(classify(&initial, attacker, retry, 1_100), Decision::Emit);
+        assert_eq!(
+            classify(&initial, attacker, retry, 1_100),
+            (Decision::Emit, Detail::TokenInvalid),
+        );
     }
 
     #[test]
@@ -839,7 +890,10 @@ nonce_length = 13
         let quic = build_v1_initial(&[0xaa; 8], &[0xbb; 4], &[]);
         let initial = initial::parse(&quic).unwrap();
         let src = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1));
-        assert_eq!(classify(&initial, src, retry, 1_000), Decision::Skip);
+        assert_eq!(
+            classify(&initial, src, retry, 1_000),
+            (Decision::Skip, Detail::Observed),
+        );
     }
 
     // -- try_handle_slice integration tests --------------------------------
@@ -850,7 +904,7 @@ nonce_length = 13
         let quic = build_v1_initial(&[0xaa; 8], &[0xbb; 4], &[]);
         let frame = build_udp_v4(&quic, [203, 0, 113, 1], [10, 0, 0, 1], 12345, 4433);
         let mut f = TestFrame::new(&frame);
-        assert_eq!(f.try_handle_slice(&table, &LOCAL_MAC, 1_000), Outcome::Skip);
+        assert_eq!(f.try_handle_slice(&table, &LOCAL_MAC, 1_000).0, Outcome::Skip);
         // Frame bytes untouched.
         assert_eq!(&f.buf[..f.len], frame.as_slice());
     }
@@ -865,12 +919,12 @@ nonce_length = 13
         // dst port 4433 is not in the [443] list → Skip.
         let frame_wrong = build_udp_v4(&quic, [203, 0, 113, 1], [10, 0, 0, 1], 12345, 4433);
         let mut fw = TestFrame::new(&frame_wrong);
-        assert_eq!(fw.try_handle_slice(&table, &LOCAL_MAC, 1_000), Outcome::Skip);
+        assert_eq!(fw.try_handle_slice(&table, &LOCAL_MAC, 1_000).0, Outcome::Skip);
 
         // dst port 443 is in the list → Emitted.
         let frame_ok = build_udp_v4(&quic, [203, 0, 113, 1], [10, 0, 0, 1], 12345, 443);
         let mut fo = TestFrame::new(&frame_ok);
-        assert_eq!(fo.try_handle_slice(&table, &LOCAL_MAC, 1_000), Outcome::Emitted);
+        assert_eq!(fo.try_handle_slice(&table, &LOCAL_MAC, 1_000).0, Outcome::Emitted);
     }
 
     #[test]
@@ -881,7 +935,10 @@ nonce_length = 13
         let quic = build_v1_initial(&[0xaa; 8], &[0xbb; 4], &[]);
         let frame = build_udp_v4(&quic, [203, 0, 113, 1], [10, 0, 0, 1], 12345, 4433);
         let mut f = TestFrame::new(&frame);
-        assert_eq!(f.try_handle_slice(&table, &LOCAL_MAC, 1_000), Outcome::Emitted);
+        assert_eq!(
+            f.try_handle_slice(&table, &LOCAL_MAC, 1_000),
+            (Outcome::Emitted, Detail::Issued),
+        );
 
         // Ethernet reflected.
         assert_eq!(&f.buf[..6], &CLIENT_MAC, "dst mac should be client");
@@ -920,7 +977,7 @@ nonce_length = 13
         let src_ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7));
         let frame = build_udp_v4(&quic, [203, 0, 113, 7], [10, 0, 0, 1], 12345, 4433);
         let mut f = TestFrame::new(&frame);
-        assert_eq!(f.try_handle_slice(&table, &LOCAL_MAC, 2_000), Outcome::Emitted);
+        assert_eq!(f.try_handle_slice(&table, &LOCAL_MAC, 2_000).0, Outcome::Emitted);
 
         // Parse the emitted Retry back out and verify its token.
         let payload_off = 14 + 20 + 8;
@@ -949,7 +1006,10 @@ nonce_length = 13
         let vip = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 2).octets();
         let frame = build_udp_v6(&quic, client, vip, 12345, 4433);
         let mut f = TestFrame::new(&frame);
-        assert_eq!(f.try_handle_slice(&table, &LOCAL_MAC, 1_000), Outcome::Emitted);
+        assert_eq!(
+            f.try_handle_slice(&table, &LOCAL_MAC, 1_000),
+            (Outcome::Emitted, Detail::Issued),
+        );
 
         // Ethernet + IPv6 reflection.
         assert_eq!(&f.buf[..6], &CLIENT_MAC);
@@ -982,7 +1042,7 @@ nonce_length = 13
         frame.push(0x01); // ICMP
         frame.extend_from_slice(&[0u8; 10]);
         let mut f = TestFrame::new(&frame);
-        assert_eq!(f.try_handle_slice(&table, &LOCAL_MAC, 1_000), Outcome::Skip);
+        assert_eq!(f.try_handle_slice(&table, &LOCAL_MAC, 1_000).0, Outcome::Skip);
     }
 
     #[test]
@@ -995,6 +1055,61 @@ nonce_length = 13
         quic.extend_from_slice(&[0xcc; 30]);
         let frame = build_udp_v4(&quic, [203, 0, 113, 1], [10, 0, 0, 1], 12345, 4433);
         let mut f = TestFrame::new(&frame);
-        assert_eq!(f.try_handle_slice(&table, &LOCAL_MAC, 1_000), Outcome::Skip);
+        assert_eq!(
+            f.try_handle_slice(&table, &LOCAL_MAC, 1_000),
+            (Outcome::Skip, Detail::ParseError),
+        );
+    }
+
+    // -- Detail / counter integration tests ---------------------------------
+
+    #[test]
+    fn observe_mode_reports_observed_detail() {
+        let table = make_table(&format!(
+            "[retry]\nenabled = true\nmode = \"observe\"\ntoken_key = \"{KEY_HEX}\""
+        ));
+        let quic = build_v1_initial(&[0xaa; 8], &[0xbb; 4], &[]);
+        let frame = build_udp_v4(&quic, [203, 0, 113, 1], [10, 0, 0, 1], 12345, 4433);
+        let mut f = TestFrame::new(&frame);
+        let (outcome, detail) = f.try_handle_slice(&table, &LOCAL_MAC, 1_000);
+        assert_eq!(outcome, Outcome::Skip);
+        assert_eq!(detail, Detail::Observed);
+    }
+
+    #[test]
+    fn observe_mode_expired_token_reports_detail() {
+        let table = make_table(&format!(
+            "[retry]\nenabled = true\nmode = \"observe\"\ntoken_key = \"{KEY_HEX}\"\n\
+             token_lifetime_secs = 1"
+        ));
+        let retry = table.retry.as_ref().unwrap();
+        let src = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1));
+        let dcid = [0xaa; 8];
+        let tok = retry.token_key.mint(src, &dcid, 1_000).unwrap();
+        let quic = build_v1_initial(&dcid, &[0xbb; 4], &tok);
+        let frame = build_udp_v4(&quic, [203, 0, 113, 1], [10, 0, 0, 1], 12345, 4433);
+        let mut f = TestFrame::new(&frame);
+        // Token minted at 1000, verified at 6000, lifetime 1s → expired.
+        let (outcome, detail) = f.try_handle_slice(&table, &LOCAL_MAC, 6_000);
+        assert_eq!(outcome, Outcome::Skip, "observe mode never emits");
+        assert_eq!(detail, Detail::TokenExpired);
+    }
+
+    #[test]
+    fn observe_mode_valid_token_forwards() {
+        let table = make_table(&format!(
+            "[retry]\nenabled = true\nmode = \"observe\"\ntoken_key = \"{KEY_HEX}\""
+        ));
+        let retry = table.retry.as_ref().unwrap();
+        let src = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1));
+        let dcid = [0xaa; 8];
+        let tok = retry.token_key.mint(src, &dcid, 1_000).unwrap();
+        let quic = build_v1_initial(&dcid, &[0xbb; 4], &tok);
+        let frame = build_udp_v4(&quic, [203, 0, 113, 1], [10, 0, 0, 1], 12345, 4433);
+        let mut f = TestFrame::new(&frame);
+        let (outcome, detail) = f.try_handle_slice(&table, &LOCAL_MAC, 1_100);
+        // Valid token forwards in every mode.
+        assert_eq!(outcome, Outcome::Forward);
+        assert_eq!(detail, Detail::TokenValid);
     }
 }

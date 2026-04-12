@@ -5,6 +5,8 @@
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::retry::datapath::{Detail as RetryDetail, Outcome as RetryOutcome};
+
 /// Per-worker packet counters, cache-line aligned to avoid false sharing.
 ///
 /// Each worker owns one slot and writes to it exclusively. The main thread
@@ -25,6 +27,12 @@ pub struct WorkerStats {
     icmp_forwarded: AtomicU64,
     passed: AtomicU64,
     pending_fill_peak: AtomicU64,
+    retry_initials_seen: AtomicU64,
+    retry_issued: AtomicU64,
+    retry_token_validated: AtomicU64,
+    retry_token_invalid: AtomicU64,
+    retry_token_expired: AtomicU64,
+    retry_parse_error: AtomicU64,
 }
 
 #[inline(always)]
@@ -45,6 +53,12 @@ impl WorkerStats {
             icmp_forwarded: AtomicU64::new(0),
             passed: AtomicU64::new(0),
             pending_fill_peak: AtomicU64::new(0),
+            retry_initials_seen: AtomicU64::new(0),
+            retry_issued: AtomicU64::new(0),
+            retry_token_validated: AtomicU64::new(0),
+            retry_token_invalid: AtomicU64::new(0),
+            retry_token_expired: AtomicU64::new(0),
+            retry_parse_error: AtomicU64::new(0),
         }
     }
 
@@ -75,6 +89,12 @@ pub struct BatchStats {
     draining_forwarded: u64,
     icmp_forwarded: u64,
     passed: u64,
+    retry_initials_seen: u64,
+    retry_issued: u64,
+    retry_token_validated: u64,
+    retry_token_invalid: u64,
+    retry_token_expired: u64,
+    retry_parse_error: u64,
 }
 
 impl BatchStats {
@@ -89,6 +109,12 @@ impl BatchStats {
             draining_forwarded: 0,
             icmp_forwarded: 0,
             passed: 0,
+            retry_initials_seen: 0,
+            retry_issued: 0,
+            retry_token_validated: 0,
+            retry_token_invalid: 0,
+            retry_token_expired: 0,
+            retry_parse_error: 0,
         }
     }
 
@@ -126,6 +152,24 @@ impl BatchStats {
         self.passed += 1;
     }
 
+    /// Record a retry classifier result. `Detail::None` is a no-op so
+    /// the hot-path cost when retry is disabled is a single match arm.
+    #[inline(always)]
+    pub fn record_retry(&mut self, outcome: RetryOutcome, detail: RetryDetail) {
+        match detail {
+            RetryDetail::None => return,
+            RetryDetail::ParseError => self.retry_parse_error += 1,
+            RetryDetail::TokenValid => self.retry_token_validated += 1,
+            RetryDetail::TokenInvalid => self.retry_token_invalid += 1,
+            RetryDetail::TokenExpired => self.retry_token_expired += 1,
+            RetryDetail::Issued | RetryDetail::Observed => {}
+        }
+        self.retry_initials_seen += 1;
+        if outcome == RetryOutcome::Emitted {
+            self.retry_issued += 1;
+        }
+    }
+
     /// Flush accumulated counters into the shared atomic stats.
     #[inline(always)]
     pub fn flush(self, target: &WorkerStats) {
@@ -155,6 +199,24 @@ impl BatchStats {
         if self.passed > 0 {
             add(&target.passed, self.passed);
         }
+        if self.retry_initials_seen > 0 {
+            add(&target.retry_initials_seen, self.retry_initials_seen);
+        }
+        if self.retry_issued > 0 {
+            add(&target.retry_issued, self.retry_issued);
+        }
+        if self.retry_token_validated > 0 {
+            add(&target.retry_token_validated, self.retry_token_validated);
+        }
+        if self.retry_token_invalid > 0 {
+            add(&target.retry_token_invalid, self.retry_token_invalid);
+        }
+        if self.retry_token_expired > 0 {
+            add(&target.retry_token_expired, self.retry_token_expired);
+        }
+        if self.retry_parse_error > 0 {
+            add(&target.retry_parse_error, self.retry_parse_error);
+        }
     }
 }
 
@@ -171,6 +233,12 @@ pub struct Snapshot {
     pub icmp_forwarded: u64,
     pub passed: u64,
     pub pending_fill_peak: u64,
+    pub retry_initials_seen: u64,
+    pub retry_issued: u64,
+    pub retry_token_validated: u64,
+    pub retry_token_invalid: u64,
+    pub retry_token_expired: u64,
+    pub retry_parse_error: u64,
 }
 
 impl Snapshot {
@@ -192,6 +260,12 @@ impl Snapshot {
             icmp_forwarded: self.icmp_forwarded.wrapping_sub(prev.icmp_forwarded),
             passed: self.passed.wrapping_sub(prev.passed),
             pending_fill_peak: self.pending_fill_peak,
+            retry_initials_seen: self.retry_initials_seen.wrapping_sub(prev.retry_initials_seen),
+            retry_issued: self.retry_issued.wrapping_sub(prev.retry_issued),
+            retry_token_validated: self.retry_token_validated.wrapping_sub(prev.retry_token_validated),
+            retry_token_invalid: self.retry_token_invalid.wrapping_sub(prev.retry_token_invalid),
+            retry_token_expired: self.retry_token_expired.wrapping_sub(prev.retry_token_expired),
+            retry_parse_error: self.retry_parse_error.wrapping_sub(prev.retry_parse_error),
         }
     }
 
@@ -246,7 +320,20 @@ impl fmt::Display for Snapshot {
         if self.pending_fill_peak > 0 {
             write!(f, " pending_fill_peak={}", self.pending_fill_peak)?;
         }
-        
+
+        if self.retry_initials_seen > 0 {
+            write!(
+                f,
+                " retry(seen={} issued={} valid={} invalid={} expired={} parse_err={})",
+                self.retry_initials_seen,
+                self.retry_issued,
+                self.retry_token_validated,
+                self.retry_token_invalid,
+                self.retry_token_expired,
+                self.retry_parse_error,
+            )?;
+        }
+
         Ok(())
     }
 }
@@ -291,6 +378,12 @@ impl StatsTable {
             if peak > total.pending_fill_peak {
                 total.pending_fill_peak = peak;
             }
+            total.retry_initials_seen += slot.retry_initials_seen.load(Ordering::Relaxed);
+            total.retry_issued += slot.retry_issued.load(Ordering::Relaxed);
+            total.retry_token_validated += slot.retry_token_validated.load(Ordering::Relaxed);
+            total.retry_token_invalid += slot.retry_token_invalid.load(Ordering::Relaxed);
+            total.retry_token_expired += slot.retry_token_expired.load(Ordering::Relaxed);
+            total.retry_parse_error += slot.retry_parse_error.load(Ordering::Relaxed);
         }
 
         total

@@ -277,7 +277,10 @@ fn worker_loop(
                 // TX. Otherwise fall through to the normal routing
                 // logic — Forward and Skip both defer to process_packet
                 // so the CID path still runs.
-                match retry::datapath::try_handle(&mut data, &config, local_mac, now_ms) {
+                let (retry_outcome, retry_detail) =
+                    retry::datapath::try_handle(&mut data, &config, local_mac, now_ms);
+                batch_stats.record_retry(retry_outcome, retry_detail);
+                match retry_outcome {
                     retry::datapath::Outcome::Emitted => {
                         tx_batch.push(rx_descs[i]);
                         continue;
