@@ -2,36 +2,46 @@
 // Copyright (c) 2026 Jonathan Cormier
 // This file is part of Pesigitg.
 
-//! QUIC v1 Initial long-header packet parsing.
+//! QUIC v1/v2 Initial long-header packet parsing.
 //!
 //! Decodes the public, unprotected portion of an Initial packet per
-//! RFC 9000 §17.2.2: version, DCID, SCID, token, and Length varint. The
-//! packet number and payload are header- and AEAD-protected and remain
-//! opaque to this parser.
+//! RFC 9000 §17.2.2 (v1) and RFC 9369 §3.1 (v2): version, DCID, SCID,
+//! token, and Length varint. The packet number and payload are header-
+//! and AEAD-protected and remain opaque to this parser.
 //!
 //! This parser runs on untrusted Internet input on the hot path. It must
 //! be zero-allocation and panic-free on any byte sequence — it is the
 //! direct target of the Retry-service fuzz harness.
 //!
-//! Only QUIC v1 (`version == 0x00000001`) is recognized. Other versions,
-//! long-header types other than Initial, and short headers all return
-//! `Err`. Callers that only care whether a packet *is* a parseable v1
-//! Initial can use [`parse`], which flattens everything to `Option`.
+//! QUIC v1 (`0x00000001`) and v2 (`0x6b3343cf`) are recognized. Other
+//! versions, long-header types other than Initial, and short headers all
+//! return `Err`. Callers that only care whether a packet *is* a
+//! parseable Initial can use [`parse`], which flattens everything to
+//! `Option`.
+//!
+//! v2 uses a different packet-type encoding from v1 (RFC 9369 §3.1):
+//! the two type bits in the first byte are scrambled to resist
+//! ossification. This parser reads the version field before checking
+//! the type bits, branching on the version to select the correct
+//! encoding.
 
 /// QUIC v1 version number (RFC 9000 §15).
 pub const QUIC_V1: u32 = 0x0000_0001;
 
+/// QUIC v2 version number (RFC 9369 §1).
+pub const QUIC_V2: u32 = 0x6b33_43cf;
+
 /// RFC 9000 §17.2 caps v1 DCID/SCID at 20 bytes.
 const MAX_CID_LEN: usize = 20;
 
-/// Parsed view over a QUIC v1 Initial long-header packet.
+/// Parsed view over a QUIC v1 or v2 Initial long-header packet.
 ///
 /// All slices borrow from the original packet buffer — no allocation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Initial<'a> {
     /// First byte of the packet, including header-protected bits.
     pub first_byte: u8,
-    /// QUIC version. Always [`QUIC_V1`] for a successful parse.
+    /// QUIC version — either [`QUIC_V1`] or [`QUIC_V2`].
     pub version: u32,
     /// Destination Connection ID. At most [`MAX_CID_LEN`] bytes.
     pub dcid: &'a [u8],
@@ -56,10 +66,12 @@ pub enum ParseError {
     NotLongHeader,
     /// Fixed bit (bit 6) is 0. QUIC v1 requires it set.
     FixedBitUnset,
-    /// Long header, but the packet type is not Initial.
+    /// Long header, but the packet type is not Initial. The type-bit
+    /// encoding depends on the version (v2 scrambles the mapping), so
+    /// this error is only returned after the version has been identified.
     NotInitial,
-    /// Version does not equal [`QUIC_V1`]. Carries the observed version so
-    /// callers can log or count unsupported-version traffic.
+    /// Version is not [`QUIC_V1`] or [`QUIC_V2`]. Carries the observed
+    /// version so callers can log or count unsupported-version traffic.
     UnsupportedVersion(u32),
     /// DCID length byte is > 20 or its declared bytes overrun the buffer.
     DcidLengthInvalid,
@@ -76,8 +88,9 @@ pub enum ParseError {
 /// Parse a candidate Initial, flattening all errors to `None`.
 ///
 /// Use this on the hot path when you only care whether the packet is a
-/// valid v1 Initial. For observe-mode metrics that need to distinguish
-/// "not an Initial" from "malformed Initial", use [`parse_strict`].
+/// valid v1 or v2 Initial. For observe-mode metrics that need to
+/// distinguish "not an Initial" from "malformed Initial", use
+/// [`parse_strict`].
 #[inline]
 pub fn parse(packet: &[u8]) -> Option<Initial<'_>> {
     parse_strict(packet).ok()
@@ -98,14 +111,17 @@ pub fn parse_strict(packet: &[u8]) -> Result<Initial<'_>, ParseError> {
     if first_byte & 0x40 == 0 {
         return Err(ParseError::FixedBitUnset);
     }
-    // Long packet type = bits 5-4; Initial is 0b00.
-    if (first_byte >> 4) & 0b11 != 0 {
-        return Err(ParseError::NotInitial);
-    }
 
     let version = u32::from_be_bytes([packet[1], packet[2], packet[3], packet[4]]);
-    if version != QUIC_V1 {
-        return Err(ParseError::UnsupportedVersion(version));
+
+    // The packet-type encoding differs between v1 and v2 (RFC 9369 §3.1):
+    //   v1 Initial = 0b00,  v2 Initial = 0b01
+    let ptype = (first_byte >> 4) & 0b11;
+    match version {
+        QUIC_V1 if ptype != 0b00 => return Err(ParseError::NotInitial),
+        QUIC_V2 if ptype != 0b01 => return Err(ParseError::NotInitial),
+        QUIC_V1 | QUIC_V2 => {}
+        other => return Err(ParseError::UnsupportedVersion(other)),
     }
 
     let dcid_len = packet[5] as usize;
@@ -207,12 +223,23 @@ mod tests {
         }
     }
 
-    /// Build a well-formed v1 Initial with the given DCID, SCID, token,
-    /// and payload. Returns the wire bytes.
-    fn build_initial(dcid: &[u8], scid: &[u8], token: &[u8], payload_len: u64) -> Vec<u8> {
+    /// Build a well-formed Initial with the given version, DCID, SCID,
+    /// token, and payload. Returns the wire bytes.
+    fn build_initial_versioned(
+        version: u32,
+        dcid: &[u8],
+        scid: &[u8],
+        token: &[u8],
+        payload_len: u64,
+    ) -> Vec<u8> {
+        let first_byte = match version {
+            QUIC_V1 => 0xc0, // long header + fixed bit + v1 Initial type (0b00)
+            QUIC_V2 => 0xd0, // long header + fixed bit + v2 Initial type (0b01)
+            _ => panic!("test helper only handles v1/v2"),
+        };
         let mut out = Vec::new();
-        out.push(0xc0); // long header + fixed bit + Initial type
-        out.extend_from_slice(&QUIC_V1.to_be_bytes());
+        out.push(first_byte);
+        out.extend_from_slice(&version.to_be_bytes());
         out.push(dcid.len() as u8);
         out.extend_from_slice(dcid);
         out.push(scid.len() as u8);
@@ -222,6 +249,11 @@ mod tests {
         write_varint(&mut out, payload_len);
         out.extend(std::iter::repeat(0xaa).take(payload_len as usize));
         out
+    }
+
+    /// V1 convenience wrapper — used by the majority of existing tests.
+    fn build_initial(dcid: &[u8], scid: &[u8], token: &[u8], payload_len: u64) -> Vec<u8> {
+        build_initial_versioned(QUIC_V1, dcid, scid, token, payload_len)
     }
 
     #[test]
@@ -314,13 +346,13 @@ mod tests {
     }
 
     #[test]
-    fn rejects_wrong_version() {
+    fn rejects_unknown_version() {
         let mut pkt = build_initial(&[0; 4], &[0; 4], &[], 10);
-        // Overwrite version with QUIC v2 (0x6b3343cf).
-        pkt[1..5].copy_from_slice(&0x6b33_43cfu32.to_be_bytes());
+        // Overwrite version with a hypothetical future version.
+        pkt[1..5].copy_from_slice(&0xaaaa_aaaau32.to_be_bytes());
         assert_eq!(
             parse_strict(&pkt),
-            Err(ParseError::UnsupportedVersion(0x6b33_43cf))
+            Err(ParseError::UnsupportedVersion(0xaaaa_aaaa))
         );
     }
 
@@ -475,5 +507,67 @@ mod tests {
         for pkt in cases {
             let _ = parse(pkt);
         }
+    }
+
+    // -- QUIC v2 tests --
+
+    #[test]
+    fn parses_v2_initial() {
+        let dcid = [0xde, 0xad, 0xbe, 0xef];
+        let scid = [0x01, 0x02, 0x03, 0x04, 0x05];
+        let pkt = build_initial_versioned(QUIC_V2, &dcid, &scid, &[], 20);
+
+        let parsed = parse(&pkt).expect("v2 Initial should parse");
+        assert_eq!(parsed.version, QUIC_V2);
+        assert_eq!(parsed.first_byte, 0xd0);
+        assert_eq!(parsed.dcid, &dcid);
+        assert_eq!(parsed.scid, &scid);
+        assert!(parsed.token.is_empty());
+        assert_eq!(parsed.length, 20);
+    }
+
+    #[test]
+    fn parses_v2_initial_with_token() {
+        let dcid = [0x11; 8];
+        let scid = [0x22; 8];
+        let token = [0x33; 40];
+        let pkt = build_initial_versioned(QUIC_V2, &dcid, &scid, &token, 100);
+
+        let parsed = parse(&pkt).expect("v2 Initial with token should parse");
+        assert_eq!(parsed.version, QUIC_V2);
+        assert_eq!(parsed.token, &token);
+        assert_eq!(parsed.length, 100);
+    }
+
+    #[test]
+    fn v2_rejects_v1_type_bits() {
+        // 0xc0 has type bits 0b00, which is Initial in v1 but Retry in v2.
+        let mut pkt = build_initial_versioned(QUIC_V2, &[0; 4], &[0; 4], &[], 10);
+        pkt[0] = 0xc0; // v1-style Initial type bits with v2 version
+        assert_eq!(parse_strict(&pkt), Err(ParseError::NotInitial));
+    }
+
+    #[test]
+    fn v1_rejects_v2_type_bits() {
+        // 0xd0 has type bits 0b01, which is Initial in v2 but 0-RTT in v1.
+        let mut pkt = build_initial(&[0; 4], &[0; 4], &[], 10);
+        pkt[0] = 0xd0; // v2-style Initial type bits with v1 version
+        assert_eq!(parse_strict(&pkt), Err(ParseError::NotInitial));
+    }
+
+    #[test]
+    fn v2_rejects_handshake() {
+        // v2 Handshake = type bits 0b11 → first byte 0xf0.
+        let mut pkt = build_initial_versioned(QUIC_V2, &[0; 4], &[0; 4], &[], 10);
+        pkt[0] = 0xf0;
+        assert_eq!(parse_strict(&pkt), Err(ParseError::NotInitial));
+    }
+
+    #[test]
+    fn v2_rejects_zero_rtt() {
+        // v2 0-RTT = type bits 0b10 → first byte 0xe0.
+        let mut pkt = build_initial_versioned(QUIC_V2, &[0; 4], &[0; 4], &[], 10);
+        pkt[0] = 0xe0;
+        assert_eq!(parse_strict(&pkt), Err(ParseError::NotInitial));
     }
 }
