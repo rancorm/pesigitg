@@ -34,7 +34,7 @@ use pesigitg_common::{
 };
 
 use crate::config::route::{ConfigTable, RetryConfig, RetryMode};
-use crate::quic::initial::{self, Initial};
+use crate::quic::initial::{self, Initial, ParseError};
 
 use super::packet::{build_retry, INTEGRITY_TAG_LEN};
 use super::token::{TOKEN_LEN, VerifyError};
@@ -112,9 +112,18 @@ pub fn try_handle(
     let dcid_len;
     let scid_len;
     let (decision, detail) = {
-        let initial = match initial::parse(&data.contents()[layout.quic_offset..]) {
-            Some(i) => i,
-            None => return (Outcome::Skip, Detail::ParseError),
+        let quic = &data.contents()[layout.quic_offset..];
+        let initial = match initial::parse_strict(quic) {
+            Ok(i) => i,
+            // Short headers, non-Initial long headers, and non-v1
+            // packets are not Initials — skip silently, no counter.
+            Err(ParseError::NotLongHeader)
+            | Err(ParseError::NotInitial)
+            | Err(ParseError::FixedBitUnset)
+            | Err(ParseError::UnsupportedVersion(_))
+            | Err(ParseError::Truncated) => return (Outcome::Skip, Detail::None),
+            // Anything else looked like a v1 Initial but was malformed.
+            Err(_) => return (Outcome::Skip, Detail::ParseError),
         };
         dcid_len = initial.dcid.len();
         scid_len = initial.scid.len();
@@ -673,9 +682,15 @@ nonce_length = 13
             let dcid_len;
             let scid_len;
             let (decision, detail) = {
-                let initial = match initial::parse(&self.buf[layout.quic_offset..self.len]) {
-                    Some(i) => i,
-                    None => return (Outcome::Skip, Detail::ParseError),
+                let quic = &self.buf[layout.quic_offset..self.len];
+                let initial = match initial::parse_strict(quic) {
+                    Ok(i) => i,
+                    Err(ParseError::NotLongHeader)
+                    | Err(ParseError::NotInitial)
+                    | Err(ParseError::FixedBitUnset)
+                    | Err(ParseError::UnsupportedVersion(_))
+                    | Err(ParseError::Truncated) => return (Outcome::Skip, Detail::None),
+                    Err(_) => return (Outcome::Skip, Detail::ParseError),
                 };
                 dcid_len = initial.dcid.len();
                 scid_len = initial.scid.len();
@@ -1050,14 +1065,14 @@ nonce_length = 13
         let table = make_table(&format!(
             "[retry]\nenabled = true\nmode = \"always\"\ntoken_key = \"{KEY_HEX}\""
         ));
-        // Short header byte 0x40 — Initial parser rejects it.
+        // Short header byte 0x40 — not a long-header Initial, skip silently.
         let mut quic = vec![0x40u8];
         quic.extend_from_slice(&[0xcc; 30]);
         let frame = build_udp_v4(&quic, [203, 0, 113, 1], [10, 0, 0, 1], 12345, 4433);
         let mut f = TestFrame::new(&frame);
         assert_eq!(
             f.try_handle_slice(&table, &LOCAL_MAC, 1_000),
-            (Outcome::Skip, Detail::ParseError),
+            (Outcome::Skip, Detail::None),
         );
     }
 
