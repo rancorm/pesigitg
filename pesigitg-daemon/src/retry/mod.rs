@@ -23,6 +23,8 @@
 // Items are wired into `process_udp` in Phase 4b of the quic-retry-offload
 // plan; until then they are only reachable from their own tests.
 #[allow(dead_code)]
+pub mod datapath;
+#[allow(dead_code)]
 pub mod packet;
 #[allow(dead_code)]
 pub mod token;

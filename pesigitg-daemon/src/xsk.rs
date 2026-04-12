@@ -9,11 +9,11 @@
 //! access to frame data for processing and retransmission.
 
 use std::num::NonZeroU32;
-use std::ops::DerefMut;
 use std::os::fd::{AsRawFd, RawFd};
 
 use anyhow::{Context, Result};
 use xsk_rs::config::{BindFlags, LibbpfFlags, QueueSize, SocketConfig, UmemConfig};
+use xsk_rs::umem::frame::DataMut;
 use xsk_rs::{CompQueue, FillQueue, FrameDesc, RxQueue, Socket, TxQueue, Umem};
 
 const NUM_FRAMES: u32 = 4096;
@@ -113,12 +113,15 @@ impl XskSocket {
         unsafe { self.rx_q.poll_and_consume(descs, timeout_ms) }.unwrap_or(0)
     }
 
-    /// Get mutable access to a frame's packet data.
+    /// Get mutable access to a frame's packet data. The returned
+    /// [`DataMut`] derefs to `&mut [u8]` for in-place rewrites, and
+    /// also exposes `.cursor()` for callers (like the Retry path) that
+    /// need to grow the packet beyond its original length.
     ///
     /// # Safety
-    /// The caller must ensure `desc` belongs to this socket's UMEM and is
-    /// not simultaneously submitted to any queue.
-    pub unsafe fn frame_mut<'a>(&'a self, desc: &'a mut FrameDesc) -> impl DerefMut<Target = [u8]> + 'a {
+    /// The caller must ensure `desc` belongs to this socket's UMEM and
+    /// is not simultaneously submitted to any queue.
+    pub unsafe fn frame_mut<'a>(&'a self, desc: &'a mut FrameDesc) -> DataMut<'a> {
         unsafe { self.umem.data_mut(desc) }
     }
 

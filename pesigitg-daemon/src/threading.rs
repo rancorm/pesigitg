@@ -7,7 +7,7 @@ use std::os::fd::BorrowedFd;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread::{self, JoinHandle};
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use libc::{ioctl, socket, AF_INET, SOCK_DGRAM, c_char};
 use log::{debug, error, info};
@@ -19,6 +19,7 @@ use crate::config::route::ConfigTable;
 use crate::conntable::ConnectionTable;
 use crate::ebpf::EbpfHandle;
 use crate::packet::{self, Verdict};
+use crate::retry;
 use crate::stats::{BatchStats, StatsTable, WorkerStats};
 use crate::utils::num_cores;
 use crate::xsk::XskSocket;
@@ -241,6 +242,14 @@ fn worker_loop(
             continue;
         }
 
+        // Wall-clock ms feeds the Retry token mint/verify path. One
+        // sample per batch is plenty — token lifetimes are measured in
+        // seconds.
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
         if !first_packet_logged {
             debug!(
                 "worker q{}: first packet at T+{:.2?}",
@@ -262,7 +271,21 @@ fn worker_loop(
         for i in 0..n {
             let verdict = {
                 let mut data = unsafe { xsk.frame_mut(&mut rx_descs[i]) };
-                packet::process_packet(&mut *data, &config, &mut conn, local_mac, now)
+
+                // Retry fast path: if the classifier emits a Retry
+                // packet in place of the Initial, ship it straight to
+                // TX. Otherwise fall through to the normal routing
+                // logic — Forward and Skip both defer to process_packet
+                // so the CID path still runs.
+                match retry::datapath::try_handle(&mut data, &config, local_mac, now_ms) {
+                    retry::datapath::Outcome::Emitted => {
+                        tx_batch.push(rx_descs[i]);
+                        continue;
+                    }
+                    retry::datapath::Outcome::Forward | retry::datapath::Outcome::Skip => {}
+                }
+
+                packet::process_packet(&mut data, &config, &mut conn, local_mac, now)
             };
             match verdict {
                 Verdict::CidForward(config_id) => {
