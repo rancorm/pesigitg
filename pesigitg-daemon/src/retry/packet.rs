@@ -2,16 +2,17 @@
 // Copyright (c) 2026 Jonathan Cormier
 // This file is part of Pesigitg.
 
-//! QUIC v1 Retry packet construction and integrity tag.
+//! QUIC v1/v2 Retry packet construction and integrity tag.
 //!
-//! Implements RFC 9001 §5.8: a Retry packet ends with a 128-bit
-//! AEAD_AES_128_GCM authentication tag computed over a pseudo-packet
-//! (the client's Original Destination CID followed by the Retry packet
-//! bytes minus the tag itself). The key and nonce are version-specific
-//! public constants fixed by the spec — they are not secret; they prove
-//! the sender understood the incoming Initial and produced a well-formed
-//! Retry in response. The unguessable part is the token payload, minted
-//! elsewhere (Phase 3 — [`super::token`]).
+//! Implements RFC 9001 §5.8 (v1) and RFC 9369 §3.2 (v2): a Retry
+//! packet ends with a 128-bit AEAD_AES_128_GCM authentication tag
+//! computed over a pseudo-packet (the client's Original Destination CID
+//! followed by the Retry packet bytes minus the tag itself). The key
+//! and nonce are version-specific public constants fixed by the spec —
+//! they are not secret; they prove the sender understood the incoming
+//! Initial and produced a well-formed Retry in response. The
+//! unguessable part is the token payload, minted elsewhere (Phase 3 —
+//! [`super::token`]).
 //!
 //! This file owns the wire format only: build the bytes, compute the
 //! tag. Policy (when to Retry), token mint/verify, and datapath
@@ -22,7 +23,7 @@ use aes_gcm::{
     Aes128Gcm, Nonce,
 };
 
-use crate::quic::initial::QUIC_V1;
+use crate::quic::initial::{QUIC_V1, QUIC_V2};
 
 /// RFC 9001 §5.8 v1 Retry Integrity Tag key.
 const RETRY_KEY_V1: [u8; 16] = [
@@ -34,6 +35,18 @@ const RETRY_KEY_V1: [u8; 16] = [
 const RETRY_NONCE_V1: [u8; 12] = [
     0x46, 0x15, 0x99, 0xd3, 0x5d, 0x63, 0x2b, 0xf2,
     0x23, 0x98, 0x25, 0xbb,
+];
+
+/// RFC 9369 §3.2 v2 Retry Integrity Tag key.
+const RETRY_KEY_V2: [u8; 16] = [
+    0x8f, 0xb4, 0xb0, 0x1b, 0x56, 0xac, 0x48, 0xe2,
+    0x60, 0xfb, 0xcb, 0xce, 0xad, 0x7c, 0xcc, 0x92,
+];
+
+/// RFC 9369 §3.2 v2 Retry Integrity Tag nonce.
+const RETRY_NONCE_V2: [u8; 12] = [
+    0xd8, 0x69, 0x69, 0xbc, 0x2d, 0x7c, 0x6d, 0x99,
+    0x90, 0xef, 0xb0, 0x4a,
 ];
 
 /// Size of the trailing integrity tag.
@@ -55,15 +68,20 @@ const PSEUDO_MAX: usize = 1024;
 pub enum BuildError {
     /// Caller's output slice is shorter than the assembled Retry packet.
     OutputTooSmall,
-    /// A CID argument exceeds the 20-byte v1 limit.
+    /// A CID argument exceeds the 20-byte v1/v2 limit.
     CidTooLong,
     /// The pseudo-packet would exceed [`PSEUDO_MAX`]. Cap the token length
     /// or bump the buffer.
     PseudoTooLong,
+    /// Version is not v1 or v2.
+    UnsupportedVersion,
 }
 
-/// Build a QUIC v1 Retry packet into `out`.
+/// Build a QUIC Retry packet into `out` for the given `version`.
 ///
+/// - `version` selects the wire encoding: [`QUIC_V1`] or [`QUIC_V2`].
+///   v2 uses a different first-byte type encoding and different
+///   integrity-tag constants (RFC 9369 §3.2).
 /// - `odcid` is the client's Original Destination CID, taken from the
 ///   Initial that triggered the Retry. It feeds the tag AAD only — it
 ///   is **not** written to the wire.
@@ -80,6 +98,7 @@ pub enum BuildError {
 /// them "arbitrary" and clients ignore them.
 pub fn build_retry(
     out: &mut [u8],
+    version: u32,
     odcid: &[u8],
     dcid: &[u8],
     scid: &[u8],
@@ -92,6 +111,15 @@ pub fn build_retry(
         return Err(BuildError::CidTooLong);
     }
 
+    // Retry type bits differ between versions (RFC 9369 §3.1):
+    //   v1 Retry = 0b11 → first byte 0xf0
+    //   v2 Retry = 0b00 → first byte 0xc0
+    let first_byte = match version {
+        QUIC_V1 => 0xf0,
+        QUIC_V2 => 0xc0,
+        _ => return Err(BuildError::UnsupportedVersion),
+    };
+
     // first(1) + version(4) + dcid_len(1) + dcid + scid_len(1) + scid + token
     let body_len = 1 + 4 + 1 + dcid.len() + 1 + scid.len() + token.len();
     let total = body_len + INTEGRITY_TAG_LEN;
@@ -99,9 +127,8 @@ pub fn build_retry(
         return Err(BuildError::OutputTooSmall);
     }
 
-    // Long header (bit 7) | Fixed bit (bit 6) | Retry type (0b11) | 0000
-    out[0] = 0xf0;
-    out[1..5].copy_from_slice(&QUIC_V1.to_be_bytes());
+    out[0] = first_byte;
+    out[1..5].copy_from_slice(&version.to_be_bytes());
     let mut off = 5;
     out[off] = dcid.len() as u8;
     off += 1;
@@ -115,7 +142,7 @@ pub fn build_retry(
     off += token.len();
     debug_assert_eq!(off, body_len);
 
-    let tag = compute_integrity_tag(odcid, &out[..body_len])?;
+    let tag = compute_integrity_tag(version, odcid, &out[..body_len])?;
     out[body_len..total].copy_from_slice(&tag);
     Ok(total)
 }
@@ -129,17 +156,26 @@ pub fn build_retry(
 /// ```
 ///
 /// where `retry_without_tag` is the full Retry packet minus its
-/// trailing 16-byte tag. Exposed so the RFC 9001 Appendix A.4 test
-/// vector can be checked directly, and so callers who assemble the
-/// Retry bytes by hand can attach a tag without round-tripping through
-/// [`build_retry`].
+/// trailing 16-byte tag. `version` selects the key/nonce pair:
+/// v1 uses RFC 9001 §5.8 constants, v2 uses RFC 9369 §3.2 constants.
+///
+/// Exposed so the RFC 9001 Appendix A.4 test vector can be checked
+/// directly, and so callers who assemble the Retry bytes by hand can
+/// attach a tag without round-tripping through [`build_retry`].
 pub fn compute_integrity_tag(
+    version: u32,
     odcid: &[u8],
     retry_without_tag: &[u8],
 ) -> Result<[u8; INTEGRITY_TAG_LEN], BuildError> {
     if odcid.len() > MAX_CID_LEN {
         return Err(BuildError::CidTooLong);
     }
+
+    let (key, iv) = match version {
+        QUIC_V1 => (&RETRY_KEY_V1, &RETRY_NONCE_V1),
+        QUIC_V2 => (&RETRY_KEY_V2, &RETRY_NONCE_V2),
+        _ => return Err(BuildError::UnsupportedVersion),
+    };
 
     let pseudo_len = 1 + odcid.len() + retry_without_tag.len();
     if pseudo_len > PSEUDO_MAX {
@@ -151,9 +187,9 @@ pub fn compute_integrity_tag(
     pseudo[1..1 + odcid.len()].copy_from_slice(odcid);
     pseudo[1 + odcid.len()..pseudo_len].copy_from_slice(retry_without_tag);
 
-    let cipher = Aes128Gcm::new_from_slice(&RETRY_KEY_V1)
-        .expect("RETRY_KEY_V1 is exactly 16 bytes");
-    let nonce = Nonce::from_slice(&RETRY_NONCE_V1);
+    let cipher = Aes128Gcm::new_from_slice(key)
+        .expect("Retry key is exactly 16 bytes");
+    let nonce = Nonce::from_slice(iv);
 
     // AAD-only authentication: empty plaintext → no ciphertext, the
     // returned tag is the GCM MAC over the AAD.
@@ -203,22 +239,22 @@ mod tests {
 
     #[test]
     fn rfc9001_a4_integrity_tag() {
-        let tag = compute_integrity_tag(&RFC_ODCID, RFC_RETRY_NO_TAG).unwrap();
+        let tag = compute_integrity_tag(QUIC_V1, &RFC_ODCID, RFC_RETRY_NO_TAG).unwrap();
         assert_eq!(tag, RFC_EXPECTED_TAG, "RFC 9001 A.4 vector mismatch");
     }
 
     #[test]
-    fn build_retry_layout_and_self_consistent_tag() {
+    fn build_retry_v1_layout_and_self_consistent_tag() {
         let odcid = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
         let dcid = [0x11, 0x22, 0x33, 0x44];
         let scid = [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff];
         let token = [0x42u8; 32];
 
         let mut out = [0u8; 256];
-        let n = build_retry(&mut out, &odcid, &dcid, &scid, &token).unwrap();
+        let n = build_retry(&mut out, QUIC_V1, &odcid, &dcid, &scid, &token).unwrap();
         assert_eq!(n, 1 + 4 + 1 + 4 + 1 + 6 + 32 + INTEGRITY_TAG_LEN);
 
-        // First byte: long header + fixed + Retry type, unused bits cleared.
+        // First byte: long header + fixed + v1 Retry type (0b11), unused bits cleared.
         assert_eq!(out[0], 0xf0);
         assert_eq!(&out[1..5], &QUIC_V1.to_be_bytes());
 
@@ -229,16 +265,16 @@ mod tests {
         assert_eq!(&out[17..49], &token);
 
         // Recompute the tag from the body and verify self-consistency.
-        let recomputed = compute_integrity_tag(&odcid, &out[..n - INTEGRITY_TAG_LEN]).unwrap();
+        let recomputed = compute_integrity_tag(QUIC_V1, &odcid, &out[..n - INTEGRITY_TAG_LEN]).unwrap();
         assert_eq!(&out[n - INTEGRITY_TAG_LEN..n], &recomputed);
     }
 
     #[test]
-    fn build_retry_minimal() {
+    fn build_retry_v1_minimal() {
         // Empty DCID, empty SCID, empty token — smallest legal Retry.
         let odcid = [0u8; 4];
         let mut out = [0u8; 32];
-        let n = build_retry(&mut out, &odcid, &[], &[], &[]).unwrap();
+        let n = build_retry(&mut out, QUIC_V1, &odcid, &[], &[], &[]).unwrap();
         // 1 (first) + 4 (version) + 1 (dcid_len) + 1 (scid_len) + 16 (tag)
         assert_eq!(n, 23);
         assert_eq!(out[0], 0xf0);
@@ -247,7 +283,7 @@ mod tests {
     }
 
     #[test]
-    fn build_retry_differs_when_odcid_differs() {
+    fn build_retry_v1_differs_when_odcid_differs() {
         // Tag must bind the ODCID: changing only the ODCID must change
         // the tag, otherwise a replay from one connection could be
         // delivered to another.
@@ -257,8 +293,8 @@ mod tests {
 
         let mut a = [0u8; 64];
         let mut b = [0u8; 64];
-        let n_a = build_retry(&mut a, &[0u8; 8], &dcid, &scid, &token).unwrap();
-        let n_b = build_retry(&mut b, &[0xffu8; 8], &dcid, &scid, &token).unwrap();
+        let n_a = build_retry(&mut a, QUIC_V1, &[0u8; 8], &dcid, &scid, &token).unwrap();
+        let n_b = build_retry(&mut b, QUIC_V1, &[0xffu8; 8], &dcid, &scid, &token).unwrap();
         assert_eq!(n_a, n_b);
         // Body up to the tag is identical; tag must differ.
         assert_eq!(&a[..n_a - 16], &b[..n_b - 16]);
@@ -272,15 +308,15 @@ mod tests {
         let mut out = [0u8; 256];
 
         assert_eq!(
-            build_retry(&mut out, &long, &ok, &ok, &[]),
+            build_retry(&mut out, QUIC_V1, &long, &ok, &ok, &[]),
             Err(BuildError::CidTooLong)
         );
         assert_eq!(
-            build_retry(&mut out, &ok, &long, &ok, &[]),
+            build_retry(&mut out, QUIC_V1, &ok, &long, &ok, &[]),
             Err(BuildError::CidTooLong)
         );
         assert_eq!(
-            build_retry(&mut out, &ok, &ok, &long, &[]),
+            build_retry(&mut out, QUIC_V1, &ok, &ok, &long, &[]),
             Err(BuildError::CidTooLong)
         );
     }
@@ -295,7 +331,7 @@ mod tests {
         // Need: 1 + 4 + 1 + 4 + 1 + 4 + 32 + 16 = 63. Give 62.
         let mut out = [0u8; 62];
         assert_eq!(
-            build_retry(&mut out, &odcid, &dcid, &scid, &token),
+            build_retry(&mut out, QUIC_V1, &odcid, &dcid, &scid, &token),
             Err(BuildError::OutputTooSmall)
         );
     }
@@ -306,7 +342,7 @@ mod tests {
         // Any retry body larger than PSEUDO_MAX - 1 - 20 triggers the cap.
         let retry_body = [0u8; PSEUDO_MAX];
         assert_eq!(
-            compute_integrity_tag(&odcid, &retry_body),
+            compute_integrity_tag(QUIC_V1, &odcid, &retry_body),
             Err(BuildError::PseudoTooLong)
         );
     }
@@ -315,8 +351,62 @@ mod tests {
     fn compute_integrity_tag_rejects_oversized_odcid() {
         let long = [0u8; 21];
         assert_eq!(
-            compute_integrity_tag(&long, &[]),
+            compute_integrity_tag(QUIC_V1, &long, &[]),
             Err(BuildError::CidTooLong)
+        );
+    }
+
+    // -- QUIC v2 Retry tests --
+
+    #[test]
+    fn build_retry_v2_layout() {
+        let odcid = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
+        let dcid = [0x11, 0x22, 0x33, 0x44];
+        let scid = [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff];
+        let token = [0x42u8; 32];
+
+        let mut out = [0u8; 256];
+        let n = build_retry(&mut out, QUIC_V2, &odcid, &dcid, &scid, &token).unwrap();
+        assert_eq!(n, 1 + 4 + 1 + 4 + 1 + 6 + 32 + INTEGRITY_TAG_LEN);
+
+        // First byte: long header + fixed + v2 Retry type (0b00), unused bits cleared.
+        assert_eq!(out[0], 0xc0);
+        assert_eq!(&out[1..5], &QUIC_V2.to_be_bytes());
+
+        // Recompute the tag and verify self-consistency.
+        let recomputed = compute_integrity_tag(QUIC_V2, &odcid, &out[..n - INTEGRITY_TAG_LEN]).unwrap();
+        assert_eq!(&out[n - INTEGRITY_TAG_LEN..n], &recomputed);
+    }
+
+    #[test]
+    fn v1_and_v2_tags_differ_for_same_inputs() {
+        // Same CIDs, same token — different versions must produce
+        // different integrity tags because the key/nonce and version
+        // field differ.
+        let odcid = [0xaa; 8];
+        let dcid = [0xbb; 4];
+        let scid = [0xcc; 4];
+        let token = [0xdd; 16];
+
+        let mut v1 = [0u8; 128];
+        let mut v2 = [0u8; 128];
+        let n1 = build_retry(&mut v1, QUIC_V1, &odcid, &dcid, &scid, &token).unwrap();
+        let n2 = build_retry(&mut v2, QUIC_V2, &odcid, &dcid, &scid, &token).unwrap();
+        assert_eq!(n1, n2);
+        // Tags occupy the last 16 bytes.
+        assert_ne!(&v1[n1 - 16..n1], &v2[n2 - 16..n2]);
+    }
+
+    #[test]
+    fn rejects_unsupported_version() {
+        let mut out = [0u8; 128];
+        assert_eq!(
+            build_retry(&mut out, 0xdeadbeef, &[0; 4], &[0; 4], &[0; 4], &[0; 16]),
+            Err(BuildError::UnsupportedVersion)
+        );
+        assert_eq!(
+            compute_integrity_tag(0xdeadbeef, &[0; 4], &[0; 16]),
+            Err(BuildError::UnsupportedVersion)
         );
     }
 }
