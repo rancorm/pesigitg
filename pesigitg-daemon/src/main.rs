@@ -223,7 +223,10 @@ fn main() -> Result<()> {
                 debug!("signal received: {}", sig);
 
                 match sig {
-                    SIGHUP => reload_config(&mut args, &route_config),
+                    SIGHUP => {
+                        reload_config(&mut args, &route_config);
+                        health.reset_backoff();
+                    }
                     SIGUSR1 => {
                         info!("stats dump: {}", stats.aggregate());
                     }

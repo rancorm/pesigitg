@@ -162,6 +162,16 @@ impl HealthChecker {
         Ok(quinn::ClientConfig::new(Arc::new(quic_config)))
     }
 
+    /// Reset all backoff timers so unhealthy servers are re-probed on the
+    /// next `check()` call. Called on SIGHUP so operators don't have to
+    /// wait out the exponential backoff after fixing a backend.
+    pub fn reset_backoff(&mut self) {
+        let now = Instant::now();
+        for s in self.state.values_mut() {
+            s.next_probe_at = now;
+        }
+    }
+
     /// Probe due servers and update health flags for any that changed state.
     /// Returns `true` if the caller should rebuild fallback servers.
     pub fn check(&mut self, config: &mut ConfigTable) -> bool {
