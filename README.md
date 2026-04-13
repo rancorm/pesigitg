@@ -62,7 +62,7 @@ QUIC & HTTP/3 related RFCs and drafts.
   Contains compile-time constants (`DEFAULT_PORT`, `DEFAULT_INTF`, `PID_FILE`, `MAX_CONFIG_SIZE`), the `current_pid` helper, and the `exit!` macro.
   Standard-library-dependent code is gated behind the `std` feature flag.
 - **pesigitg-daemon** — The `pesigitgd` binary. Daemonizes via double-fork, manages a PID file, parses CLI arguments and an optional config file (key=value format), queries NIC hardware queue counts via ethtool ioctl, and integrates with systemd (sd_notify watchdog, `READY=1`, `RELOADING=1`).
-  Handles `SIGHUP` for live config reload and `SIGTERM`/`SIGINT` for graceful shutdown. Logs to syslog when daemonized, or to stderr when running in the foreground or under systemd.
+  Logs to syslog when daemonized, or to stderr when running in the foreground or under systemd.
 - **pesigitg-ebpf** — eBPF programs.
 
 ## Development Prerequisites
@@ -123,6 +123,26 @@ cargo xtask build-ebpf --release
 (selected automatically via `pesigitg-ebpf/rust-toolchain.toml`), then builds
 the daemon with the stable toolchain, passing the eBPF object path through the
 `PESIGITG_EBPF_OBJ` environment variable.
+
+## Signals
+
+| Signal | Effect |
+|--------|--------|
+| `SIGHUP` | Reload daemon and route configuration, re-resolve server MACs, and reset health check backoff timers so all backends are re-probed on the next cycle. |
+| `SIGUSR1` | Dump traffic statistics (packet counters, routing decisions) to the log. |
+| `SIGUSR2` | Dump the full runtime config to the log: active config slots, per-server IP/MAC/health/drain status, fallback pool membership, and retry settings. |
+| `SIGINT` / `SIGTERM` | Graceful shutdown — stop all worker threads, then exit. |
+
+```sh
+# reload config + force re-probe of unhealthy backends
+kill -HUP $(pidof pesigitgd)
+
+# inspect current traffic counters
+kill -USR1 $(pidof pesigitgd)
+
+# inspect runtime server state
+kill -USR2 $(pidof pesigitgd)
+```
 
 ## Network Configuration
 
@@ -274,6 +294,8 @@ example.com.  300  IN  HTTPS  1 . alpn=h3,h2 ipv4hint=192.0.2.1 ipv6hint=2001:db
 | **SIGHUP** | Signal Hang Up | Unix signal used to trigger live config reload |
 | **SIGINT** | Signal Interrupt | Unix signal sent by Ctrl+C |
 | **SIGTERM** | Signal Terminate | Unix signal for graceful shutdown |
+| **SIGUSR1** | User-defined Signal 1 | Unix signal used to dump traffic statistics |
+| **SIGUSR2** | User-defined Signal 2 | Unix signal used to dump runtime config state |
 | **SNI** | Server Name Indication | TLS extension carrying the target hostname |
 | **TLS** | Transport Layer Security | Cryptographic protocol layered over TCP (or built into QUIC) |
 | **TTL** | Time To Live | IPv4 header field limiting packet lifetime (hop count) |
