@@ -740,14 +740,66 @@ impl fmt::Display for RouteConfig {
 
 impl fmt::Display for ConfigTable {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let active: Vec<_> = self.slots.iter().flatten().collect();
-        
-        write!(f, "config table ({} active):", active.len())?;
-        
-        for config in active {
-            write!(f, "\n{}", config)?;
+        writeln!(f, "route config: {}", self.path.display())?;
+
+        let active: Vec<_> = self.configs().collect();
+        if active.is_empty() {
+            writeln!(f, "  (no active configs)")?;
         }
-        
+
+        for rc in &active {
+            writeln!(f, "  config_id {}:", rc.config_id)?;
+            writeln!(f, "    encryption:     {:?}", rc.encryption)?;
+            writeln!(f, "    server_id_len:  {}", rc.server_id_length)?;
+            writeln!(f, "    nonce_len:      {}", rc.nonce_length)?;
+            writeln!(f, "    cid_length:     {}", rc.cid_length())?;
+
+            if rc.servers.is_empty() {
+                writeln!(f, "    servers:        (none)")?;
+            } else {
+                writeln!(f, "    servers:")?;
+                for s in &rc.servers {
+                    let mac = match s.mac {
+                        Some(m) => format!(
+                            "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                            m[0], m[1], m[2], m[3], m[4], m[5]
+                        ),
+                        None => "unresolved".to_string(),
+                    };
+                    let id_hex: String = s.id.iter().map(|b| format!("{b:02x}")).collect();
+                    let mut flags = Vec::new();
+                    if s.draining { flags.push("draining"); }
+                    if !s.healthy { flags.push("unhealthy"); }
+                    let flag_str = if flags.is_empty() {
+                        "healthy".to_string()
+                    } else {
+                        flags.join(", ")
+                    };
+                    writeln!(
+                        f, "      {} -> {} mac={} [{}]",
+                        id_hex, s.address, mac, flag_str,
+                    )?;
+                }
+            }
+        }
+
+        writeln!(f, "  fallback pool: {} servers", self.fallback_servers.len())?;
+        for s in &self.fallback_servers {
+            writeln!(f, "    {}", s.address)?;
+        }
+
+        match &self.retry {
+            Some(rc) => {
+                writeln!(f, "  retry:")?;
+                for line in format!("{rc}").lines() {
+                    writeln!(f, "    {line}")?;
+                }
+            }
+            None => {
+                writeln!(f, "  retry: disabled")?;
+            }
+        }
+
         Ok(())
     }
 }

@@ -25,7 +25,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use log::{error, warn, info, debug};
-use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM, SIGUSR1};
+use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM, SIGUSR1, SIGUSR2};
 use signal_hook::iterator::Signals;
 use anyhow::{anyhow, ensure, Result};
 use pesigitg_common::{PID_FILE, DEFAULT_ROUTE_CONFIG, current_pid, exit};
@@ -71,7 +71,7 @@ fn main() -> Result<()> {
         None
     };
 
-    let mut signals = Signals::new([SIGINT, SIGTERM, SIGHUP, SIGUSR1])?;
+    let mut signals = Signals::new([SIGINT, SIGTERM, SIGHUP, SIGUSR1, SIGUSR2])?;
     let sig_handle = signals.handle();
     let (sig_tx, sig_rx) = mpsc::sync_channel(10);
 
@@ -226,6 +226,10 @@ fn main() -> Result<()> {
                     SIGHUP => reload_config(&mut args, &route_config),
                     SIGUSR1 => {
                         info!("stats dump: {}", stats.aggregate());
+                    }
+                    SIGUSR2 => {
+                        let rc = route_config.read().unwrap();
+                        info!("config dump:\n{}", *rc);
                     }
                     SIGINT | SIGTERM => {
                         systemd_notify!(sd_notify::NotifyState::Stopping);
