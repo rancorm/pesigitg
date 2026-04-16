@@ -10,6 +10,7 @@ use std::time::Instant;
 
 use log::{debug, error, info, warn};
 use pesigitg_common::DEFAULT_ROUTE_CONFIG;
+use sd_notify::NotifyState;
 
 use crate::args::Args;
 use crate::neigh;
@@ -22,7 +23,11 @@ pub(crate) fn reload_config(args: &mut Args, route_config: &Arc<RwLock<ConfigTab
     debug!("reload_config: starting");
     let reload_start = Instant::now();
 
-    systemd_notify!(sd_notify::NotifyState::Reloading);
+    // Pair RELOADING=1 with MONOTONIC_USEC so systemd can track reload duration.
+    match NotifyState::monotonic_usec_now() {
+        Ok(ts) => { systemd_notify!(NotifyState::Reloading, ts); }
+        Err(_) => { systemd_notify!(NotifyState::Reloading); }
+    }
 
     if let Some(ref path) = args.config.clone() {
         match FileConfig::from_file(path) {

@@ -286,6 +286,26 @@ fn main() -> Result<()> {
         // Retry MAC resolution and run health probes.
         check_and_rebuild(&route_config, &mut health);
 
+        // Detect unexpected worker thread exits. If any AF_XDP worker
+        // has terminated without the shutdown flag being set, the
+        // daemon can no longer service its assigned NIC queue — escalate
+        // to a full shutdown so systemd sees the failure instead of a
+        // silent watchdog heartbeat.
+        let dead = workers.dead_queues();
+        if !dead.is_empty() {
+            error!("worker thread(s) exited unexpectedly: queues={:?}", dead);
+
+            systemd_notify!(
+                sd_notify::NotifyState::Stopping,
+                sd_notify::NotifyState::Status("worker thread exited unexpectedly"),
+            );
+
+            sig_handle.close();
+            workers.shutdown();
+
+            return Err(anyhow!("worker thread(s) exited unexpectedly: {:?}", dead));
+        }
+
         systemd_notify!(sd_notify::NotifyState::Watchdog);
     }
 

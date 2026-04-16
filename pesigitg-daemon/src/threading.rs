@@ -114,9 +114,14 @@ fn pin_to_core(core_id: usize) -> std::io::Result<()> {
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
 }
 
+struct Worker {
+    queue_id: u32,
+    handle: JoinHandle<()>,
+}
+
 /// A pool of AF_XDP worker threads, one per NIC queue.
 pub struct WorkerPool {
-    handles: Vec<JoinHandle<()>>,
+    workers: Vec<Worker>,
     shutdown: Arc<AtomicBool>,
 }
 
@@ -134,7 +139,7 @@ impl WorkerPool {
         shutdown: Arc<AtomicBool>,
         stats: Arc<StatsTable>,
     ) -> Self {
-        let mut handles = Vec::with_capacity(threads.len());
+        let mut workers = Vec::with_capacity(threads.len());
 
         for (worker_idx, tc) in threads.into_iter().enumerate() {
             let shutdown = Arc::clone(&shutdown);
@@ -142,6 +147,7 @@ impl WorkerPool {
             let ebpf = Arc::clone(&ebpf);
             let stats = Arc::clone(&stats);
             let interface = interface.to_owned();
+            let queue_id = tc.queue_id;
 
             let handle = thread::Builder::new()
                 .name(format!("xdp-q{}", tc.queue_id))
@@ -165,18 +171,31 @@ impl WorkerPool {
                 })
                 .expect("failed to spawn worker thread");
 
-            handles.push(handle);
+            workers.push(Worker { queue_id, handle });
         }
 
-        WorkerPool { handles, shutdown }
+        WorkerPool { workers, shutdown }
+    }
+
+    /// Queue IDs of worker threads that have exited.
+    ///
+    /// The shutdown flag being set is the normal exit path; callers
+    /// should only treat a non-empty result as unexpected when shutdown
+    /// has not been requested.
+    pub fn dead_queues(&self) -> Vec<u32> {
+        self.workers
+            .iter()
+            .filter(|w| w.handle.is_finished())
+            .map(|w| w.queue_id)
+            .collect()
     }
 
     /// Signal all workers to stop and wait for them to finish.
     pub fn shutdown(&mut self) {
         self.shutdown.store(true, Ordering::Relaxed);
 
-        for handle in self.handles.drain(..) {
-            let _ = handle.join();
+        for w in self.workers.drain(..) {
+            let _ = w.handle.join();
         }
     }
 }
