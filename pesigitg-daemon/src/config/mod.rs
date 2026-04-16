@@ -73,11 +73,36 @@ pub(crate) fn reload_config(args: &mut Args, route_config: &Arc<RwLock<ConfigTab
         }
     }
 
-    notify_ready(&format!(
-        "listening on {} ports {:?}", args.interface, args.ports
-    ));
+    notify_ready(&build_status(args, &route_config.read().unwrap()));
 
     debug!("reload_config: complete in {:.2?}", reload_start.elapsed());
+}
+
+/// Build a single-line status string for systemd `STATUS=`.
+///
+/// Surfaces the listening interface/ports/queues plus live backend
+/// health so `systemctl status pesigitgd` reflects runtime state.
+pub(crate) fn build_status(args: &Args, rc: &ConfigTable) -> String {
+    let mut total = 0usize;
+    let mut healthy = 0usize;
+    let mut draining = 0usize;
+
+    for config in rc.configs() {
+        for s in &config.servers {
+            total += 1;
+            if s.healthy { healthy += 1; }
+            if s.draining { draining += 1; }
+        }
+    }
+
+    let mut out = format!(
+        "{} {:?} q={}; backends {}/{} healthy",
+        args.interface, args.ports, args.queues, healthy, total,
+    );
+    if draining > 0 {
+        out.push_str(&format!(", {draining} draining"));
+    }
+    out
 }
 
 /// Log a warning for each server marked as draining.

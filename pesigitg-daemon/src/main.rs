@@ -31,7 +31,7 @@ use anyhow::{anyhow, ensure, Result};
 use pesigitg_common::{PID_FILE, DEFAULT_ROUTE_CONFIG, current_pid, exit};
 
 use args::parse_args;
-use config::{log_draining_servers, reload_config};
+use config::{build_status, log_draining_servers, reload_config};
 use health::HealthChecker;
 use config::route::ConfigTable;
 use pidfile::PidFile;
@@ -193,11 +193,8 @@ fn main() -> Result<()> {
     );
     debug!("worker pool spawned: T+{:.2?}", epoch.elapsed());
 
-    // Notify systemd that we're ready with a status string
-    notify_ready(&format!(
-        "listening on {} ports {:?}, queues: {}",
-        args.interface, args.ports, args.queues
-    ));
+    // Notify systemd that we're ready with a live status string.
+    notify_ready(&build_status(&args, &route_config.read().unwrap()));
 
     // Health checker probes backends on the first configured port.
     let mut health = HealthChecker::new(args.ports[0])?;
@@ -283,8 +280,14 @@ fn main() -> Result<()> {
 
         prev_stats = current;
 
-        // Retry MAC resolution and run health probes.
-        check_and_rebuild(&route_config, &mut health);
+        // Retry MAC resolution and run health probes. When any backend
+        // state changes, refresh the systemd STATUS= string so
+        // `systemctl status` reflects current health counts.
+        if check_and_rebuild(&route_config, &mut health) {
+            let rc = route_config.read().unwrap();
+            let status = build_status(&args, &rc);
+            systemd_notify!(sd_notify::NotifyState::Status(&status));
+        }
 
         // Detect unexpected worker thread exits. If any AF_XDP worker
         // has terminated without the shutdown flag being set, the
@@ -312,7 +315,9 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn check_and_rebuild(route_config: &RwLock<ConfigTable>, health: &mut HealthChecker) {
+/// Returns `true` if any backend state changed (MAC resolved, health
+/// flipped, etc.), i.e. the caller should refresh systemd's STATUS=.
+fn check_and_rebuild(route_config: &RwLock<ConfigTable>, health: &mut HealthChecker) -> bool {
     let mut rc = route_config.write().unwrap();
     let mut rebuild = false;
 
@@ -337,4 +342,6 @@ fn check_and_rebuild(route_config: &RwLock<ConfigTable>, health: &mut HealthChec
 
         rc.rebuild_fallback_servers();
     }
+
+    rebuild
 }
