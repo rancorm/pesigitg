@@ -232,7 +232,7 @@ fn main() -> Result<()> {
                     }
                     SIGUSR2 => {
                         let rc = route_config.read().unwrap();
-                        info!("config dump:\n{}", *rc);
+                        info!("config dump:\n{}{}", args, *rc);
                     }
                     SIGINT | SIGTERM => {
                         systemd_notify!(sd_notify::NotifyState::Stopping);

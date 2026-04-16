@@ -130,7 +130,7 @@ the daemon with the stable toolchain, passing the eBPF object path through the
 |--------|--------|
 | `SIGHUP` | Reload daemon and route configuration, re-resolve server MACs, and reset health check backoff timers so all backends are re-probed on the next cycle. |
 | `SIGUSR1` | Dump traffic statistics (packet counters, routing decisions) to the log. |
-| `SIGUSR2` | Dump the full runtime config to the log: active config slots, per-server IP/MAC/health/drain status, fallback pool membership, and retry settings. |
+| `SIGUSR2` | Dump the full runtime config to the log: daemon args (interface, ports, queues, config paths), active config slots, per-server IP/MAC/health/drain status, fallback pool membership, and retry settings. |
 | `SIGINT` / `SIGTERM` | Graceful shutdown — stop all worker threads, then exit. |
 
 ```sh
