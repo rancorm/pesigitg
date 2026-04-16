@@ -12,6 +12,10 @@ Restart=on-failure
 RestartSec=5
 WatchdogSec=30
 
+# /run/pesigitg/ for the optional JSON status socket (status_socket = ...)
+RuntimeDirectory=pesigitg
+RuntimeDirectoryMode=0755
+
 # Security hardening
 NoNewPrivileges=yes
 ProtectSystem=strict

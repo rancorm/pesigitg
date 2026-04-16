@@ -16,6 +16,7 @@ pub struct Args {
     pub queues: u32,
     pub config: Option<PathBuf>,
     pub routeconfig: Option<PathBuf>,
+    pub status_socket: Option<PathBuf>,
     #[cfg(debug_assertions)]
     pub ebpf_obj: Option<PathBuf>,
     pub foreground: bool,
@@ -35,6 +36,10 @@ impl fmt::Display for Args {
         match &self.routeconfig {
             Some(p) => writeln!(f, "  route config:   {}", p.display())?,
             None => writeln!(f, "  route config:   (default)")?,
+        }
+        match &self.status_socket {
+            Some(p) => writeln!(f, "  status socket:  {}", p.display())?,
+            None => writeln!(f, "  status socket:  (disabled)")?,
         }
         #[cfg(debug_assertions)]
         match &self.ebpf_obj {
@@ -68,6 +73,7 @@ pub fn parse_args() -> Result<Args> {
             -i, --interface <NAME>    Network interface [default: {DEFAULT_INTF}]\n  \
             -c, --config <PATH>       Daemon config file path\n  \
             -q, --queues <NUM>        Number of NIC queues [default: 1]\n  \
+            -s, --status-socket <PATH> Unix-domain socket for JSON status API (disabled if unset)\n  \
             -f, --foreground          Run in foreground (don't daemonize)\n  \
             -V, --version             Print version\
         ", PROC_NAME, TAGLINE, env!("CARGO_PKG_VERSION"));
@@ -87,6 +93,7 @@ pub fn parse_args() -> Result<Args> {
     let config: Option<PathBuf> = pargs.opt_value_from_str(["-c", "--config"])?;
     let interface: Option<String> = pargs.opt_value_from_str(["-i", "--interface"])?;
     let queues: Option<u32> = pargs.opt_value_from_str(["-q", "--queues"])?;
+    let status_socket: Option<PathBuf> = pargs.opt_value_from_str(["-s", "--status-socket"])?;
 
     // Collect all -p / --port values
     let mut ports = Vec::new();
@@ -128,6 +135,8 @@ pub fn parse_args() -> Result<Args> {
         queues,
         config,
         routeconfig: file_config.as_ref().and_then(|fc| fc.route_config.clone()),
+        status_socket: status_socket
+            .or_else(|| file_config.as_ref().and_then(|fc| fc.status_socket.clone())),
         #[cfg(debug_assertions)]
         ebpf_obj,
         foreground,

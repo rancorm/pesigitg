@@ -16,6 +16,7 @@ pub struct FileConfig {
     pub interface: String,
     pub queues: u32,
     pub route_config: Option<PathBuf>,
+    pub status_socket: Option<PathBuf>,
 }
 
 impl FileConfig {
@@ -33,6 +34,7 @@ impl FileConfig {
         let mut interface = DEFAULT_INTF.to_string();
         let mut queues: u32 = DEFAULT_QUEUES;
         let mut route_config: Option<PathBuf> = None;
+        let mut status_socket: Option<PathBuf> = None;
 
         for line in content.lines() {
             let line = line.trim();
@@ -59,12 +61,18 @@ impl FileConfig {
                             p
                         });
                     }
+                    "status_socket" => {
+                        let s = v.trim();
+                        if !s.is_empty() {
+                            status_socket = Some(PathBuf::from(s));
+                        }
+                    }
                     _ => {}
                 }
             }
         }
 
-        Ok(FileConfig { ports, interface, queues, route_config })
+        Ok(FileConfig { ports, interface, queues, route_config, status_socket })
     }
 }
 
@@ -85,6 +93,11 @@ impl fmt::Display for FileConfig {
             .as_deref()
             .and_then(|p| p.to_str())
             .unwrap_or("<none>"))?;
+        writeln!(f, "  status socket: {}",
+            self.status_socket
+            .as_deref()
+            .and_then(|p| p.to_str())
+            .unwrap_or("<disabled>"))?;
 
         Ok(())
     }
@@ -101,6 +114,7 @@ mod tests {
             interface: "eth0".to_string(),
             queues: 4,
             route_config: None,
+            status_socket: None,
         };
 
         assert_eq!(config.ports, vec![443, 8443]);
@@ -115,6 +129,7 @@ mod tests {
             interface: "enp1s0f0".to_string(),
             queues: 1,
             route_config: None,
+            status_socket: None,
         };
         
         assert_eq!(config.ports.len(), 1);
@@ -128,6 +143,7 @@ mod tests {
             interface: "lo".to_string(),
             queues: 0,
             route_config: None,
+            status_socket: None,
         };
         
         assert!(config.ports.is_empty());
@@ -141,6 +157,7 @@ mod tests {
             interface: "eth0".to_string(),
             queues: 8,
             route_config: None,
+            status_socket: None,
         };
         
         assert_eq!(config.ports.len(), 101);
@@ -154,6 +171,7 @@ mod tests {
             interface: "eth0".to_string(),
             queues: 1,
             route_config: None,
+            status_socket: None,
         };
         
         assert_eq!(*config.ports.first().unwrap(), 0);
@@ -168,6 +186,7 @@ mod tests {
                 interface: name.to_string(),
                 queues: 1,
                 route_config: None,
+                status_socket: None,
             };
             
             assert_eq!(config.interface, name);
@@ -181,6 +200,7 @@ mod tests {
             interface: "eth0".to_string(),
             queues: 128,
             route_config: None,
+            status_socket: None,
         };
         
         assert_eq!(config.queues, 128);
@@ -193,6 +213,7 @@ mod tests {
             interface: "eth0".to_string(),
             queues: 4,
             route_config: None,
+            status_socket: None,
         };
         
         let mut cloned = config.clone();
@@ -219,6 +240,7 @@ mod tests {
             interface: "eth0".to_string(),
             queues: 4,
             route_config: None,
+            status_socket: None,
         };
         
         let debug = format!("{:?}", config);
@@ -236,6 +258,7 @@ mod tests {
             interface: "eth0".to_string(),
             queues: 2,
             route_config: None,
+            status_socket: None,
         };
         
         let pretty = format!("{:#?}", config);

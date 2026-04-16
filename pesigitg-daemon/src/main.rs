@@ -14,6 +14,7 @@ mod pidfile;
 mod quic;
 mod retry;
 mod stats;
+mod status_api;
 mod threading;
 mod utils;
 mod xsk;
@@ -36,6 +37,7 @@ use health::HealthChecker;
 use config::route::ConfigTable;
 use pidfile::PidFile;
 use stats::{Snapshot, StatsTable};
+use status_api::StatusApi;
 use threading::{get_hw_queues, plan_threads, WorkerPool};
 use utils::{
     daemonize,
@@ -50,7 +52,7 @@ use utils::{
 const LOOP_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn main() -> Result<()> {
-    let mut args = parse_args()?;
+    let args = parse_args()?;
     let epoch = Instant::now();
 
     // To be, or not to be a daemon.
@@ -200,6 +202,25 @@ fn main() -> Result<()> {
     let mut health = HealthChecker::new(args.ports[0])?;
     debug!("health checker ready: T+{:.2?}", epoch.elapsed());
 
+    // Wrap Args for shared read access from the status API and locked
+    // mutation from the SIGHUP reload path. Init is complete at this
+    // point, so nothing below indexes into `args` directly.
+    let args = Arc::new(RwLock::new(args));
+
+    // Optional JSON status API on a Unix-domain socket. Enabled when
+    // `status_socket = /path` is set in the daemon config (or via
+    // --status-socket). Bind failure is fatal.
+    let mut status_api = {
+        let path = args.read().unwrap().status_socket.clone();
+        path.map(|p| StatusApi::spawn(
+            p,
+            Arc::clone(&args),
+            Arc::clone(&route_config),
+            Arc::clone(&stats),
+            epoch,
+        )).transpose()?
+    };
+
     // Poll for signals with a timeout to allow watchdog keepalives
     let mut prev_stats = Snapshot::default();
     let mut draining_had_traffic = false;
@@ -221,15 +242,16 @@ fn main() -> Result<()> {
 
                 match sig {
                     SIGHUP => {
-                        reload_config(&mut args, &route_config);
+                        reload_config(&args, &route_config);
                         health.reset_backoff();
                     }
                     SIGUSR1 => {
                         info!("stats dump: {}", stats.aggregate());
                     }
                     SIGUSR2 => {
+                        let a = args.read().unwrap();
                         let rc = route_config.read().unwrap();
-                        info!("config dump:\n{}{}", args, *rc);
+                        info!("config dump:\n{}{}", *a, *rc);
                     }
                     SIGINT | SIGTERM => {
                         systemd_notify!(sd_notify::NotifyState::Stopping);
@@ -237,6 +259,7 @@ fn main() -> Result<()> {
                         info!("received signal {}, shutting down", sig);
 
                         sig_handle.close();
+                        if let Some(api) = status_api.as_mut() { api.shutdown(); }
                         workers.shutdown();
 
                         info!("all workers stopped");
@@ -284,8 +307,9 @@ fn main() -> Result<()> {
         // state changes, refresh the systemd STATUS= string so
         // `systemctl status` reflects current health counts.
         if check_and_rebuild(&route_config, &mut health) {
+            let a = args.read().unwrap();
             let rc = route_config.read().unwrap();
-            let status = build_status(&args, &rc);
+            let status = build_status(&a, &rc);
             systemd_notify!(sd_notify::NotifyState::Status(&status));
         }
 
@@ -304,6 +328,7 @@ fn main() -> Result<()> {
             );
 
             sig_handle.close();
+            if let Some(api) = status_api.as_mut() { api.shutdown(); }
             workers.shutdown();
 
             return Err(anyhow!("worker thread(s) exited unexpectedly: {:?}", dead));

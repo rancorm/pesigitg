@@ -19,7 +19,7 @@ use crate::utils::{notify_ready, systemd_notify};
 use daemon::FileConfig;
 use route::ConfigTable;
 
-pub(crate) fn reload_config(args: &mut Args, route_config: &Arc<RwLock<ConfigTable>>) {
+pub(crate) fn reload_config(args: &Arc<RwLock<Args>>, route_config: &Arc<RwLock<ConfigTable>>) {
     debug!("reload_config: starting");
     let reload_start = Instant::now();
 
@@ -29,16 +29,18 @@ pub(crate) fn reload_config(args: &mut Args, route_config: &Arc<RwLock<ConfigTab
         Err(_) => { systemd_notify!(NotifyState::Reloading); }
     }
 
-    if let Some(ref path) = args.config.clone() {
+    let config_path = args.read().unwrap().config.clone();
+    if let Some(ref path) = config_path {
         match FileConfig::from_file(path) {
             Ok(fc) => {
-                args.ports = fc.ports;
-                args.interface = fc.interface;
-                args.queues = fc.queues;
+                let mut a = args.write().unwrap();
+                a.ports = fc.ports;
+                a.interface = fc.interface;
+                a.queues = fc.queues;
 
                 info!(
                     "config reloaded: interface='{}', ports={:?}, queues={}",
-                    args.interface, args.ports, args.queues
+                    a.interface, a.ports, a.queues
                 );
             }
             Err(e) => {
@@ -47,9 +49,9 @@ pub(crate) fn reload_config(args: &mut Args, route_config: &Arc<RwLock<ConfigTab
         }
     }
 
-    let rc_path = args.routeconfig.as_ref();
+    let rc_path = args.read().unwrap().routeconfig.clone();
     let new_rc = match rc_path {
-        Some(path) => ConfigTable::from_file(path),
+        Some(ref path) => ConfigTable::from_file(path),
         None => ConfigTable::from_file(DEFAULT_ROUTE_CONFIG),
     };
 
@@ -73,7 +75,7 @@ pub(crate) fn reload_config(args: &mut Args, route_config: &Arc<RwLock<ConfigTab
         }
     }
 
-    notify_ready(&build_status(args, &route_config.read().unwrap()));
+    notify_ready(&build_status(&args.read().unwrap(), &route_config.read().unwrap()));
 
     debug!("reload_config: complete in {:.2?}", reload_start.elapsed());
 }
