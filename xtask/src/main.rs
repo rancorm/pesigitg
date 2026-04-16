@@ -5,7 +5,10 @@
 use std::string::String;
 use std::path::PathBuf;
 use std::process::{self, Command};
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+/// Emit a warning if the pinned eBPF nightly is older than this many days.
+const NIGHTLY_STALE_DAYS: i64 = 30;
 
 fn main() {
     let args: Vec<String> = std::env::args()
@@ -199,9 +202,44 @@ fn print_toolchain(ebpf_dir: &std::path::Path) {
         if let Some(comp) = components {
             eprint!(" ({})", comp);
         }
-        
+
         eprintln!();
+
+        if let Some(age) = nightly_age_days(&ch) {
+            if age > NIGHTLY_STALE_DAYS {
+                eprintln!(
+                    "[*] warning: pinned nightly is {} days old (> {}); \
+                     consider bumping {}",
+                    age, NIGHTLY_STALE_DAYS, ebpf_dir.join("rust-toolchain.toml").display()
+                );
+            }
+        }
     }
+}
+
+/// Days between today (UTC) and the date embedded in a
+/// `nightly-YYYY-MM-DD` channel string. `None` for non-dated channels
+/// (e.g. plain `"nightly"` or `"stable"`).
+fn nightly_age_days(channel: &str) -> Option<i64> {
+    let date = channel.strip_prefix("nightly-")?;
+    let mut parts = date.splitn(3, '-');
+    let y: i32 = parts.next()?.parse().ok()?;
+    let m: u32 = parts.next()?.parse().ok()?;
+    let d: u32 = parts.next()?.parse().ok()?;
+
+    let today = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs() as i64 / 86_400;
+    Some(today - days_from_civil(y, m, d))
+}
+
+/// Proleptic Gregorian days since 1970-01-01 (Howard Hinnant's algorithm).
+fn days_from_civil(y: i32, m: u32, d: u32) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y } as i64;
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = if m > 2 { m - 3 } else { m + 9 } as i64;
+    let doy = (153 * mp + 2) / 5 + d as i64 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
 }
 
 fn fmt_duration(d: std::time::Duration) -> String {
