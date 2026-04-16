@@ -52,6 +52,14 @@ impl StatusApi {
         stats: Arc<StatsTable>,
         epoch: Instant,
     ) -> Result<Self> {
+        // Ensure parent dir exists. Under systemd this is created by
+        // RuntimeDirectory=, but manual invocations bypass that.
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!("status socket: create parent {}", parent.display())
+            })?;
+        }
+
         // Remove stale socket left by a prior run (e.g. ungraceful exit).
         match std::fs::remove_file(&path) {
             Ok(_) => {}
