@@ -30,6 +30,7 @@ use serde_json::{json, Value};
 use crate::args::Args;
 use crate::config::route::{ConfigTable, Encryption, RouteConfig, Server};
 use crate::stats::{Snapshot, StatsTable};
+use crate::threading::WorkerHealth;
 use crate::utils::format_mac;
 
 const MAX_REQUEST_BYTES: usize = 256;
@@ -50,6 +51,7 @@ impl StatusApi {
         args: Arc<RwLock<Args>>,
         route_config: Arc<RwLock<ConfigTable>>,
         stats: Arc<StatsTable>,
+        worker_health: Arc<WorkerHealth>,
         epoch: Instant,
     ) -> Result<Self> {
         // Ensure parent dir exists. Under systemd this is created by
@@ -85,7 +87,10 @@ impl StatusApi {
             thread::Builder::new()
                 .name("status-api".into())
                 .spawn(move || {
-                    accept_loop(listener, shutdown, args, route_config, stats, epoch);
+                    accept_loop(
+                        listener, shutdown, args, route_config, stats,
+                        worker_health, epoch,
+                    );
                 })
                 .context("status socket: spawn accept thread")?
         };
@@ -128,6 +133,7 @@ fn accept_loop(
     args: Arc<RwLock<Args>>,
     route_config: Arc<RwLock<ConfigTable>>,
     stats: Arc<StatsTable>,
+    worker_health: Arc<WorkerHealth>,
     epoch: Instant,
 ) {
     let active = Arc::new(AtomicUsize::new(0));
@@ -159,12 +165,15 @@ fn accept_loop(
         let args = Arc::clone(&args);
         let route_config = Arc::clone(&route_config);
         let stats = Arc::clone(&stats);
+        let worker_health = Arc::clone(&worker_health);
         let active_c = Arc::clone(&active);
 
         let spawn = thread::Builder::new()
             .name("status-api-conn".into())
             .spawn(move || {
-                handle_connection(stream, &args, &route_config, &stats, epoch);
+                handle_connection(
+                    stream, &args, &route_config, &stats, &worker_health, epoch,
+                );
                 active_c.fetch_sub(1, Ordering::SeqCst);
             });
 
@@ -182,6 +191,7 @@ fn handle_connection(
     args: &Arc<RwLock<Args>>,
     route_config: &Arc<RwLock<ConfigTable>>,
     stats: &Arc<StatsTable>,
+    worker_health: &Arc<WorkerHealth>,
     epoch: Instant,
 ) {
     let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
@@ -218,7 +228,8 @@ fn handle_connection(
         .trim();
 
     let response = match request {
-        "GET /" => json!({"endpoints": ["/stats", "/config"]}),
+        "GET /" => json!({"endpoints": ["/health", "/stats", "/config"]}),
+        "GET /health" => build_health_response(worker_health, epoch),
         "GET /stats" => build_stats_response(stats, epoch),
         "GET /config" => build_config_response(args, route_config),
         _ => json!({"error": "unknown endpoint"}),
@@ -295,6 +306,30 @@ impl From<&Snapshot> for SnapshotView {
             },
         }
     }
+}
+
+// ----- Health DTO -----
+
+#[derive(Serialize)]
+struct HealthResponse {
+    status: &'static str,
+    uptime_secs: u64,
+    workers_alive: usize,
+    workers_expected: usize,
+}
+
+fn build_health_response(worker_health: &WorkerHealth, epoch: Instant) -> Value {
+    let alive = worker_health.alive.load(Ordering::Relaxed);
+    let expected = worker_health.expected;
+    let status = if alive >= expected { "ok" } else { "degraded" };
+
+    let resp = HealthResponse {
+        status,
+        uptime_secs: epoch.elapsed().as_secs(),
+        workers_alive: alive,
+        workers_expected: expected,
+    };
+    serde_json::to_value(&resp).unwrap_or(Value::Null)
 }
 
 fn build_stats_response(stats: &StatsTable, epoch: Instant) -> Value {

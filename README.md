@@ -167,14 +167,20 @@ When `status_socket` is set, the daemon exposes a read-only JSON API on a Unix-d
 | Endpoint | Response |
 |----------|----------|
 | `GET /` | List of available endpoints. |
+| `GET /health` | Lock-free liveness probe: `status` (`ok`/`degraded`), uptime, and worker alive/expected counts. Safe to poll at high frequency. |
 | `GET /stats` | Aggregated counters, per-retry breakdown, uptime. |
 | `GET /config` | Live daemon args and the full route table (encryption keys are never exposed — only the scheme name). |
 
 One request per connection. Under systemd the socket lives in `/run/pesigitg/` (auto-created by `RuntimeDirectory=`); manual invocations create the parent directory on bind.
 
 ```sh
+printf 'GET /health\n' | sudo nc -U /run/pesigitg/status.sock
 printf 'GET /stats\n'  | sudo nc -U /run/pesigitg/status.sock
 printf 'GET /config\n' | sudo nc -U /run/pesigitg/status.sock
+
+# Nagios/monit-friendly exit-code wrapper
+printf 'GET /health\n' | sudo nc -U /run/pesigitg/status.sock \
+  | jq -e '.status == "ok"' >/dev/null
 ```
 
 ## Network Configuration

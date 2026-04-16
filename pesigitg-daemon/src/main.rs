@@ -210,6 +210,7 @@ fn main() -> Result<()> {
     // Optional JSON status API on a Unix-domain socket. Enabled when
     // `status_socket = /path` is set in the daemon config (or via
     // --status-socket). Bind failure is fatal.
+    let worker_health = workers.health();
     let mut status_api = {
         let path = args.read().unwrap().status_socket.clone();
         path.map(|p| StatusApi::spawn(
@@ -217,6 +218,7 @@ fn main() -> Result<()> {
             Arc::clone(&args),
             Arc::clone(&route_config),
             Arc::clone(&stats),
+            Arc::clone(&worker_health),
             epoch,
         )).transpose()?
     };
@@ -318,6 +320,7 @@ fn main() -> Result<()> {
         // daemon can no longer service its assigned NIC queue — escalate
         // to a full shutdown so systemd sees the failure instead of a
         // silent watchdog heartbeat.
+        workers.refresh_health();
         let dead = workers.dead_queues();
         if !dead.is_empty() {
             error!("worker thread(s) exited unexpectedly: queues={:?}", dead);

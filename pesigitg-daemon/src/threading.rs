@@ -4,7 +4,7 @@
 
 use std::ffi::CString;
 use std::os::fd::BorrowedFd;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -119,10 +119,17 @@ struct Worker {
     handle: JoinHandle<()>,
 }
 
+/// Lock-free liveness summary for the status API.
+pub struct WorkerHealth {
+    pub expected: usize,
+    pub alive: AtomicUsize,
+}
+
 /// A pool of AF_XDP worker threads, one per NIC queue.
 pub struct WorkerPool {
     workers: Vec<Worker>,
     shutdown: Arc<AtomicBool>,
+    health: Arc<WorkerHealth>,
 }
 
 impl WorkerPool {
@@ -174,7 +181,12 @@ impl WorkerPool {
             workers.push(Worker { queue_id, handle });
         }
 
-        WorkerPool { workers, shutdown }
+        let health = Arc::new(WorkerHealth {
+            expected: workers.len(),
+            alive: AtomicUsize::new(workers.len()),
+        });
+
+        WorkerPool { workers, shutdown, health }
     }
 
     /// Queue IDs of worker threads that have exited.
@@ -188,6 +200,18 @@ impl WorkerPool {
             .filter(|w| w.handle.is_finished())
             .map(|w| w.queue_id)
             .collect()
+    }
+
+    /// Shared liveness handle for the status API (lock-free reads).
+    pub fn health(&self) -> Arc<WorkerHealth> {
+        Arc::clone(&self.health)
+    }
+
+    /// Publish the current alive-worker count to the shared health handle.
+    /// Call once per main-loop iteration.
+    pub fn refresh_health(&self) {
+        let alive = self.workers.iter().filter(|w| !w.handle.is_finished()).count();
+        self.health.alive.store(alive, Ordering::Relaxed);
     }
 
     /// Signal all workers to stop and wait for them to finish.
