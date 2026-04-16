@@ -144,6 +144,39 @@ kill -USR1 $(pidof pesigitgd)
 kill -USR2 $(pidof pesigitgd)
 ```
 
+## Daemon Configuration
+
+CLI flags and config-file keys are equivalent; CLI wins on conflict. The config file (`-c/--config`) uses `key = value` lines with `#` comments.
+
+| Flag | Config key | Default | Description |
+|------|------------|---------|-------------|
+| `-i, --interface <NAME>` | `interface` | `eth0` | Data-plane interface to attach XDP to. |
+| `-p, --port <PORT>` | `port` | — | UDP port to steer to user space. Repeat for multiple ports. |
+| `-q, --queues <NUM>` | `queues` | `1` | AF_XDP worker threads (one per NIC queue). |
+| `-c, --config <PATH>` | — | — | Path to this daemon config file. |
+| — | `route_config` | `/etc/pesigitg/lb.toml` | Route table (backends, CID encryption). Relative paths resolve against the daemon config's directory. |
+| `-s, --status-socket <PATH>` | `status_socket` | unset (disabled) | Unix-domain socket for the JSON status API. |
+| `-f, --foreground` | — | false | Don't daemonize; log to stderr. Implicit under systemd. |
+
+See `contrib/etc/pesigitg/enp2s0f0.conf` for an example.
+
+## Status API
+
+When `status_socket` is set, the daemon exposes a read-only JSON API on a Unix-domain socket (mode `0660`, root-owned). Access is gated by filesystem permissions — add trusted users to the socket's group if you want non-root reads.
+
+| Endpoint | Response |
+|----------|----------|
+| `GET /` | List of available endpoints. |
+| `GET /stats` | Aggregated counters, per-retry breakdown, uptime. |
+| `GET /config` | Live daemon args and the full route table (encryption keys are never exposed — only the scheme name). |
+
+One request per connection. Under systemd the socket lives in `/run/pesigitg/` (auto-created by `RuntimeDirectory=`); manual invocations create the parent directory on bind.
+
+```sh
+printf 'GET /stats\n'  | sudo nc -U /run/pesigitg/status.sock
+printf 'GET /config\n' | sudo nc -U /run/pesigitg/status.sock
+```
+
 ## Network Configuration
 
 Pesigitg uses Direct Server Return (DSR): the load balancer forwards packets to
