@@ -29,7 +29,7 @@ use log::{error, warn, info, debug};
 use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM, SIGUSR1, SIGUSR2};
 use signal_hook::iterator::Signals;
 use anyhow::{anyhow, ensure, Result};
-use pesigitg_common::{PID_FILE, DEFAULT_ROUTE_CONFIG, current_pid, exit};
+use pesigitg_common::{pid_file, DEFAULT_ROUTE_CONFIG, current_pid, exit};
 
 use args::parse_args;
 use config::{build_status, log_draining_servers, reload_config};
@@ -68,7 +68,7 @@ fn main() -> Result<()> {
 
     // PID file (unnecessary under systemd) and signal hooks
     let pidfile = if !running_under_systemd() {
-        Some(PidFile::create(PID_FILE.as_ref())?)
+        Some(PidFile::create(&pid_file(&args.interface))?)
     } else {
         None
     };

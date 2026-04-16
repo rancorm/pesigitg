@@ -8,7 +8,7 @@ pub const DEFAULT_PORT: u16 = 443;
 pub const DEFAULT_INTF: &str = "eth0";
 pub const DEFAULT_QUEUES: u32 = 1;
 pub const DEFAULT_ROUTE_CONFIG: &str = "/etc/pesigitg/lb.toml";
-pub const PID_FILE: &str = "/var/run/pesigitgd.pid";
+pub const PID_DIR: &str = "/var/run";
 pub const PROC_NAME: &str = "pesigitgd";
 pub const MAX_CONFIG_SIZE: u64 = 1_000_000;
 pub const MAX_QUEUES: u32 = 256;
@@ -55,6 +55,14 @@ pub const MAX_IPV6_EXT_HDRS: usize = 6;
 #[cfg(feature = "std")]
 #[allow(non_upper_case_globals)]
 pub const current_pid: fn() -> u32 = std::process::id;
+
+/// Per-interface PID file path: `/var/run/pesigitgd-<iface>.pid`.
+/// Lets multiple manual instances (different `-i`) coexist without
+/// colliding on a single PID file.
+#[cfg(feature = "std")]
+pub fn pid_file(iface: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(format!("{}/{}-{}.pid", PID_DIR, PROC_NAME, iface))
+}
 
 #[cfg(feature = "std")]
 #[macro_export]
