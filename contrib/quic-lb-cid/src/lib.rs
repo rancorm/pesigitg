@@ -50,7 +50,7 @@ impl QuicLbCidGenerator {
     ) -> Self {
         assert!(config_id <= 6, "config_id must be 0-6");
         assert!(!server_id.is_empty() && server_id.len() <= 15);
-        assert!(nonce_length >= 4 && nonce_length <= 18);
+        assert!((4..=18).contains(&nonce_length));
         assert!(server_id.len() + nonce_length as usize <= 19);
 
         Self {

@@ -56,7 +56,7 @@ struct RawServer {
 
 fn hex_decode(s: &str) -> Result<Vec<u8>> {
     let s = s.trim();
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         bail!("odd number of hex characters");
     }
     (0..s.len())
@@ -93,7 +93,7 @@ fn resolve_config(path: &str, server_id_hex: &str) -> Result<CidGenParams> {
         }
 
         let has_server = raw.servers.iter().any(|s| {
-            hex_decode(&s.id).map_or(false, |id| id == server_id)
+            hex_decode(&s.id).is_ok_and(|id| id == server_id)
         });
         if !has_server {
             continue;
