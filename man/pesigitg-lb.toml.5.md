@@ -85,8 +85,8 @@ before they reach backends.
     secret and should be treated like the CID encryption key.
 
 **token_lifetime_secs** = *N*
-:   How long a minted token remains valid, in seconds. Must be 1-3600.
-    Default: *10*.
+:   How long a minted token remains valid, in seconds. Must be 1-86400
+    (24 h). Default: *10*.
 
 **mode** = *"observe"* | *"always"* | *"load"*
 :   Policy for when Retry packets are emitted. Default: *"observe"*.
@@ -95,9 +95,11 @@ before they reach backends.
       `retry_*` counters, but never emit a Retry. Use this to
       validate the parser before going live.
     - **always** — every Initial without a valid token gets a Retry.
-    - **load** — emit Retry only when the Initial rate exceeds
-      **[retry.load] trigger_rate**. *(Not yet implemented; degrades
-      to observe.)*
+    - **load** — emit Retry only when the observed Initial rate
+      reaches **[retry.load] trigger_rate** packets per second. The
+      rate is measured across a shared 1-second sliding window;
+      valid-token forwards bypass the counter so legitimate spikes
+      don't self-trigger Retry.
 
 **ports** = *[443, 8443]*
 :   Optional list of UDP destination ports to scope Retry to. When
