@@ -154,7 +154,7 @@ CLI flags and config-file keys are equivalent; CLI wins on conflict. The config 
 | `-p, --port <PORT>` | `port` | — | UDP port to steer to user space. Repeat for multiple ports. |
 | `-q, --queues <NUM>` | `queues` | `1` | AF_XDP worker threads (one per NIC queue). |
 | `-c, --config <PATH>` | — | — | Path to this daemon config file. |
-| — | `route_config` | `/etc/pesigitg/lb.toml` | Route table (backends, CID encryption). Relative paths resolve against the daemon config's directory. |
+| — | `route_config` | `/etc/pesigitg/lb.toml` | Route table (backends, CID encryption, optional QUIC Retry service). Relative paths resolve against the daemon config's directory. |
 | `-s, --status-socket <PATH>` | `status_socket` | unset (disabled) | Unix-domain socket for the JSON status API. |
 | `-f, --foreground` | — | false | Don't daemonize; log to stderr. Implicit under systemd. |
 
@@ -186,6 +186,58 @@ printf 'GET /health\n' | sudo nc -U /run/pesigitg/status.sock \
 sudo contrib/ok.sh        # prints "ok", exit 0 when healthy
 sudo contrib/ok.sh -v     # same, but prints the full JSON
 ```
+
+## QUIC Retry
+
+Pesigitg can offload QUIC address validation from backends to the LB. Every
+incoming Initial is classified before the CID fast path: if the client
+hasn't yet proved it owns its source IP, the LB replies with a Retry
+packet carrying a signed token, and the client must echo that token on
+its next Initial. A spoofed-source Initial flood is therefore absorbed
+at the LB instead of having *N* backends each pay the validation cost.
+
+Tokens are HMAC-SHA256 over `(source IP, original DCID, mint timestamp)`
+using a 32-byte key. There is no per-connection state: a token is valid
+iff it verifies against that tuple and hasn't aged past
+`token_lifetime_secs`.
+
+### Modes
+
+| Mode | Behaviour |
+|------|-----------|
+| `observe` | Full classify path runs and `retry_*` counters advance, but no Retry is ever emitted. Use this to sanity-check the parser before going live. |
+| `always` | Every Initial without a valid token is Retried. |
+| `load` | Retry engages only when the observed Initial rate reaches **`[retry.load] trigger_rate`** packets per second. The rate counter is a shared 1-second sliding window ticked by every worker; valid-token forwards bypass it so legitimate spikes don't self-trigger Retry. |
+
+### Configuration
+
+Retry lives in the *route* config (`lb.toml`), not the daemon config —
+it shares the `RwLock` swap with the rest of the route table on `SIGHUP`.
+
+```toml
+# lb.toml
+[retry]
+enabled      = true
+token_key    = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+mode         = "load"                 # observe | always | load
+token_lifetime_secs = 10              # 1..=86400, default 10
+ports        = [443, 8443]            # optional; empty = every daemon port
+
+[retry.load]
+trigger_rate = 50000                  # required iff mode = "load"
+```
+
+Without a `[retry]` section the classifier short-circuits at zero
+hot-path cost. See **pesigitg-lb.toml(5)** for the full key reference
+and validation rules.
+
+### Observability
+
+`GET /stats` on the status socket returns a nested `retry` object:
+`initials_seen`, `issued`, `token_validated`, `token_invalid`,
+`token_expired`, `parse_error`. `SIGUSR1` dumps the same counters to
+the log; `SIGUSR2` dumps the live `[retry]` config (with the signing
+key redacted).
 
 ## Network Configuration
 
