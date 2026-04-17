@@ -181,6 +181,10 @@ printf 'GET /config\n' | sudo nc -U /run/pesigitg/status.sock
 # Nagios/monit-friendly exit-code wrapper
 printf 'GET /health\n' | sudo nc -U /run/pesigitg/status.sock \
   | jq -e '.status == "ok"' >/dev/null
+
+# …or use the bundled helper:
+sudo contrib/ok.sh        # prints "ok", exit 0 when healthy
+sudo contrib/ok.sh -v     # same, but prints the full JSON
 ```
 
 ## Network Configuration
@@ -258,6 +262,7 @@ Example configuration files, systemd units, and helper scripts.
 | `run.sh` | Developer convenience script. Builds and runs the daemon under `sudo` via `cargo xtask run`. Accepts a build mode (`release`/`debug`, default `release`) and interface name (default `eth0`) as positional arguments. |
 | `dns-rr.sh` | Generates HTTPS DNS resource records (RFC 9460) for advertising HTTP/3 support. Supports IP hints, non-standard ports, ECH, `--value-only` output for DNS providers, and `--query` to look up existing records via `dig`. |
 | `dsr-backend.sh` | Installs/removes DSR backend configuration (sysctl + netplan VIPs) on a backend server. |
+| `ok.sh` | Liveness probe: queries `/health` on the status socket and exits 0 when `status == "ok"`. Suitable for Nagios/monit/cron checks. Pass `-v` for the full JSON. |
 
 ## HTTPS DNS Records
 
