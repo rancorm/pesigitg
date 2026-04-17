@@ -666,7 +666,7 @@ fn parse_server(raw: &RawServer, expected_id_len: u8) -> Result<Server, RouteCon
 fn hex_decode(s: &str) -> Result<Vec<u8>, String> {
     let s = s.trim();
 
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return Err("odd number of hex characters".into());
     }
 

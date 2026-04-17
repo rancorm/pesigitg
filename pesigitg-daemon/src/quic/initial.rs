@@ -247,7 +247,7 @@ mod tests {
         write_varint(&mut out, token.len() as u64);
         out.extend_from_slice(token);
         write_varint(&mut out, payload_len);
-        out.extend(std::iter::repeat(0xaa).take(payload_len as usize));
+        out.extend(std::iter::repeat_n(0xaa, payload_len as usize));
         out
     }
 

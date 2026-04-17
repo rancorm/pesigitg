@@ -107,11 +107,11 @@ pub fn plan_threads(interface: &str, max_threads: Option<u32>) -> Vec<ThreadConf
 /// Pin the calling thread to a specific CPU core.
 fn pin_to_core(core_id: usize) -> std::io::Result<()> {
     let mut cpuset = CpuSet::new();
-    cpuset.set(core_id).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    cpuset.set(core_id).map_err(std::io::Error::other)?;
 
     // Pid::from_raw(0) means the calling thread
     sched_setaffinity(Pid::from_raw(0), &cpuset)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+        .map_err(std::io::Error::other)
 }
 
 struct Worker {
@@ -311,9 +311,9 @@ fn worker_loop(
 
         let mut batch_stats = BatchStats::new();
 
-        for i in 0..n {
+        for desc in rx_descs[..n].iter_mut() {
             let verdict = {
-                let mut data = unsafe { xsk.frame_mut(&mut rx_descs[i]) };
+                let mut data = unsafe { xsk.frame_mut(desc) };
 
                 // Retry fast path: if the classifier emits a Retry
                 // packet in place of the Initial, ship it straight to
@@ -325,7 +325,7 @@ fn worker_loop(
                 batch_stats.record_retry(retry_outcome, retry_detail);
                 match retry_outcome {
                     retry::datapath::Outcome::Emitted => {
-                        tx_batch.push(rx_descs[i]);
+                        tx_batch.push(*desc);
                         continue;
                     }
                     retry::datapath::Outcome::Forward | retry::datapath::Outcome::Skip => {}
@@ -336,28 +336,28 @@ fn worker_loop(
             match verdict {
                 Verdict::CidForward(config_id) => {
                     batch_stats.record_cid_forward(config_id);
-                    tx_batch.push(rx_descs[i]);
+                    tx_batch.push(*desc);
                 }
                 Verdict::CidForwardDraining(config_id) => {
                     batch_stats.record_cid_forward(config_id);
                     batch_stats.record_draining_forward();
-                    tx_batch.push(rx_descs[i]);
+                    tx_batch.push(*desc);
                 }
                 Verdict::FallbackForward => {
                     batch_stats.record_fallback_forward();
-                    tx_batch.push(rx_descs[i]);
+                    tx_batch.push(*desc);
                 }
                 Verdict::IcmpForward => {
                     batch_stats.record_icmp_forward();
-                    tx_batch.push(rx_descs[i]);
+                    tx_batch.push(*desc);
                 }
                 Verdict::CidUnroutable => {
                     batch_stats.record_cid_unroutable();
-                    recycle_batch.push(rx_descs[i]);
+                    recycle_batch.push(*desc);
                 }
                 Verdict::Pass => {
                     batch_stats.record_pass();
-                    recycle_batch.push(rx_descs[i]);
+                    recycle_batch.push(*desc);
                 }
             }
         }

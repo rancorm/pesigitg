@@ -52,7 +52,7 @@ fn first_cid_octet(quic: &[u8]) -> Option<u8> {
 
 /// Extract raw DCID bytes from a QUIC packet without validating the config
 /// rotation ID. Used for connection table lookups on unroutable packets.
-pub fn extract_raw_dcid<'a>(quic: &'a [u8], cid_length: u8) -> Option<&'a [u8]> {
+pub fn extract_raw_dcid(quic: &[u8], cid_length: u8) -> Option<&[u8]> {
     extract_dcid_bytes(quic, cid_length)
 }
 
@@ -63,7 +63,7 @@ pub fn extract_raw_dcid<'a>(quic: &'a [u8], cid_length: u8) -> Option<&'a [u8]> 
 /// to route the ICMP back to the correct backend.
 ///
 /// Returns `None` for short headers (no SCID) or truncated packets.
-pub fn extract_scid<'a>(quic: &'a [u8]) -> Option<&'a [u8]> {
+pub fn extract_scid(quic: &[u8]) -> Option<&[u8]> {
     // Must be a long header (bit 7 set).
     if quic.is_empty() || quic[0] & 0x80 == 0 {
         return None;
@@ -90,7 +90,7 @@ pub fn extract_scid<'a>(quic: &'a [u8]) -> Option<&'a [u8]> {
 }
 
 /// Common DCID byte extraction for both long and short headers.
-fn extract_dcid_bytes<'a>(quic: &'a [u8], cid_length: u8) -> Option<&'a [u8]> {
+fn extract_dcid_bytes(quic: &[u8], cid_length: u8) -> Option<&[u8]> {
     if quic.is_empty() {
         return None;
     }

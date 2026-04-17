@@ -87,7 +87,7 @@ impl fmt::Display for FileConfig {
             write!(f, " {}", port)?;
         }
 
-        writeln!(f, "")?; 
+        writeln!(f)?;
         writeln!(f, "  route config: {}",
             self.route_config
             .as_deref()

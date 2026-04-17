@@ -245,8 +245,8 @@ impl Snapshot {
     pub fn delta(&self, prev: &Snapshot) -> Snapshot {
         let mut cid_by_config = [0u64; 7];
 
-        for i in 0..7 {
-            cid_by_config[i] = self.cid_by_config[i].wrapping_sub(prev.cid_by_config[i]);
+        for (i, slot) in cid_by_config.iter_mut().enumerate() {
+            *slot = self.cid_by_config[i].wrapping_sub(prev.cid_by_config[i]);
         }
         
         Snapshot {

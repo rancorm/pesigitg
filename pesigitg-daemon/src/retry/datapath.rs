@@ -353,6 +353,7 @@ fn classify(
 /// descriptor length. Returns [`Outcome::Emitted`] on success or
 /// [`Outcome::Skip`] if building the response failed — the caller then
 /// runs the normal pipeline so the packet isn't silently dropped.
+#[allow(clippy::too_many_arguments)]
 fn emit(
     data: &mut DataMut<'_>,
     layout: &FrameLayout,
@@ -735,6 +736,7 @@ nonce_length = 13
             }
         }
 
+        #[allow(clippy::too_many_arguments)]
         fn emit_slice(
             &mut self,
             layout: &FrameLayout,

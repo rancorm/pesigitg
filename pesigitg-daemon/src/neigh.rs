@@ -101,7 +101,7 @@ impl Drop for NetlinkSocket {
 ///
 /// Servers with a statically configured MAC are left unchanged.
 /// A warning is logged for any server whose MAC cannot be resolved.
-pub fn resolve_macs(servers: &mut Vec<Server>) {
+pub fn resolve_macs(servers: &mut [Server]) {
     let to_resolve = servers.iter().filter(|s| s.mac.is_none()).count();
 
     if to_resolve == 0 {

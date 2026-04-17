@@ -74,8 +74,8 @@ pub fn interface_mac(interface: &str) -> std::io::Result<[u8; 6]> {
     }
 
     let mut mac = [0u8; 6];
-    for i in 0..6 {
-        mac[i] = ifr.ifr_hwaddr.sa_data[i] as u8;
+    for (i, b) in mac.iter_mut().enumerate() {
+        *b = ifr.ifr_hwaddr.sa_data[i] as u8;
     }
 
     Ok(mac)

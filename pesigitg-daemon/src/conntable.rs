@@ -103,18 +103,17 @@ impl ConnectionTable {
 
     /// Look up a MAC address by 4-tuple, falling back to DCID.
     pub fn lookup(&self, flow: &FlowKey, dcid: Option<&DcidKey>, now: Instant) -> Option<[u8; 6]> {
-        if let Some(entry) = self.by_flow.get(flow) {
-            if !entry.is_expired(now) {
-                return Some(entry.mac);
-            }
+        if let Some(entry) = self.by_flow.get(flow)
+            && !entry.is_expired(now)
+        {
+            return Some(entry.mac);
         }
 
-        if let Some(key) = dcid {
-            if let Some(entry) = self.by_dcid.get(key) {
-                if !entry.is_expired(now) {
-                    return Some(entry.mac);
-                }
-            }
+        if let Some(key) = dcid
+            && let Some(entry) = self.by_dcid.get(key)
+            && !entry.is_expired(now)
+        {
+            return Some(entry.mac);
         }
 
         None

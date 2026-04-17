@@ -109,25 +109,23 @@ fn process_udp(
     if let Some((dcid, config)) = cid::lookup_config(quic, table) {
         if let Some(server_idx) = cid::resolve_server_idx(dcid, config) {
             let server = &config.servers[server_idx];
-            if server.healthy {
-                if let Some(mac) = server.mac {
-                    // Record DCID mapping for NAT rebinding resilience.
-                    conn.record_dcid(DcidKey::from_slice(dcid), mac, now);
-                    frame[..6].copy_from_slice(&mac);
-                    frame[6..12].copy_from_slice(local_mac);
-                    return if server.draining {
-                        Verdict::CidForwardDraining(config.config_id)
-                    } else {
-                        Verdict::CidForward(config.config_id)
-                    };
-                }
+            if server.healthy && let Some(mac) = server.mac {
+                // Record DCID mapping for NAT rebinding resilience.
+                conn.record_dcid(DcidKey::from_slice(dcid), mac, now);
+                frame[..6].copy_from_slice(&mac);
+                frame[6..12].copy_from_slice(local_mac);
+                return if server.draining {
+                    Verdict::CidForwardDraining(config.config_id)
+                } else {
+                    Verdict::CidForward(config.config_id)
+                };
             }
         }
         // Only treat as a stale/removed server if the CID is the right
         // length for this config. A too-short CID means this is a
         // client-generated Initial whose random first byte happened to
         // match our config_id bits — fall through to fallback routing.
-        if dcid.len() >= 1 + config.cid_payload_length() as usize {
+        if dcid.len() > config.cid_payload_length() as usize {
             return Verdict::CidUnroutable;
         }
     }
@@ -174,20 +172,18 @@ fn process_icmp(
     let inner_quic = &frame[inner_quic_offset..];
 
     // Strategy 1: Extract SCID from inner long header and route via CID.
-    if let Some(scid) = cid::extract_scid(inner_quic) {
-        if !scid.is_empty() {
-            let config_id = scid[0] >> 5;
-            if config_id != 7 {
-                if let Some(config) = table.get(config_id) {
-                    if let Some(server_idx) = cid::resolve_server_idx(scid, config) {
-                        if let Some(mac) = config.servers[server_idx].mac {
-                            frame[..6].copy_from_slice(&mac);
-                            frame[6..12].copy_from_slice(local_mac);
-                            return Verdict::IcmpForward;
-                        }
-                    }
-                }
-            }
+    if let Some(scid) = cid::extract_scid(inner_quic)
+        && !scid.is_empty()
+    {
+        let config_id = scid[0] >> 5;
+        if config_id != 7
+            && let Some(config) = table.get(config_id)
+            && let Some(server_idx) = cid::resolve_server_idx(scid, config)
+            && let Some(mac) = config.servers[server_idx].mac
+        {
+            frame[..6].copy_from_slice(&mac);
+            frame[6..12].copy_from_slice(local_mac);
+            return Verdict::IcmpForward;
         }
     }
 
