@@ -53,10 +53,6 @@ struct RawServer {
     id: String,
 }
 
-fn hex_decode(s: &str) -> Result<Vec<u8>> {
-    hex::decode(s).map_err(anyhow::Error::msg)
-}
-
 /// Resolved parameters for CID generation.
 struct CidGenParams {
     config_id: u8,
@@ -73,7 +69,8 @@ fn resolve_config(path: &str, server_id_hex: &str) -> Result<CidGenParams> {
     let file: ConfigFile = toml::from_str(&text)
         .with_context(|| format!("parsing config: {path}"))?;
 
-    let server_id = hex_decode(server_id_hex)
+    let server_id = hex::decode(server_id_hex)
+        .map_err(anyhow::Error::msg)
         .context("parsing --server-id")?;
 
     for raw in &file.configs {
@@ -82,7 +79,7 @@ fn resolve_config(path: &str, server_id_hex: &str) -> Result<CidGenParams> {
         }
 
         let has_server = raw.servers.iter().any(|s| {
-            hex_decode(&s.id).is_ok_and(|id| id == server_id)
+            hex::decode(&s.id).is_ok_and(|id| id == server_id)
         });
         if !has_server {
             continue;
@@ -90,8 +87,10 @@ fn resolve_config(path: &str, server_id_hex: &str) -> Result<CidGenParams> {
 
         let encryption = match &raw.key {
             None => Encryption::Plaintext,
-            Some(hex) => {
-                let key_bytes = hex_decode(hex).context("parsing key")?;
+            Some(key_hex) => {
+                let key_bytes = hex::decode(key_hex)
+                    .map_err(anyhow::Error::msg)
+                    .context("parsing key")?;
                 if key_bytes.len() != 16 {
                     bail!("key must be 16 bytes, got {}", key_bytes.len());
                 }
