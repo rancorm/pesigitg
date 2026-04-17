@@ -302,7 +302,7 @@ fn worker_loop(
             first_packet_logged = true;
         }
 
-        let config = config.read().unwrap();
+        let config = config.read().expect("lock poisoned");
 
         tx_batch.clear();
         recycle_batch.clear();

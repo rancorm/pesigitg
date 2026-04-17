@@ -196,7 +196,7 @@ fn main() -> Result<()> {
     debug!("worker pool spawned: T+{:.2?}", epoch.elapsed());
 
     // Notify systemd that we're ready with a live status string.
-    notify_ready(&build_status(&args, &route_config.read().unwrap()));
+    notify_ready(&build_status(&args, &route_config.read().expect("lock poisoned")));
 
     // Backends are probed on the first configured port only; see the
     // HEALTH CHECKING section of pesigitgd(8) for the rationale.
@@ -213,7 +213,7 @@ fn main() -> Result<()> {
     // --status-socket). Bind failure is fatal.
     let worker_health = workers.health();
     let mut status_api = {
-        let path = args.read().unwrap().status_socket.clone();
+        let path = args.read().expect("lock poisoned").status_socket.clone();
         path.map(|p| StatusApi::spawn(
             p,
             Arc::clone(&args),
@@ -252,8 +252,8 @@ fn main() -> Result<()> {
                         info!("stats dump: {}", stats.aggregate());
                     }
                     SIGUSR2 => {
-                        let a = args.read().unwrap();
-                        let rc = route_config.read().unwrap();
+                        let a = args.read().expect("lock poisoned");
+                        let rc = route_config.read().expect("lock poisoned");
                         info!("config dump:\n{}{}", *a, *rc);
                     }
                     SIGINT | SIGTERM => {
@@ -295,7 +295,7 @@ fn main() -> Result<()> {
         if delta.draining_forwarded > 0 {
             draining_had_traffic = true;
         } else if draining_had_traffic {
-            let rc = route_config.read().unwrap();
+            let rc = route_config.read().expect("lock poisoned");
 
             if rc.has_draining_servers() {
                 info!("all draining servers fully drained — safe to remove from config");
@@ -310,8 +310,8 @@ fn main() -> Result<()> {
         // state changes, refresh the systemd STATUS= string so
         // `systemctl status` reflects current health counts.
         if check_and_rebuild(&route_config, &mut health) {
-            let a = args.read().unwrap();
-            let rc = route_config.read().unwrap();
+            let a = args.read().expect("lock poisoned");
+            let rc = route_config.read().expect("lock poisoned");
             let status = build_status(&a, &rc);
             systemd_notify!(sd_notify::NotifyState::Status(&status));
         }
@@ -347,7 +347,7 @@ fn main() -> Result<()> {
 /// Returns `true` if any backend state changed (MAC resolved, health
 /// flipped, etc.), i.e. the caller should refresh systemd's STATUS=.
 fn check_and_rebuild(route_config: &RwLock<ConfigTable>, health: &mut HealthChecker) -> bool {
-    let mut rc = route_config.write().unwrap();
+    let mut rc = route_config.write().expect("lock poisoned");
     let mut rebuild = false;
 
     if rc.has_unresolved_macs() {

@@ -427,8 +427,8 @@ fn build_config_response(
     args: &Arc<RwLock<Args>>,
     route_config: &Arc<RwLock<ConfigTable>>,
 ) -> Value {
-    let a = args.read().unwrap();
-    let rc = route_config.read().unwrap();
+    let a = args.read().expect("lock poisoned");
+    let rc = route_config.read().expect("lock poisoned");
 
     let daemon = DaemonView {
         interface: a.interface.clone(),

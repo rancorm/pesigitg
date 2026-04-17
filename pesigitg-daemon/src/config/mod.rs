@@ -29,11 +29,11 @@ pub(crate) fn reload_config(args: &Arc<RwLock<Args>>, route_config: &Arc<RwLock<
         Err(_) => { systemd_notify!(NotifyState::Reloading); }
     }
 
-    let config_path = args.read().unwrap().config.clone();
+    let config_path = args.read().expect("lock poisoned").config.clone();
     if let Some(ref path) = config_path {
         match FileConfig::from_file(path) {
             Ok(fc) => {
-                let mut a = args.write().unwrap();
+                let mut a = args.write().expect("lock poisoned");
                 a.ports = fc.ports;
                 a.interface = fc.interface;
                 a.queues = fc.queues;
@@ -49,7 +49,7 @@ pub(crate) fn reload_config(args: &Arc<RwLock<Args>>, route_config: &Arc<RwLock<
         }
     }
 
-    let rc_path = args.read().unwrap().routeconfig.clone();
+    let rc_path = args.read().expect("lock poisoned").routeconfig.clone();
     let new_rc = match rc_path {
         Some(ref path) => ConfigTable::from_file(path),
         None => ConfigTable::from_file(DEFAULT_ROUTE_CONFIG),
@@ -68,14 +68,14 @@ pub(crate) fn reload_config(args: &Arc<RwLock<Args>>, route_config: &Arc<RwLock<
             
             log_draining_servers(&rc);
 
-            *route_config.write().unwrap() = rc;
+            *route_config.write().expect("lock poisoned") = rc;
         }
         Err(e) => {
             error!("failed to reload route config: {}; keeping current settings", e);
         }
     }
 
-    notify_ready(&build_status(&args.read().unwrap(), &route_config.read().unwrap()));
+    notify_ready(&build_status(&args.read().expect("lock poisoned"), &route_config.read().expect("lock poisoned")));
 
     debug!("reload_config: complete in {:.2?}", reload_start.elapsed());
 }
