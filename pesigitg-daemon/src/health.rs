@@ -17,6 +17,13 @@
 //!
 //! All due backends are probed concurrently using a single-threaded
 //! tokio runtime, keeping total probe time close to one timeout period.
+//!
+//! Only the first configured listening port is used for probes. In the
+//! typical deployment each backend runs a single QUIC server instance
+//! whose reachability is the same on every port the LB advertises, so
+//! probing one port is sufficient and avoids multiplying probe load.
+//! Backends that expose different health on different ports are not
+//! supported.
 
 use core::fmt;
 use std::collections::{HashMap, HashSet};

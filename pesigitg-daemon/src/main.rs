@@ -198,7 +198,8 @@ fn main() -> Result<()> {
     // Notify systemd that we're ready with a live status string.
     notify_ready(&build_status(&args, &route_config.read().unwrap()));
 
-    // Health checker probes backends on the first configured port.
+    // Backends are probed on the first configured port only; see the
+    // HEALTH CHECKING section of pesigitgd(8) for the rationale.
     let mut health = HealthChecker::new(args.ports[0])?;
     debug!("health checker ready: T+{:.2?}", epoch.elapsed());
 

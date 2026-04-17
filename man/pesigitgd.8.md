@@ -89,6 +89,23 @@ taking precedence:
 :   Graceful shutdown — stop all AF_XDP workers, close the status socket
     (if any), and exit.
 
+# HEALTH CHECKING
+
+**pesigitgd** probes each backend with a short QUIC handshake and removes
+servers that fail repeatedly from both the CID and fallback routing paths.
+A backend returns to service automatically once a subsequent probe
+succeeds.
+
+Probes target the **first** configured listening port only. When the
+daemon binds multiple ports (e.g. 443 and 8443), backends are still
+checked on the first one. This assumes the backend runs a single QUIC
+server instance whose reachability is the same on every advertised port;
+deployments that expose different health on different ports are not
+supported.
+
+Send **SIGHUP** to reset the exponential backoff on unhealthy servers so
+they are re-probed on the next cycle.
+
 # STATUS API
 
 When **--status-socket** (or **status_socket** in **pesigitgd.conf**(5)) is
