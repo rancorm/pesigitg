@@ -1,6 +1,10 @@
 [package]
 name = "xtask"
-version = "0.1.0"
-edition = "2024"
+description = "Build/release automation tasks for the pesigitg workspace."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
 
 [dependencies]

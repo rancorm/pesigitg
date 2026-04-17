@@ -1,8 +1,10 @@
 [package]
 name = "pesigitg-daemon"
-version = "0.1.0"
-edition = "2024"
 description = "A high-performance QUIC-aware load balancer, using eBPF and AF_XDP for kernel-bypass packet forwarding."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [[bin]]
 name = "pesigitgd"

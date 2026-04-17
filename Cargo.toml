@@ -11,6 +11,12 @@ members = [
 exclude = ["pesigitg-ebpf", "pesigitg-daemon/fuzz"]
 default-members = ["pesigitg-daemon", "pesigitg-common"]
 
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later OR LicenseRef-Commercial"
+repository = "https://github.com/rancorm/pesigitg"
+
 [workspace.dependencies]
 # Internal path crates
 pesigitg-common = { path = "pesigitg-common" }

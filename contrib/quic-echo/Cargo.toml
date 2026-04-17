@@ -1,8 +1,10 @@
 [package]
 name = "quic-echo"
-version = "0.1.0"
-edition = "2024"
 description = "Minimal QUIC echo server and client with QUIC-LB compliant Connection IDs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
 publish = false
 
 [[bin]]

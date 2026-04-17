@@ -1,7 +1,10 @@
 [package]
 name = "pesigitg-common"
-version = "0.1.0"
-edition = "2024"
+description = "Shared no_std-friendly helpers (hex, MAC) for the pesigitg daemon and eBPF crates."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [features]
 default = []
