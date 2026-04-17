@@ -25,7 +25,10 @@ in either place fall back to the daemon's built-in defaults.
 - One directive per line.
 - Blank lines and lines starting with `#` are ignored.
 - Keys and values are separated by `=`; surrounding whitespace is trimmed.
-- Unknown keys are silently ignored for forward compatibility.
+- Unknown keys are ignored (with a warning logged, citing the line
+  number) so that older daemons tolerate configs written for newer
+  versions. Malformed lines without a `=` separator trigger the same
+  warning.
 
 Only ASCII is supported. The file is read in full at startup; changes
 require restarting the daemon.

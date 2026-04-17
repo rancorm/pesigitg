@@ -36,39 +36,48 @@ impl FileConfig {
         let mut route_config: Option<PathBuf> = None;
         let mut status_socket: Option<PathBuf> = None;
 
-        for line in content.lines() {
+        for (lineno, line) in content.lines().enumerate() {
             let line = line.trim();
 
             // Skip empty or comment lines
             if line.is_empty() || line.starts_with('#') { continue; }
 
-            if let Some((k, v)) = line.split_once('=') {
-                match k.trim() {
-                    "port" => ports.push(v.trim().parse::<u16>()?),
-                    "interface" => interface = v.trim().to_string(),
-                    "queues" => {
-                        let q = v.trim().parse::<u32>()?;
-                        if q == 0 || q > MAX_QUEUES {
-                            bail!("queues must be between 1 and {}", MAX_QUEUES);
-                        }
-                        queues = q;
+            let Some((k, v)) = line.split_once('=') else {
+                eprintln!(
+                    "warning: {}:{}: malformed line (expected 'key = value'): {:?}",
+                    path.display(), lineno + 1, line
+                );
+                continue;
+            };
+
+            match k.trim() {
+                "port" => ports.push(v.trim().parse::<u16>()?),
+                "interface" => interface = v.trim().to_string(),
+                "queues" => {
+                    let q = v.trim().parse::<u32>()?;
+                    if q == 0 || q > MAX_QUEUES {
+                        bail!("queues must be between 1 and {}", MAX_QUEUES);
                     }
-                    "route_config" => {
-                        let p = PathBuf::from(v.trim());
-                        route_config = Some(if p.is_relative() {
-                            path.parent().unwrap_or(path).join(&p)
-                        } else {
-                            p
-                        });
-                    }
-                    "status_socket" => {
-                        let s = v.trim();
-                        if !s.is_empty() {
-                            status_socket = Some(PathBuf::from(s));
-                        }
-                    }
-                    _ => {}
+                    queues = q;
                 }
+                "route_config" => {
+                    let p = PathBuf::from(v.trim());
+                    route_config = Some(if p.is_relative() {
+                        path.parent().unwrap_or(path).join(&p)
+                    } else {
+                        p
+                    });
+                }
+                "status_socket" => {
+                    let s = v.trim();
+                    if !s.is_empty() {
+                        status_socket = Some(PathBuf::from(s));
+                    }
+                }
+                other => eprintln!(
+                    "warning: {}:{}: unknown key {:?} (ignored) — typo?",
+                    path.display(), lineno + 1, other
+                ),
             }
         }
 
