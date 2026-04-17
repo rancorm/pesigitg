@@ -256,7 +256,7 @@ fn classify_always_mode_no_token_emits() {
     ));
     let retry = table.retry.as_ref().unwrap();
     let quic = build_v1_initial(&[0xaa; 8], &[0xbb; 4], &[]);
-    let initial = initial::parse(&quic).unwrap();
+    let initial = initial::parse_strict(&quic).unwrap();
     let src = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1));
     assert_eq!(
         classify(&initial, src, retry, 1_000),
@@ -274,7 +274,7 @@ fn classify_valid_token_forwards() {
     let dcid = [0xaa; 8];
     let tok = retry.token_key.mint(src, &dcid, 1_000).unwrap();
     let quic = build_v1_initial(&dcid, &[0xbb; 4], &tok);
-    let initial = initial::parse(&quic).unwrap();
+    let initial = initial::parse_strict(&quic).unwrap();
     assert_eq!(
         classify(&initial, src, retry, 1_100),
         (Decision::Forward, Detail::TokenValid),
@@ -292,7 +292,7 @@ fn classify_expired_token_reissues() {
     let dcid = [0xaa; 8];
     let tok = retry.token_key.mint(src, &dcid, 1_000).unwrap();
     let quic = build_v1_initial(&dcid, &[0xbb; 4], &tok);
-    let initial = initial::parse(&quic).unwrap();
+    let initial = initial::parse_strict(&quic).unwrap();
     // Lifetime = 1000 ms, verify at +5s → expired → re-Retry.
     assert_eq!(
         classify(&initial, src, retry, 6_000),
@@ -311,7 +311,7 @@ fn classify_wrong_client_reissues() {
     let dcid = [0xaa; 8];
     let tok = retry.token_key.mint(minted_for, &dcid, 1_000).unwrap();
     let quic = build_v1_initial(&dcid, &[0xbb; 4], &tok);
-    let initial = initial::parse(&quic).unwrap();
+    let initial = initial::parse_strict(&quic).unwrap();
     assert_eq!(
         classify(&initial, attacker, retry, 1_100),
         (Decision::Emit, Detail::TokenInvalid),
@@ -325,7 +325,7 @@ fn classify_observe_never_emits() {
     ));
     let retry = table.retry.as_ref().unwrap();
     let quic = build_v1_initial(&[0xaa; 8], &[0xbb; 4], &[]);
-    let initial = initial::parse(&quic).unwrap();
+    let initial = initial::parse_strict(&quic).unwrap();
     let src = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1));
     assert_eq!(
         classify(&initial, src, retry, 1_000),
@@ -359,7 +359,7 @@ fn classify_load_below_trigger_skips() {
     seed_load_rate(retry, 5);
 
     let quic = build_v1_initial(&[0xaa; 8], &[0xbb; 4], &[]);
-    let initial = initial::parse(&quic).unwrap();
+    let initial = initial::parse_strict(&quic).unwrap();
     let src = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1));
     assert_eq!(
         classify(&initial, src, retry, 1_500),
@@ -378,7 +378,7 @@ fn classify_load_at_trigger_emits() {
     seed_load_rate(retry, 10);
 
     let quic = build_v1_initial(&[0xaa; 8], &[0xbb; 4], &[]);
-    let initial = initial::parse(&quic).unwrap();
+    let initial = initial::parse_strict(&quic).unwrap();
     let src = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1));
     assert_eq!(
         classify(&initial, src, retry, 1_500),
@@ -401,7 +401,7 @@ fn classify_load_invalid_token_gated_by_rate() {
     let dcid = [0xaa; 8];
     let tok = retry.token_key.mint(minted_for, &dcid, 1_000).unwrap();
     let quic = build_v1_initial(&dcid, &[0xbb; 4], &tok);
-    let initial = initial::parse(&quic).unwrap();
+    let initial = initial::parse_strict(&quic).unwrap();
 
     // Below trigger: Skip + TokenInvalid.
     assert_eq!(
@@ -725,7 +725,7 @@ fn v2_valid_token_forwards() {
     let dcid = [0xaa; 8];
     let tok = retry.token_key.mint(src, &dcid, 1_000).unwrap();
     let quic = build_v2_initial(&dcid, &[0xbb; 4], &tok);
-    let initial = initial::parse(&quic).unwrap();
+    let initial = initial::parse_strict(&quic).unwrap();
     assert_eq!(
         classify(&initial, src, retry, 1_100),
         (Decision::Forward, Detail::TokenValid),

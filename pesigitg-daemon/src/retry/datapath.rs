@@ -61,7 +61,7 @@ pub enum Detail {
     /// Not a packet the retry path touches (disabled, wrong protocol,
     /// port filtered, short header). No retry counters to advance.
     None,
-    /// `initial::parse` failed on what appeared to be a QUIC payload.
+    /// `initial::parse_strict` failed on what appeared to be a QUIC payload.
     ParseError,
     /// Token HMAC valid and fresh — forwarding to backend.
     TokenValid,

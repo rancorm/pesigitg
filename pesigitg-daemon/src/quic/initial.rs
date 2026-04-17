@@ -85,14 +85,6 @@ pub enum ParseError {
     LengthOverrun,
 }
 
-/// Test-only convenience: flatten any parse error into `None`. Production
-/// code calls [`parse_strict`] directly so observe-mode metrics can see the
-/// specific failure.
-#[cfg(test)]
-pub(crate) fn parse(packet: &[u8]) -> Option<Initial<'_>> {
-    parse_strict(packet).ok()
-}
-
 /// Parse a candidate Initial, returning the specific failure reason.
 pub fn parse_strict(packet: &[u8]) -> Result<Initial<'_>, ParseError> {
     // Minimum long header: first(1) + version(4) + dcid_len(1) + scid_len(1)
@@ -259,7 +251,7 @@ mod tests {
         let scid = [0x01, 0x02, 0x03, 0x04, 0x05];
         let pkt = build_initial(&dcid, &scid, &[], 20);
 
-        let parsed = parse(&pkt).expect("should parse");
+        let parsed = parse_strict(&pkt).expect("should parse");
         assert_eq!(parsed.version, QUIC_V1);
         assert_eq!(parsed.dcid, &dcid);
         assert_eq!(parsed.scid, &scid);
@@ -274,7 +266,7 @@ mod tests {
         let token = [0x33; 40];
         let pkt = build_initial(&dcid, &scid, &token, 100);
 
-        let parsed = parse(&pkt).expect("should parse");
+        let parsed = parse_strict(&pkt).expect("should parse");
         assert_eq!(parsed.token, &token);
         assert_eq!(parsed.length, 100);
         // pn_offset should land right after the Length varint.
@@ -290,7 +282,7 @@ mod tests {
         let token = vec![0xcc; 200];
         let pkt = build_initial(&dcid, &scid, &token, 50);
 
-        let parsed = parse(&pkt).expect("should parse");
+        let parsed = parse_strict(&pkt).expect("should parse");
         assert_eq!(parsed.token.len(), 200);
         assert_eq!(parsed.length, 50);
     }
@@ -299,7 +291,7 @@ mod tests {
     fn parses_initial_with_empty_cids() {
         // v1 allows zero-length DCID and SCID.
         let pkt = build_initial(&[], &[], &[], 10);
-        let parsed = parse(&pkt).expect("should parse");
+        let parsed = parse_strict(&pkt).expect("should parse");
         assert_eq!(parsed.dcid.len(), 0);
         assert_eq!(parsed.scid.len(), 0);
     }
@@ -431,7 +423,7 @@ mod tests {
         // another QUIC packet and must not cause a parse failure.
         let mut pkt = build_initial(&[0xde; 8], &[0xad; 8], &[], 20);
         pkt.extend_from_slice(&[0xff; 50]);
-        assert!(parse(&pkt).is_some());
+        assert!(parse_strict(&pkt).is_ok());
     }
 
     // -- varint unit tests --
@@ -478,7 +470,7 @@ mod tests {
 
     #[test]
     fn no_panic_on_empty() {
-        let _ = parse(&[]);
+        let _ = parse_strict(&[]);
     }
 
     #[test]
@@ -487,7 +479,7 @@ mod tests {
         for len in 0..=8 {
             for seed in 0..=255u8 {
                 let buf: Vec<u8> = (0..len).map(|i| seed.wrapping_add(i as u8)).collect();
-                let _ = parse(&buf);
+                let _ = parse_strict(&buf);
             }
         }
     }
@@ -502,7 +494,7 @@ mod tests {
             &[0xc0, 0, 0, 0, 1, 0, 0, 0xff, 0xff, 0xff, 0xff], // varint-ish garbage
         ];
         for pkt in cases {
-            let _ = parse(pkt);
+            let _ = parse_strict(pkt);
         }
     }
 
@@ -514,7 +506,7 @@ mod tests {
         let scid = [0x01, 0x02, 0x03, 0x04, 0x05];
         let pkt = build_initial_versioned(QUIC_V2, &dcid, &scid, &[], 20);
 
-        let parsed = parse(&pkt).expect("v2 Initial should parse");
+        let parsed = parse_strict(&pkt).expect("v2 Initial should parse");
         assert_eq!(parsed.version, QUIC_V2);
         assert_eq!(parsed.first_byte, 0xd0);
         assert_eq!(parsed.dcid, &dcid);
@@ -530,7 +522,7 @@ mod tests {
         let token = [0x33; 40];
         let pkt = build_initial_versioned(QUIC_V2, &dcid, &scid, &token, 100);
 
-        let parsed = parse(&pkt).expect("v2 Initial with token should parse");
+        let parsed = parse_strict(&pkt).expect("v2 Initial with token should parse");
         assert_eq!(parsed.version, QUIC_V2);
         assert_eq!(parsed.token, &token);
         assert_eq!(parsed.length, 100);

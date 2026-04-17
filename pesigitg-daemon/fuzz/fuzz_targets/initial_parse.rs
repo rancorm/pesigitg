@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Jonathan Cormier
 // This file is part of Pesigitg.
 
-//! libFuzzer harness for `quic::initial::parse` and `parse_strict`.
+//! libFuzzer harness for `quic::initial::parse_strict`.
 //!
 //! The single invariant this target enforces: arbitrary byte sequences
 //! must never cause the parser to unwind. Every input either produces a
@@ -28,8 +28,5 @@ use libfuzzer_sys::fuzz_target;
 mod initial;
 
 fuzz_target!(|data: &[u8]| {
-    // Both entry points — `parse` short-circuits to `Option`, but the
-    // strict variant exercises the full error-classification path.
-    let _ = initial::parse(data);
     let _ = initial::parse_strict(data);
 });
