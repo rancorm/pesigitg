@@ -11,8 +11,8 @@ path = "src/main.rs"
 
 [dependencies]
 # QUIC transport
-quinn = "0.11"
-quinn-proto = "0.11"
+quinn = { workspace = true }
+quinn-proto = { workspace = true }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 
 # HTTP/3
@@ -22,20 +22,20 @@ http = "1"
 bytes = "1"
 
 # TLS self-signed cert generation (dev/test convenience)
-rcgen = "0.13"
+rcgen = { workspace = true }
 
 # QUIC-LB CID generation
-quic-lb-cid = { path = "../quic-lb-cid" }
+quic-lb-cid = { workspace = true }
 
 # Shared helpers (hex encode/decode, etc.)
-pesigitg-common = { path = "../../pesigitg-common", features = ["std"] }
+pesigitg-common = { workspace = true, features = ["std"] }
 
 # Config parsing (reads a subset of lb.toml)
-serde = { version = "1", features = ["derive"] }
-toml = "0.8"
+serde = { workspace = true }
+toml = { workspace = true }
 
 # Async runtime
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal"] }
 
 # Error handling
-anyhow = "1"
+anyhow = { workspace = true }

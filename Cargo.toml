@@ -11,6 +11,32 @@ members = [
 exclude = ["pesigitg-ebpf", "pesigitg-daemon/fuzz"]
 default-members = ["pesigitg-daemon", "pesigitg-common"]
 
+[workspace.dependencies]
+# Internal path crates
+pesigitg-common = { path = "pesigitg-common" }
+quic-lb-cid = { path = "contrib/quic-lb-cid" }
+
+# Crypto
+aes = "0.8"
+
+# QUIC / TLS. `rustls = "0.23"` stays declared per-crate: the daemon
+# keeps default features on, contrib opts out + explicitly requests
+# `std`, and Cargo doesn't allow crate-level overrides of a workspace
+# dep's `default-features`.
+quinn = "0.11"
+quinn-proto = "0.11"
+rcgen = "0.13"
+
+# Async
+tokio = "1.50"
+
+# Config / serialization
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+# Error handling
+anyhow = "1"
+
 [profile.release]
 opt-level = 3
 lto = true        # link-time optimization across crates
