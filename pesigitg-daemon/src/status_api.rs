@@ -27,11 +27,13 @@ use log::{debug, info, warn};
 use serde::Serialize;
 use serde_json::{json, Value};
 
+use pesigitg_common::hex::encode as hex_encode;
+use pesigitg_common::mac::format as format_mac;
+
 use crate::args::Args;
 use crate::config::route::{ConfigTable, Encryption, RouteConfig, Server};
 use crate::stats::{Snapshot, StatsTable};
 use crate::threading::WorkerHealth;
-use crate::utils::format_mac;
 
 const MAX_REQUEST_BYTES: usize = 256;
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
@@ -391,14 +393,6 @@ fn encryption_name(e: &Encryption) -> &'static str {
         Encryption::SinglePass { .. } => "single_pass",
         Encryption::FourPass { .. } => "four_pass",
     }
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        s.push_str(&format!("{b:02x}"));
-    }
-    s
 }
 
 impl From<&Server> for ServerView {

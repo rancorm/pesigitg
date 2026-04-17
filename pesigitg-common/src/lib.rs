@@ -4,6 +4,11 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
+#[cfg(feature = "std")]
+pub mod hex;
+#[cfg(feature = "std")]
+pub mod mac;
+
 pub const DEFAULT_PORT: u16 = 443;
 pub const DEFAULT_INTF: &str = "eth0";
 pub const DEFAULT_QUEUES: u32 = 1;

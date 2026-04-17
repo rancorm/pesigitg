@@ -179,7 +179,7 @@ fn main() -> Result<()> {
     // Resolve and log interface MAC
     let local_mac = utils::interface_mac(&args.interface)
         .map_err(|e| anyhow!("failed to get MAC for {}: {}", args.interface, e))?;
-    info!("interface MAC: {}", utils::format_mac(&local_mac));
+    info!("interface MAC: {}", pesigitg_common::mac::format(&local_mac));
 
     // Thread safe
     let shutdown = Arc::new(AtomicBool::new(false));

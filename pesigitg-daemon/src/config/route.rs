@@ -15,6 +15,7 @@ use std::sync::Arc;
 
 use aes::Aes128;
 use aes::cipher::{KeyInit, generic_array::GenericArray};
+use pesigitg_common::{hex, mac};
 use serde::Deserialize;
 
 use crate::retry::load::LoadRateTracker;
@@ -578,8 +579,8 @@ impl ConfigTable {
 /// Distinct from [`parse_hex_key`] (16 bytes / AES-128) so the two keys
 /// can never be mistakenly swapped: the lengths don't collide and the
 /// error message names the service.
-fn parse_hex_retry_key(hex: &str) -> Result<[u8; 32], RouteConfigError> {
-    let bytes = hex_decode(hex).map_err(|e| {
+fn parse_hex_retry_key(s: &str) -> Result<[u8; 32], RouteConfigError> {
+    let bytes = hex::decode(s).map_err(|e| {
         RouteConfigError::Validation(format!("invalid hex retry token key: {e}"))
     })?;
 
@@ -597,8 +598,8 @@ fn parse_hex_retry_key(hex: &str) -> Result<[u8; 32], RouteConfigError> {
 }
 
 /// Parse a hex-encoded 16-byte (128-bit) AES key.
-fn parse_hex_key(hex: &str) -> Result<[u8; 16], RouteConfigError> {
-    let bytes = hex_decode(hex).map_err(|e| {
+fn parse_hex_key(s: &str) -> Result<[u8; 16], RouteConfigError> {
+    let bytes = hex::decode(s).map_err(|e| {
         RouteConfigError::Validation(format!("invalid hex key: {e}"))
     })?;
 
@@ -615,24 +616,6 @@ fn parse_hex_key(hex: &str) -> Result<[u8; 16], RouteConfigError> {
     Ok(key)
 }
 
-/// Parse a colon-separated MAC address string (e.g. `"aa:bb:cc:dd:ee:01"`).
-fn parse_mac(s: &str) -> Result<[u8; 6], String> {
-    let parts: Vec<&str> = s.split(':').collect();
-
-    if parts.len() != 6 {
-        return Err(format!("expected 6 colon-separated octets, got {}", parts.len()));
-    }
-
-    let mut mac = [0u8; 6];
-
-    for (i, part) in parts.iter().enumerate() {
-        mac[i] = u8::from_str_radix(part, 16)
-            .map_err(|_| format!("invalid hex octet '{}' at position {i}", part))?;
-    }
-
-    Ok(mac)
-}
-
 /// Parse a single `[[configs.servers]]` entry.
 fn parse_server(raw: &RawServer, expected_id_len: u8) -> Result<Server, RouteConfigError> {
     let expected_hex_len = expected_id_len as usize * 2;
@@ -646,7 +629,7 @@ fn parse_server(raw: &RawServer, expected_id_len: u8) -> Result<Server, RouteCon
         )));
     }
 
-    let id = hex_decode(&raw.id).map_err(|e| {
+    let id = hex::decode(&raw.id).map_err(|e| {
         RouteConfigError::Validation(format!(
             "invalid hex server id '{}': {e}",
             raw.id,
@@ -668,28 +651,11 @@ fn parse_server(raw: &RawServer, expected_id_len: u8) -> Result<Server, RouteCon
         ))
     })?;
 
-    let mac = raw.mac.as_deref().map(parse_mac).transpose().map_err(|e| {
+    let mac = raw.mac.as_deref().map(mac::parse).transpose().map_err(|e| {
         RouteConfigError::Validation(format!("invalid server mac '{}': {e}", raw.mac.as_deref().unwrap_or("")))
     })?;
 
     Ok(Server { id, address, mac, draining: raw.draining, healthy: false })
-}
-
-/// Minimal hex decoder (no external dependency).
-fn hex_decode(s: &str) -> Result<Vec<u8>, String> {
-    let s = s.trim();
-
-    if !s.len().is_multiple_of(2) {
-        return Err("odd number of hex characters".into());
-    }
-
-    (0..s.len())
-        .step_by(2)
-        .map(|i| {
-            u8::from_str_radix(&s[i..i + 2], 16)
-                .map_err(|_| format!("invalid hex at position {i}"))
-        })
-        .collect()
 }
 
 impl fmt::Display for Encryption {

@@ -127,7 +127,7 @@ pub fn resolve_macs(servers: &mut [Server]) {
 
         match table.get(&server.address) {
             Some(&mac) => {
-                info!("resolved {} -> {}", server.address, crate::utils::format_mac(&mac));
+                info!("resolved {} -> {}", server.address, pesigitg_common::mac::format(&mac));
                 server.mac = Some(mac);
             }
             None => {

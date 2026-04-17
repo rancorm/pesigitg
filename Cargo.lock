@@ -1129,6 +1129,7 @@ name = "quic-echo"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "pesigitg-common",
  "quic-lb-cid",
  "quinn",
  "quinn-proto",
@@ -2000,6 +2001,7 @@ dependencies = [
  "h3",
  "h3-quinn",
  "http",
+ "pesigitg-common",
  "quic-lb-cid",
  "quinn",
  "quinn-proto",

@@ -27,6 +27,9 @@ rcgen = "0.13"
 # QUIC-LB CID generation
 quic-lb-cid = { path = "../quic-lb-cid" }
 
+# Shared helpers (hex encode/decode, etc.)
+pesigitg-common = { path = "../../pesigitg-common", features = ["std"] }
+
 # Config parsing (reads a subset of lb.toml)
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"

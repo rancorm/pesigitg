@@ -19,6 +19,7 @@ use std::net::{SocketAddr, UdpSocket};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
+use pesigitg_common::hex;
 use quinn::Endpoint;
 use quic_lb_cid::{Encryption, QuicLbCidGenerator};
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
@@ -55,17 +56,7 @@ struct RawServer {
 }
 
 fn hex_decode(s: &str) -> Result<Vec<u8>> {
-    let s = s.trim();
-    if !s.len().is_multiple_of(2) {
-        bail!("odd number of hex characters");
-    }
-    (0..s.len())
-        .step_by(2)
-        .map(|i| {
-            u8::from_str_radix(&s[i..i + 2], 16)
-                .map_err(|_| anyhow::anyhow!("invalid hex at position {i}"))
-        })
-        .collect()
+    hex::decode(s).map_err(anyhow::Error::msg)
 }
 
 /// Resolved parameters for CID generation.

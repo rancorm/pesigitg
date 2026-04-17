@@ -81,14 +81,6 @@ pub fn interface_mac(interface: &str) -> std::io::Result<[u8; 6]> {
     Ok(mac)
 }
 
-/// Format a 6-byte MAC address as a colon-separated hex string.
-pub fn format_mac(mac: &[u8; 6]) -> String {
-    format!(
-        "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
-    )
-}
-
 pub fn is_aes_available() -> bool {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
