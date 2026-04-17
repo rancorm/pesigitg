@@ -229,6 +229,14 @@ The **retry** sub-object groups counters from the QUIC Retry service
 :   Controls log verbosity. Example: *RUST_LOG=pesigitgd=debug*. Defaults
     to *pesigitgd=info* when launched via **cargo xtask run**.
 
+**PESIGITG_LOG_FORMAT**
+:   Selects the log output format. Unset or **syslog** (default) sends
+    RFC 3164 records to */dev/log* (consumed by **journald**(8) /
+    **rsyslogd**(8)). **json** emits line-delimited JSON to *stderr*
+    with fields *time* (RFC 3339 UTC), *level*, *target*, *msg*,
+    *pid* — suitable for Loki / Vector / Elastic agents tailing
+    container or service stderr. Any other value aborts startup.
+
 # FILES
 
 */etc/pesigitg/pesigitgd.conf*

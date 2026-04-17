@@ -129,7 +129,38 @@ pub(crate) fn daemonize() -> anyhow::Result<()> {
     Ok(())
 }
 
-pub(crate) fn init_logging() -> anyhow::Result<()> {
+/// Initialize the global logger.
+///
+/// `PESIGITG_LOG_FORMAT` selects the format and takes precedence over
+/// `foreground`:
+///   * `"json"` — line-delimited JSON to stderr with fields
+///     `{time, level, target, msg, pid}`. Suitable for Loki / Vector /
+///     Elastic agents consuming container or service stderr. Requires
+///     foreground or systemd (stderr is captured by journald); silently
+///     dropped when the daemon forks and redirects stderr to /dev/null.
+///   * unset or `"syslog"` (default) — preserves the original behavior:
+///     `env_logger` text to stderr in foreground, RFC 3164 via
+///     `/dev/log` when daemonized.
+pub(crate) fn init_logging(foreground: bool) -> anyhow::Result<()> {
+    let format = std::env::var("PESIGITG_LOG_FORMAT").unwrap_or_default();
+    match format.as_str() {
+        "json" => init_json(),
+        "" | "syslog" => {
+            if foreground {
+                env_logger::init();
+                Ok(())
+            } else {
+                init_syslog()
+            }
+        }
+        other => Err(anyhow::anyhow!(
+            "invalid PESIGITG_LOG_FORMAT={:?}; expected \"syslog\" or \"json\"",
+            other
+        )),
+    }
+}
+
+fn init_syslog() -> anyhow::Result<()> {
     use pesigitg_common::{PROC_NAME, current_pid};
 
     let formatter = syslog::Formatter3164 {
@@ -147,4 +178,115 @@ pub(crate) fn init_logging() -> anyhow::Result<()> {
     log::set_max_level(log::LevelFilter::Info);
 
     Ok(())
+}
+
+fn init_json() -> anyhow::Result<()> {
+    log::set_boxed_logger(Box::new(JsonLogger::new())).map_err(|e| anyhow::anyhow!(e))?;
+    log::set_max_level(log::LevelFilter::Info);
+    Ok(())
+}
+
+struct JsonLogger {
+    pid: u32,
+}
+
+impl JsonLogger {
+    fn new() -> Self {
+        Self {
+            pid: pesigitg_common::current_pid(),
+        }
+    }
+}
+
+impl log::Log for JsonLogger {
+    fn enabled(&self, _: &log::Metadata<'_>) -> bool {
+        true
+    }
+
+    fn log(&self, record: &log::Record<'_>) {
+        use std::io::Write;
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let line = serde_json::json!({
+            "time": format_rfc3339_utc(now.as_secs(), now.subsec_millis()),
+            "level": record.level().as_str(),
+            "target": record.target(),
+            "msg": record.args().to_string(),
+            "pid": self.pid,
+        });
+        let mut out = std::io::stderr().lock();
+        let _ = writeln!(out, "{}", line);
+    }
+
+    fn flush(&self) {
+        use std::io::Write;
+        let _ = std::io::stderr().lock().flush();
+    }
+}
+
+/// Format a unix timestamp as `YYYY-MM-DDTHH:MM:SS.mmmZ`.
+fn format_rfc3339_utc(secs: u64, millis: u32) -> String {
+    let days = (secs / 86_400) as i64;
+    let tod = (secs % 86_400) as u32;
+    let (y, mo, d) = civil_from_days(days);
+    let h = tod / 3600;
+    let m = (tod % 3600) / 60;
+    let s = tod % 60;
+    format!("{y:04}-{mo:02}-{d:02}T{h:02}:{m:02}:{s:02}.{millis:03}Z")
+}
+
+/// Howard Hinnant's `civil_from_days`: convert days-since-1970-01-01 to
+/// proleptic Gregorian (year, month, day). Inverse of the
+/// `days_from_civil` used in `xtask`.
+fn civil_from_days(z: i64) -> (i32, u32, u32) {
+    let z = z + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let y = if m <= 2 { y + 1 } else { y };
+    (y as i32, m, d)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_rfc3339_utc;
+
+    #[test]
+    fn rfc3339_epoch() {
+        assert_eq!(format_rfc3339_utc(0, 0), "1970-01-01T00:00:00.000Z");
+    }
+
+    #[test]
+    fn rfc3339_known_date() {
+        // 2026-04-17 00:00:00 UTC
+        assert_eq!(
+            format_rfc3339_utc(1_776_384_000, 0),
+            "2026-04-17T00:00:00.000Z"
+        );
+    }
+
+    #[test]
+    fn rfc3339_with_millis() {
+        // 2026-04-17 12:34:56.789 UTC
+        assert_eq!(
+            format_rfc3339_utc(1_776_429_296, 789),
+            "2026-04-17T12:34:56.789Z"
+        );
+    }
+
+    #[test]
+    fn rfc3339_leap_year_boundary() {
+        // 2024-02-29 23:59:59 UTC = 1_709_251_199
+        assert_eq!(
+            format_rfc3339_utc(1_709_251_199, 0),
+            "2024-02-29T23:59:59.000Z"
+        );
+    }
 }

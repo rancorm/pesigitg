@@ -55,15 +55,7 @@ fn main() -> Result<()> {
         daemonize()?;
     }
 
-    // Setup logging: stderr in foreground mode (journald captures it), syslog otherwise
-    match args.foreground {
-        true => {
-            env_logger::init();
-        }
-        false => {
-            init_logging()?;
-        }
-    }
+    init_logging(args.foreground)?;
 
     // PID file (unnecessary under systemd) and signal hooks
     let pidfile = if !running_under_systemd() {

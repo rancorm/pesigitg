@@ -62,7 +62,7 @@ QUIC & HTTP/3 related RFCs and drafts.
   Contains compile-time constants (`DEFAULT_PORT`, `DEFAULT_INTF`, `PID_DIR`, `MAX_CONFIG_SIZE`), the `current_pid` helper, and the `exit!` macro.
   Standard-library-dependent code is gated behind the `std` feature flag.
 - **pesigitg-daemon** — The `pesigitgd` binary. Daemonizes via double-fork, manages a PID file, parses CLI arguments and an optional config file (key=value format), queries NIC hardware queue counts via ethtool ioctl, and integrates with systemd (sd_notify watchdog, `READY=1`, `RELOADING=1`).
-  Logs to syslog when daemonized, or to stderr when running in the foreground or under systemd.
+  Logs to syslog when daemonized, or to stderr when running in the foreground or under systemd. Set `PESIGITG_LOG_FORMAT=json` to emit line-delimited JSON to stderr instead (suitable for Loki / Vector / Elastic agents).
 - **pesigitg-ebpf** — eBPF programs.
 
 ## Development Prerequisites
