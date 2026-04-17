@@ -44,8 +44,6 @@ pub struct ConfigTable {
     pub fallback_servers: Vec<Server>,
     /// Optional QUIC Retry service settings. `None` = no `[retry]` section
     /// in the TOML; datapath should short-circuit the classifier branch.
-    // Read by the Retry classifier added in Phase 4b of quic-retry-offload.
-    #[allow(dead_code)]
     pub retry: Option<RetryConfig>,
 }
 
@@ -80,8 +78,6 @@ pub struct RetryConfig {
     /// datapath does not consult the Retry module at all.
     pub enabled: bool,
     /// HMAC-SHA256 signing key for mint/verify. Redacted in Debug.
-    // Consumed by the Retry mint/verify path in Phase 4b.
-    #[allow(dead_code)]
     pub token_key: TokenKey,
     /// Token lifetime used by [`TokenKey::verify`]. Stored in ms so the
     /// verify path doesn't re-multiply every packet.

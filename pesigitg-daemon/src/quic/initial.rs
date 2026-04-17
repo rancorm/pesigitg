@@ -85,14 +85,11 @@ pub enum ParseError {
     LengthOverrun,
 }
 
-/// Parse a candidate Initial, flattening all errors to `None`.
-///
-/// Use this on the hot path when you only care whether the packet is a
-/// valid v1 or v2 Initial. For observe-mode metrics that need to
-/// distinguish "not an Initial" from "malformed Initial", use
-/// [`parse_strict`].
-#[inline]
-pub fn parse(packet: &[u8]) -> Option<Initial<'_>> {
+/// Test-only convenience: flatten any parse error into `None`. Production
+/// code calls [`parse_strict`] directly so observe-mode metrics can see the
+/// specific failure.
+#[cfg(test)]
+pub(crate) fn parse(packet: &[u8]) -> Option<Initial<'_>> {
     parse_strict(packet).ok()
 }
 

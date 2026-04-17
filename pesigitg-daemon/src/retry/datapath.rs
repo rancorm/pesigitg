@@ -166,8 +166,6 @@ struct FrameLayout {
     udp_offset: usize,
     quic_offset: usize,
     src_mac: [u8; 6],
-    #[allow(dead_code)] // populated for completeness; reflected headers use local_mac instead
-    dst_mac: [u8; 6],
     src_ip: IpAddr,
     dst_ip: IpAddr,
     src_port: u16,
@@ -179,25 +177,19 @@ fn parse_layout(frame: &[u8]) -> Option<FrameLayout> {
         return None;
     }
 
-    let mut dst_mac = [0u8; 6];
     let mut src_mac = [0u8; 6];
-    dst_mac.copy_from_slice(&frame[..6]);
     src_mac.copy_from_slice(&frame[6..12]);
 
     let ethertype = u16::from_be_bytes([frame[12], frame[13]]);
 
     match ethertype {
-        ETH_P_IP => parse_layout_ipv4(frame, src_mac, dst_mac),
-        ETH_P_IPV6 => parse_layout_ipv6(frame, src_mac, dst_mac),
+        ETH_P_IP => parse_layout_ipv4(frame, src_mac),
+        ETH_P_IPV6 => parse_layout_ipv6(frame, src_mac),
         _ => None,
     }
 }
 
-fn parse_layout_ipv4(
-    frame: &[u8],
-    src_mac: [u8; 6],
-    dst_mac: [u8; 6],
-) -> Option<FrameLayout> {
+fn parse_layout_ipv4(frame: &[u8], src_mac: [u8; 6]) -> Option<FrameLayout> {
     let ip_offset = ETH_HDR_LEN;
     if frame.len() < ip_offset + IPV4_MIN_HDR_LEN {
         return None;
@@ -238,7 +230,6 @@ fn parse_layout_ipv4(
         udp_offset,
         quic_offset,
         src_mac,
-        dst_mac,
         src_ip,
         dst_ip,
         src_port,
@@ -246,11 +237,7 @@ fn parse_layout_ipv4(
     })
 }
 
-fn parse_layout_ipv6(
-    frame: &[u8],
-    src_mac: [u8; 6],
-    dst_mac: [u8; 6],
-) -> Option<FrameLayout> {
+fn parse_layout_ipv6(frame: &[u8], src_mac: [u8; 6]) -> Option<FrameLayout> {
     // Retry only touches v1 Initials sent directly over IPv6 — extension
     // headers are rejected here to keep the rewrite path simple. The
     // existing CID fast path still walks extensions for forwarding.
@@ -283,7 +270,6 @@ fn parse_layout_ipv6(
         udp_offset,
         quic_offset,
         src_mac,
-        dst_mac,
         src_ip: IpAddr::from(src),
         dst_ip: IpAddr::from(dst),
         src_port,

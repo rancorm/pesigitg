@@ -67,8 +67,6 @@ struct RawConfig {
 #[derive(serde::Deserialize)]
 struct RawServer {
     id: String,
-    #[allow(dead_code)]
-    address: String,
 }
 
 fn hex_decode(s: &str) -> Result<Vec<u8>> {
