@@ -121,6 +121,13 @@ permissions on the socket (mode *0660*, root-owned by default).
 :   Lock-free liveness probe: *status* (**ok**/**degraded**), uptime,
     and worker alive/expected counts. Safe to poll at high frequency.
 
+**GET /version**
+:   Build identifiers — *name*, *version*, *build_date*,
+    *rustc_version*, *target*. All values are baked in at compile
+    time and never change for the lifetime of a daemon process, so
+    polling can detect rolling restarts and binary drift across a
+    fleet without parsing logs.
+
 **GET /stats**
 :   Aggregated counters — same data as the **SIGUSR1** log dump, in JSON.
     See **STATISTICS** below for the field schema.

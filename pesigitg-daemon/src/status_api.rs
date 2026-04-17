@@ -4,7 +4,9 @@
 
 //! Unix-domain JSON status API.
 //!
-//! Exposes two read-only endpoints for monitoring and automation:
+//! Exposes read-only endpoints for monitoring and automation:
+//!   GET /health  → liveness probe (status, uptime, worker counts)
+//!   GET /version → build identifiers (version, build date, rustc, target)
 //!   GET /stats   → aggregated counters, uptime
 //!   GET /config  → live daemon args + route table
 //!
@@ -243,8 +245,9 @@ fn handle_connection(
         .trim();
 
     let response = match request {
-        "GET /" => json!({"endpoints": ["/health", "/stats", "/config"]}),
+        "GET /" => json!({"endpoints": ["/health", "/version", "/stats", "/config"]}),
         "GET /health" => build_health_response(worker_health, epoch),
+        "GET /version" => build_version_response(),
         "GET /stats" => build_stats_response(stats, epoch),
         "GET /config" => build_config_response(args, route_config),
         _ => json!({"error": "unknown endpoint"}),
@@ -324,6 +327,28 @@ impl From<&Snapshot> for SnapshotView {
             },
         }
     }
+}
+
+// ----- Version DTO -----
+
+#[derive(Serialize)]
+struct VersionResponse {
+    name: &'static str,
+    version: &'static str,
+    build_date: &'static str,
+    rustc_version: &'static str,
+    target: &'static str,
+}
+
+fn build_version_response() -> Value {
+    let resp = VersionResponse {
+        name: pesigitg_common::PROC_NAME,
+        version: env!("CARGO_PKG_VERSION"),
+        build_date: env!("BUILD_DATE"),
+        rustc_version: env!("RUSTC_VERSION"),
+        target: env!("TARGET"),
+    };
+    serde_json::to_value(&resp).unwrap_or(Value::Null)
 }
 
 // ----- Health DTO -----
