@@ -78,7 +78,8 @@ taking precedence:
 
 **SIGUSR1**
 :   Dump aggregated traffic statistics (packet counters, routing decisions,
-    retry outcomes) to the log.
+    retry outcomes) to the log. See **STATISTICS** below for the field
+    schema.
 
 **SIGUSR2**
 :   Dump the full runtime config to the log: daemon args, active route
@@ -122,6 +123,7 @@ permissions on the socket (mode *0660*, root-owned by default).
 
 **GET /stats**
 :   Aggregated counters — same data as the **SIGUSR1** log dump, in JSON.
+    See **STATISTICS** below for the field schema.
 
 **GET /config**
 :   Live daemon args and the full route table. Encryption keys are never
@@ -130,6 +132,89 @@ permissions on the socket (mode *0660*, root-owned by default).
 
 See **contrib/ok.sh** in the source distribution for a sysadmin-oriented
 wrapper that exits non-zero on degraded status.
+
+# STATISTICS
+
+The **GET /stats** endpoint and **SIGUSR1** log dump expose the same
+counters, aggregated across all worker threads. JSON field names are
+the stable contract; the **SIGUSR1** dump uses abbreviated names
+(*rx*, *fwd*, *cid*, *fallback*, *icmp*, *pass*) but reports the same
+totals. All counters are monotonic *u64*.
+
+*uptime_secs*
+:   Seconds since daemon start. (Not present in the **SIGUSR1** dump.)
+
+*rx_packets*
+:   Packets received from the NIC by all AF_XDP workers.
+
+*forwarded*
+:   Packets delivered to a backend or upstream — sum of *cid_routed* +
+    *fallback_routed* + *icmp_forwarded*. *draining_forwarded* is
+    *not* included.
+
+*cid_routed*
+:   Packets routed by decoding a QUIC-LB Connection ID.
+
+*cid_by_config*
+:   Per-*config_id* breakdown of *cid_routed* (a map of *config_id*
+    0–6 to packet count). Zero-count entries are omitted.
+
+*fallback_routed*
+:   Packets routed via the fallback pool — short-header packets with
+    no connection-table entry, or long-header packets whose decoded
+    *config_id* is unconfigured.
+
+*cid_unroutable*
+:   Packets whose CID decoded successfully but pointed to a server
+    that was unhealthy or absent. Indicates backend churn or stale
+    CIDs, not a load-balancer error.
+
+*draining_forwarded*
+:   Packets forwarded to a backend marked **drain** in the route
+    table. A non-zero delta after a drain transition is expected and
+    decays to zero as flows finish.
+
+*icmp_forwarded*
+:   ICMP / ICMPv6 packets forwarded (e.g. PMTU discovery).
+
+*passed*
+:   Packets the daemon declined to handle and passed back to the
+    kernel network stack — non-QUIC traffic on the bound port,
+    malformed long headers, etc.
+
+*pending_fill_peak*
+:   Peak observed UMEM fill-ring backlog over the daemon's lifetime.
+    Sustained non-zero values indicate the worker is falling behind
+    on returning frames to the NIC.
+
+The **retry** sub-object groups counters from the QUIC Retry service
+(see **pesigitg-lb.toml**(5) **[retry]**). All fields are zero unless
+*retry.enabled* is set in the route config.
+
+*retry.initials_seen*
+:   QUIC v1/v2 Initials the Retry classifier observed.
+
+*retry.issued*
+:   Retry responses emitted in place. Always zero in **observe** mode;
+    in **load** mode, gated by the configured engagement threshold.
+
+*retry.token_validated*
+:   Initials carrying a token whose HMAC matched and was within
+    *token_lifetime*.
+
+*retry.token_invalid*
+:   Initials carrying a token whose HMAC did not match. Indicates
+    spoofed source addresses, replay against a different LB, or a
+    *token_key* rotation since issuance.
+
+*retry.token_expired*
+:   Token HMAC matched but the timestamp was older than
+    *token_lifetime*. Triggers a fresh Retry in emitting modes.
+
+*retry.parse_error*
+:   Packets that resembled a QUIC v1/v2 Initial but failed to parse
+    past the version field (truncated CIDs, invalid varints, length
+    overrun).
 
 # ENVIRONMENT
 
