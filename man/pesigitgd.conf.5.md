@@ -52,6 +52,14 @@ require restarting the daemon.
     directory containing **pesigitgd.conf**. If omitted, **pesigitgd**(8)
     runs without a loaded route table and can only use the fallback path.
 
+**status_socket** = *PATH*
+:   Unix-domain socket path for the JSON status API. When set,
+    **pesigitgd**(8) binds a read-only socket (mode *0660*) exposing
+    */health*, */stats*, and */config* endpoints. When unset (the
+    default), the API is disabled. The parent directory is created on
+    bind if missing. Equivalent to the **-s**/**--status-socket** flag.
+    See **STATUS API** in **pesigitgd**(8).
+
 # EXAMPLES
 
 A typical per-interface config (*/etc/pesigitg/enp2s0f0.conf*):
@@ -68,6 +76,14 @@ Multiple listening ports:
     port = 8443
     queues = 4
     route_config = /etc/pesigitg/lb.toml
+
+With the JSON status API enabled (see also **pesigitgd**(8)):
+
+    interface = enp2s0f0
+    port = 443
+    queues = 6
+    route_config = lb.toml
+    status_socket = /run/pesigitg/status.sock
 
 # DIAGNOSTICS
 

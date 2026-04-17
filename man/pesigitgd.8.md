@@ -9,7 +9,7 @@ pesigitgd - QUIC-aware load balancer using eBPF and AF_XDP
 # SYNOPSIS
 
 **pesigitgd** [**-f**] [**-i** *interface*] [**-p** *port*]... [**-q** *num*]
-              [**-c** *path*]
+              [**-c** *path*] [**-s** *path*]
 
 **pesigitgd** **-V** | **-h**
 
@@ -50,6 +50,11 @@ taking precedence:
     override values from the config file. The config file may in turn
     reference a TOML route config; see **pesigitg-lb.toml**(5).
 
+**-s**, **--status-socket** *PATH*
+:   Unix-domain socket path for the JSON status API. When set, **pesigitgd**
+    binds a read-only socket (mode *0660*) exposing */health*, */stats*, and
+    */config* endpoints. Unset disables the API. See **STATUS API** below.
+
 **-f**, **--foreground**
 :   Do not daemonize; remain attached to the controlling terminal. Logs
     are written to *stderr*.
@@ -62,6 +67,52 @@ taking precedence:
 :   Print a usage summary and exit. Development builds list additional
     options, including **-l**/**--load-ebpf** for overriding the embedded
     eBPF object.
+
+# SIGNALS
+
+**SIGHUP**
+:   Reload the daemon and route configurations, re-resolve server MAC
+    addresses, and reset health-check backoff so all backends are re-probed
+    on the next cycle. Under **systemd**(1), *RELOADING=1* is notified with
+    *MONOTONIC_USEC* so reload duration is tracked.
+
+**SIGUSR1**
+:   Dump aggregated traffic statistics (packet counters, routing decisions,
+    retry outcomes) to the log.
+
+**SIGUSR2**
+:   Dump the full runtime config to the log: daemon args, active route
+    slots, per-server IP/MAC/health/drain status, fallback pool membership,
+    and retry settings.
+
+**SIGINT**, **SIGTERM**
+:   Graceful shutdown — stop all AF_XDP workers, close the status socket
+    (if any), and exit.
+
+# STATUS API
+
+When **--status-socket** (or **status_socket** in **pesigitgd.conf**(5)) is
+set, **pesigitgd** exposes a line-oriented JSON API over a Unix-domain
+socket. One request per connection. Access is gated solely by filesystem
+permissions on the socket (mode *0660*, root-owned by default).
+
+**GET /**
+:   List of available endpoints.
+
+**GET /health**
+:   Lock-free liveness probe: *status* (**ok**/**degraded**), uptime,
+    and worker alive/expected counts. Safe to poll at high frequency.
+
+**GET /stats**
+:   Aggregated counters — same data as the **SIGUSR1** log dump, in JSON.
+
+**GET /config**
+:   Live daemon args and the full route table. Encryption keys are never
+    exposed; only the scheme name (**plaintext**, **single_pass**,
+    **four_pass**).
+
+See **contrib/ok.sh** in the source distribution for a sysadmin-oriented
+wrapper that exits non-zero on degraded status.
 
 # ENVIRONMENT
 
@@ -77,8 +128,16 @@ taking precedence:
 */etc/pesigitg/lb.toml*
 :   Default route/CID config file location (if packaged).
 
-*/run/pesigitgd.pid*
-:   PID file written when running in daemonized mode.
+*/var/run/pesigitgd-INTERFACE.pid*
+:   PID file written when running daemonized outside **systemd**(1). The
+    interface name is embedded so multiple manual instances can coexist.
+    Under systemd the PID file is skipped (the main PID is tracked via
+    *Type=notify*).
+
+*/run/pesigitg/*
+:   Runtime directory for status sockets. Created automatically by
+    **systemd**(1) via *RuntimeDirectory=* or, on manual invocation, by
+    the daemon at bind time.
 
 # EXIT STATUS
 
@@ -102,6 +161,14 @@ Launch under **systemd**(1) with a config file:
 Bind multiple ports:
 
     pesigitgd -f -i enp2s0f0 -p 443 -p 8443
+
+Enable the JSON status API on the systemd runtime directory:
+
+    pesigitgd -f -i enp2s0f0 -p 443 -s /run/pesigitg/status.sock
+
+Check liveness from the shell:
+
+    printf 'GET /health\n' | nc -U /run/pesigitg/status.sock
 
 # SEE ALSO
 
