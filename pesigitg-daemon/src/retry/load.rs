@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Jonathan Cormier
 // This file is part of Pesigitg.
 
-//! Shared rate tracker for [`crate::config::route::RetryMode::Load`].
+//! Shared rate tracker for [`crate::config::retry::RetryMode::Load`].
 //!
 //! Workers call [`LoadRateTracker::observe_and_rate`] once per Initial
 //! that reaches the Retry classifier in Load mode. The tracker maintains

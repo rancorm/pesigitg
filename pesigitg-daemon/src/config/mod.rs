@@ -3,6 +3,7 @@
 // This file is part of Pesigitg.
 
 pub mod daemon;
+pub mod retry;
 pub mod route;
 
 use std::sync::{Arc, RwLock};

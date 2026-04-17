@@ -33,7 +33,8 @@ use pesigitg_common::{
     ETH_HDR_LEN, ETH_P_IP, ETH_P_IPV6, IPPROTO_UDP, IPV4_MIN_HDR_LEN, IPV6_HDR_LEN, UDP_HDR_LEN,
 };
 
-use crate::config::route::{ConfigTable, RetryConfig, RetryMode};
+use crate::config::retry::{RetryConfig, RetryMode};
+use crate::config::route::ConfigTable;
 use crate::quic::initial::{self, Initial, ParseError};
 
 use super::packet::{build_retry, INTEGRITY_TAG_LEN};
