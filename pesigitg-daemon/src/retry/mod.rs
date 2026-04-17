@@ -18,9 +18,11 @@
 //! - [`packet`]: Retry wire format, including the RFC 9001 §5.8 (v1)
 //!   and RFC 9369 §3.2 (v2) integrity tag.
 //! - [`token`]: HMAC-SHA256 mint/verify.
+//! - [`load`]: Cross-worker Initial-rate counter for `RetryMode::Load`.
 //! - [`datapath`]: Classifier + in-place Retry rewrite, wired into the
 //!   worker loop before CID routing.
 
 pub mod datapath;
+pub mod load;
 pub mod packet;
 pub mod token;

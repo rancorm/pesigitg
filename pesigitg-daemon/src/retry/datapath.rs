@@ -325,16 +325,10 @@ fn classify(
         ) {
             Ok(()) => return (Decision::Forward, Detail::TokenValid),
             Err(VerifyError::Invalid) => {
-                return match retry.mode {
-                    RetryMode::Always => (Decision::Emit, Detail::TokenInvalid),
-                    RetryMode::Observe | RetryMode::Load => (Decision::Skip, Detail::TokenInvalid),
-                };
+                return (load_gated_decision(retry, now_ms), Detail::TokenInvalid);
             }
             Err(VerifyError::Expired) => {
-                return match retry.mode {
-                    RetryMode::Always => (Decision::Emit, Detail::TokenExpired),
-                    RetryMode::Observe | RetryMode::Load => (Decision::Skip, Detail::TokenExpired),
-                };
+                return (load_gated_decision(retry, now_ms), Detail::TokenExpired);
             }
         }
     }
@@ -342,11 +336,47 @@ fn classify(
     match retry.mode {
         RetryMode::Always => (Decision::Emit, Detail::Issued),
         // Observe mode walks the whole classify path so counters
-        // reflect real decisions, but never emits. Load mode will be
-        // wired to a rate tracker in a later phase — until then it
-        // degrades to Skip.
-        RetryMode::Observe | RetryMode::Load => (Decision::Skip, Detail::Observed),
+        // reflect real decisions, but never emits.
+        RetryMode::Observe => (Decision::Skip, Detail::Observed),
+        RetryMode::Load => {
+            if load_over_trigger(retry, now_ms) {
+                (Decision::Emit, Detail::Issued)
+            } else {
+                (Decision::Skip, Detail::Observed)
+            }
+        }
     }
+}
+
+/// Collapse `(mode, trigger)` into an Emit/Skip decision for the
+/// invalid/expired-token branches. Always → Emit, Observe → Skip, Load
+/// → Emit iff the Initial-rate is over the configured trigger.
+fn load_gated_decision(retry: &RetryConfig, now_ms: u64) -> Decision {
+    match retry.mode {
+        RetryMode::Always => Decision::Emit,
+        RetryMode::Observe => Decision::Skip,
+        RetryMode::Load => {
+            if load_over_trigger(retry, now_ms) {
+                Decision::Emit
+            } else {
+                Decision::Skip
+            }
+        }
+    }
+}
+
+/// Tick the shared rate counter and compare against the configured
+/// trigger. Precondition: `retry.mode == RetryMode::Load` — the
+/// `expect`s are validated at config load time.
+fn load_over_trigger(retry: &RetryConfig, now_ms: u64) -> bool {
+    let tracker = retry
+        .load_tracker
+        .as_ref()
+        .expect("load_tracker is Some when mode is Load");
+    let trigger = retry
+        .load_trigger_rate
+        .expect("load_trigger_rate is Some when mode is Load");
+    tracker.observe_and_rate(now_ms) >= trigger
 }
 
 /// Write the Retry response into the frame's UMEM buffer and update the
@@ -931,6 +961,90 @@ nonce_length = 13
         assert_eq!(
             classify(&initial, src, retry, 1_000),
             (Decision::Skip, Detail::Observed),
+        );
+    }
+
+    /// Seed the load tracker so `observe_and_rate` reports `rate` from
+    /// the last completed window. The shared-atomic tracker only
+    /// publishes once a window flips, so this walks two windows.
+    fn seed_load_rate(retry: &RetryConfig, rate: u64) {
+        let tracker = retry.load_tracker.as_ref().expect("load tracker present");
+        // Window 0 at t=0 accumulates `rate` ticks...
+        for _ in 0..rate {
+            tracker.observe_and_rate(0);
+        }
+        // ...then a single observation at t=1s flips us into window 1
+        // and publishes the window-0 count as `last_rate`.
+        tracker.observe_and_rate(1_000);
+        assert_eq!(tracker.rate(), rate);
+    }
+
+    #[test]
+    fn classify_load_below_trigger_skips() {
+        // trigger_rate = 10, seeded rate = 5 → Skip.
+        let table = make_table(&format!(
+            "[retry]\nenabled = true\nmode = \"load\"\ntoken_key = \"{KEY_HEX}\"\n\
+             [retry.load]\ntrigger_rate = 10"
+        ));
+        let retry = table.retry.as_ref().unwrap();
+        seed_load_rate(retry, 5);
+
+        let quic = build_v1_initial(&[0xaa; 8], &[0xbb; 4], &[]);
+        let initial = initial::parse(&quic).unwrap();
+        let src = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1));
+        assert_eq!(
+            classify(&initial, src, retry, 1_500),
+            (Decision::Skip, Detail::Observed),
+        );
+    }
+
+    #[test]
+    fn classify_load_at_trigger_emits() {
+        // trigger_rate = 10, seeded rate = 10 → Emit (>= threshold).
+        let table = make_table(&format!(
+            "[retry]\nenabled = true\nmode = \"load\"\ntoken_key = \"{KEY_HEX}\"\n\
+             [retry.load]\ntrigger_rate = 10"
+        ));
+        let retry = table.retry.as_ref().unwrap();
+        seed_load_rate(retry, 10);
+
+        let quic = build_v1_initial(&[0xaa; 8], &[0xbb; 4], &[]);
+        let initial = initial::parse(&quic).unwrap();
+        let src = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1));
+        assert_eq!(
+            classify(&initial, src, retry, 1_500),
+            (Decision::Emit, Detail::Issued),
+        );
+    }
+
+    #[test]
+    fn classify_load_invalid_token_gated_by_rate() {
+        // Invalid token under Load mode: below trigger → Skip, above → Emit.
+        // Both cases must preserve the `TokenInvalid` detail so counters
+        // distinguish token forgery from no-token-present.
+        let table = make_table(&format!(
+            "[retry]\nenabled = true\nmode = \"load\"\ntoken_key = \"{KEY_HEX}\"\n\
+             [retry.load]\ntrigger_rate = 100"
+        ));
+        let retry = table.retry.as_ref().unwrap();
+        let minted_for = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1));
+        let attacker = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 99));
+        let dcid = [0xaa; 8];
+        let tok = retry.token_key.mint(minted_for, &dcid, 1_000).unwrap();
+        let quic = build_v1_initial(&dcid, &[0xbb; 4], &tok);
+        let initial = initial::parse(&quic).unwrap();
+
+        // Below trigger: Skip + TokenInvalid.
+        assert_eq!(
+            classify(&initial, attacker, retry, 1_100),
+            (Decision::Skip, Detail::TokenInvalid),
+        );
+
+        // Now bump the rate above the trigger.
+        seed_load_rate(retry, 200);
+        assert_eq!(
+            classify(&initial, attacker, retry, 1_500),
+            (Decision::Emit, Detail::TokenInvalid),
         );
     }
 

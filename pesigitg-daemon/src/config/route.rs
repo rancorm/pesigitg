@@ -11,11 +11,13 @@
 use std::fmt;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use aes::Aes128;
 use aes::cipher::{KeyInit, generic_array::GenericArray};
 use serde::Deserialize;
 
+use crate::retry::load::LoadRateTracker;
 use crate::retry::token::TokenKey;
 
 /// Per-config-id configuration, validated and ready for use.
@@ -91,6 +93,11 @@ pub struct RetryConfig {
     /// For [`RetryMode::Load`]: packets/sec threshold above which Retry
     /// engages. `None` for other modes.
     pub load_trigger_rate: Option<u64>,
+    /// For [`RetryMode::Load`]: shared rate counter ticked by every
+    /// worker's classifier. `None` for other modes. Held as an `Arc` so
+    /// the read-lock on [`ConfigTable`] hands out the same counter to
+    /// every worker without an extra round of cloning.
+    pub load_tracker: Option<Arc<LoadRateTracker>>,
 }
 
 impl fmt::Display for RetryConfig {
@@ -416,6 +423,11 @@ impl RetryConfig {
         ports.sort_unstable();
         ports.dedup();
 
+        let load_tracker = match mode {
+            RetryMode::Load => Some(Arc::new(LoadRateTracker::new())),
+            _ => None,
+        };
+
         Ok(RetryConfig {
             enabled: raw.enabled,
             token_key,
@@ -423,6 +435,7 @@ impl RetryConfig {
             mode,
             ports,
             load_trigger_rate,
+            load_tracker,
         })
     }
 }
