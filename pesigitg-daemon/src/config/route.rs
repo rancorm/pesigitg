@@ -250,9 +250,9 @@ impl ConfigTable {
         let path = path.as_ref();
         let text = std::fs::read_to_string(path)?;
         let mut table = Self::from_str(&text)?;
-        
+
         table.path = path.to_path_buf();
-        
+
         Ok(table)
     }
 
@@ -278,7 +278,7 @@ impl ConfigTable {
                     config.config_id,
                 )));
             }
-            
+
             slots[id] = Some(config);
         }
 
@@ -301,10 +301,7 @@ impl ConfigTable {
     /// CID length for raw DCID extraction on the fallback path.
     /// Uses the first active config's cid_length.
     pub fn fallback_cid_length(&self) -> Option<u8> {
-        self.slots.iter()
-            .flatten()
-            .next()
-            .map(|c| c.cid_length())
+        self.slots.iter().flatten().next().map(|c| c.cid_length())
     }
 
     /// Iterator over all active configs.
@@ -319,24 +316,30 @@ impl ConfigTable {
 
     /// Returns `true` if any server in any active config is draining.
     pub fn has_draining_servers(&self) -> bool {
-        self.slots.iter().flatten()
+        self.slots
+            .iter()
+            .flatten()
             .any(|c| c.servers.iter().any(|s| s.draining))
     }
 
     /// Returns `true` if any server in any active config has an unresolved MAC.
     pub fn has_unresolved_macs(&self) -> bool {
-        self.slots.iter().flatten()
+        self.slots
+            .iter()
+            .flatten()
             .any(|c| c.servers.iter().any(|s| s.mac.is_none()))
     }
 
     /// Returns `usize` of unresolved MAC addresses
     pub fn unresolved_macs_count(&self) -> usize {
-        self.slots.iter().flatten()
+        self.slots
+            .iter()
+            .flatten()
             .flat_map(|rc| rc.servers.iter())
             .filter(|s| s.mac.is_none())
             .count()
     }
-    
+
     /// Rebuild the merged fallback server list from all active configs.
     /// Call after resolving MACs.
     pub fn rebuild_fallback_servers(&mut self) {
@@ -347,7 +350,10 @@ impl ConfigTable {
                 if server.healthy
                     && server.mac.is_some()
                     && !server.draining
-                    && !self.fallback_servers.iter().any(|s| s.address == server.address)
+                    && !self
+                        .fallback_servers
+                        .iter()
+                        .any(|s| s.address == server.address)
                 {
                     self.fallback_servers.push(server.clone());
                 }
@@ -359,19 +365,19 @@ impl ConfigTable {
     #[cfg(test)]
     pub(crate) fn with_configs(configs: Vec<RouteConfig>) -> Self {
         let mut slots: [Option<RouteConfig>; 7] = Default::default();
-        
+
         for config in configs {
             let id = config.config_id as usize;
             slots[id] = Some(config);
         }
-        
+
         let mut table = ConfigTable {
             path: PathBuf::new(),
             slots,
             fallback_servers: Vec::new(),
             retry: None,
         };
-        
+
         table.rebuild_fallback_servers();
         table
     }
@@ -379,9 +385,8 @@ impl ConfigTable {
 
 /// Parse a hex-encoded 16-byte (128-bit) AES key.
 fn parse_hex_key(s: &str) -> Result<[u8; 16], RouteConfigError> {
-    let bytes = hex::decode(s).map_err(|e| {
-        RouteConfigError::Validation(format!("invalid hex key: {e}"))
-    })?;
+    let bytes = hex::decode(s)
+        .map_err(|e| RouteConfigError::Validation(format!("invalid hex key: {e}")))?;
 
     if bytes.len() != 16 {
         return Err(RouteConfigError::Validation(format!(
@@ -410,10 +415,7 @@ fn parse_server(raw: &RawServer, expected_id_len: u8) -> Result<Server, RouteCon
     }
 
     let id = hex::decode(&raw.id).map_err(|e| {
-        RouteConfigError::Validation(format!(
-            "invalid hex server id '{}': {e}",
-            raw.id,
-        ))
+        RouteConfigError::Validation(format!("invalid hex server id '{}': {e}", raw.id,))
     })?;
 
     if id.len() != expected_id_len as usize {
@@ -425,17 +427,28 @@ fn parse_server(raw: &RawServer, expected_id_len: u8) -> Result<Server, RouteCon
     }
 
     let address: IpAddr = raw.address.parse().map_err(|e| {
-        RouteConfigError::Validation(format!(
-            "invalid server address '{}': {e}",
-            raw.address,
-        ))
+        RouteConfigError::Validation(format!("invalid server address '{}': {e}", raw.address,))
     })?;
 
-    let mac = raw.mac.as_deref().map(mac::parse).transpose().map_err(|e| {
-        RouteConfigError::Validation(format!("invalid server mac '{}': {e}", raw.mac.as_deref().unwrap_or("")))
-    })?;
+    let mac = raw
+        .mac
+        .as_deref()
+        .map(mac::parse)
+        .transpose()
+        .map_err(|e| {
+            RouteConfigError::Validation(format!(
+                "invalid server mac '{}': {e}",
+                raw.mac.as_deref().unwrap_or("")
+            ))
+        })?;
 
-    Ok(Server { id, address, mac, draining: raw.draining, healthy: false })
+    Ok(Server {
+        id,
+        address,
+        mac,
+        draining: raw.draining,
+        healthy: false,
+    })
 }
 
 impl fmt::Display for Encryption {
@@ -450,10 +463,7 @@ impl fmt::Display for Encryption {
 
 impl fmt::Display for Server {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let id_hex: String = self.id
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect();
+        let id_hex: String = self.id.iter().map(|b| format!("{b:02x}")).collect();
 
         match self.mac {
             Some(mac) => {
@@ -473,17 +483,26 @@ impl fmt::Display for Server {
 impl fmt::Display for RouteConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "config_id:        {}", self.config_id)?;
-        writeln!(f, "first_octet_len:  {}", self.first_octet_encodes_cid_length)?;
+        writeln!(
+            f,
+            "first_octet_len:  {}",
+            self.first_octet_encodes_cid_length
+        )?;
         writeln!(f, "server_id_length: {}", self.server_id_length)?;
         writeln!(f, "nonce_length:     {}", self.nonce_length)?;
-        writeln!(f, "cid_length:       {} (1 + {})", self.cid_length(), self.cid_payload_length())?;
+        writeln!(
+            f,
+            "cid_length:       {} (1 + {})",
+            self.cid_length(),
+            self.cid_payload_length()
+        )?;
         writeln!(f, "encryption:       {}", self.encryption)?;
-        
+
         if self.servers.is_empty() {
             write!(f, "servers:          0")?;
         } else {
             writeln!(f, "servers:          {}", self.servers.len())?;
-            
+
             for (i, s) in self.servers.iter().enumerate() {
                 if i + 1 < self.servers.len() {
                     writeln!(f, "  {}", s)?;
@@ -492,7 +511,7 @@ impl fmt::Display for RouteConfig {
                 }
             }
         }
-        
+
         Ok(())
     }
 }
@@ -527,22 +546,31 @@ impl fmt::Display for ConfigTable {
                     };
                     let id_hex: String = s.id.iter().map(|b| format!("{b:02x}")).collect();
                     let mut flags = Vec::new();
-                    if s.draining { flags.push("draining"); }
-                    if !s.healthy { flags.push("unhealthy"); }
+                    if s.draining {
+                        flags.push("draining");
+                    }
+                    if !s.healthy {
+                        flags.push("unhealthy");
+                    }
                     let flag_str = if flags.is_empty() {
                         "healthy".to_string()
                     } else {
                         flags.join(", ")
                     };
                     writeln!(
-                        f, "      {} -> {} mac={} [{}]",
+                        f,
+                        "      {} -> {} mac={} [{}]",
                         id_hex, s.address, mac, flag_str,
                     )?;
                 }
             }
         }
 
-        writeln!(f, "  fallback pool: {} servers", self.fallback_servers.len())?;
+        writeln!(
+            f,
+            "  fallback pool: {} servers",
+            self.fallback_servers.len()
+        )?;
         for s in &self.fallback_servers {
             writeln!(f, "    {}", s.address)?;
         }
@@ -766,5 +794,4 @@ address = "10.0.1.10"
         let table = ConfigTable::from_str(SAMPLE_TOML).unwrap();
         assert_eq!(table.fallback_cid_length(), Some(17));
     }
-
 }

@@ -9,9 +9,9 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use libc::{ioctl, socket, AF_INET, SOCK_DGRAM, c_char};
+use libc::{AF_INET, SOCK_DGRAM, c_char, ioctl, socket};
 use log::{debug, error, info};
-use nix::sched::{sched_setaffinity, CpuSet};
+use nix::sched::{CpuSet, sched_setaffinity};
 use nix::unistd::Pid;
 use xsk_rs::FrameDesc;
 
@@ -110,8 +110,7 @@ fn pin_to_core(core_id: usize) -> std::io::Result<()> {
     cpuset.set(core_id).map_err(std::io::Error::other)?;
 
     // Pid::from_raw(0) means the calling thread
-    sched_setaffinity(Pid::from_raw(0), &cpuset)
-        .map_err(std::io::Error::other)
+    sched_setaffinity(Pid::from_raw(0), &cpuset).map_err(std::io::Error::other)
 }
 
 struct Worker {
@@ -167,12 +166,17 @@ impl WorkerPool {
                         return;
                     }
 
-                    info!(
-                        "worker q{}: started on core {}",
-                        tc.queue_id, tc.core_id
-                    );
+                    info!("worker q{}: started on core {}", tc.queue_id, tc.core_id);
 
-                    worker_loop(&interface, tc.queue_id, &local_mac, &config, &ebpf, &shutdown, stats.slot(worker_idx));
+                    worker_loop(
+                        &interface,
+                        tc.queue_id,
+                        &local_mac,
+                        &config,
+                        &ebpf,
+                        &shutdown,
+                        stats.slot(worker_idx),
+                    );
 
                     info!("worker q{}: exiting", tc.queue_id);
                 })
@@ -186,7 +190,11 @@ impl WorkerPool {
             alive: AtomicUsize::new(workers.len()),
         });
 
-        WorkerPool { workers, shutdown, health }
+        WorkerPool {
+            workers,
+            shutdown,
+            health,
+        }
     }
 
     /// Queue IDs of worker threads that have exited.
@@ -210,7 +218,11 @@ impl WorkerPool {
     /// Publish the current alive-worker count to the shared health handle.
     /// Call once per main-loop iteration.
     pub fn refresh_health(&self) {
-        let alive = self.workers.iter().filter(|w| !w.handle.is_finished()).count();
+        let alive = self
+            .workers
+            .iter()
+            .filter(|w| !w.handle.is_finished())
+            .count();
         self.health.alive.store(alive, Ordering::Relaxed);
     }
 
@@ -241,18 +253,27 @@ fn worker_loop(
     let (mut xsk, xdp_mode) = match XskSocket::new(interface, queue_id) {
         Ok(s) => s,
         Err(e) => {
-            error!("worker q{}: failed to create AF_XDP socket: {:#}", queue_id, e);
+            error!(
+                "worker q{}: failed to create AF_XDP socket: {:#}",
+                queue_id, e
+            );
             return;
         }
     };
 
     let fd = unsafe { BorrowedFd::borrow_raw(xsk.raw_fd()) };
     if let Err(e) = ebpf.lock().unwrap().register_xsk(queue_id, fd) {
-        error!("worker q{}: failed to register in XSKS map: {}", queue_id, e);
+        error!(
+            "worker q{}: failed to register in XSKS map: {}",
+            queue_id, e
+        );
         return;
     }
 
-    info!("worker q{}: AF_XDP socket bound and registered ({})", queue_id, xdp_mode);
+    info!(
+        "worker q{}: AF_XDP socket bound and registered ({})",
+        queue_id, xdp_mode
+    );
 
     let mut rx_descs = vec![FrameDesc::default(); BATCH_SIZE];
     let mut comp_descs = vec![FrameDesc::default(); BATCH_SIZE];
@@ -385,16 +406,20 @@ fn select_cores(interface: &str, queue_count: u32) -> Vec<usize> {
     // Read from /sys/class/net/<interface>/device/numa_node
     // Then pick cores from that node
 
-    let nic_numa = std::fs::read_to_string(format!("/sys/class/net/{}/device/numa_node", interface))
-        .ok()
-        .and_then(|s| s.trim().parse::<i32>().ok())
-        .unwrap_or(0);
+    let nic_numa =
+        std::fs::read_to_string(format!("/sys/class/net/{}/device/numa_node", interface))
+            .ok()
+            .and_then(|s| s.trim().parse::<i32>().ok())
+            .unwrap_or(0);
 
     let mut local_cores = Vec::new();
     let mut remote_cores = Vec::new();
 
     for cpu in 0..num_cores() {
-        let path = format!("/sys/devices/system/cpu/cpu{}/topology/physical_package_id", cpu);
+        let path = format!(
+            "/sys/devices/system/cpu/cpu{}/topology/physical_package_id",
+            cpu
+        );
         let numa = std::fs::read_to_string(&path)
             .ok()
             .and_then(|s| s.trim().parse::<i32>().ok())

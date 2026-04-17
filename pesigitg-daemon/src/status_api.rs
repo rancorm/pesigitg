@@ -22,10 +22,10 @@ use std::sync::{Arc, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use log::{debug, info, warn};
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use pesigitg_common::hex::encode as hex_encode;
 use pesigitg_common::mac::format as format_mac;
@@ -59,18 +59,21 @@ impl StatusApi {
         // Ensure parent dir exists. Under systemd this is created by
         // RuntimeDirectory=, but manual invocations bypass that.
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).with_context(|| {
-                format!("status socket: create parent {}", parent.display())
-            })?;
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("status socket: create parent {}", parent.display()))?;
         }
 
         // Remove stale socket left by a prior run (e.g. ungraceful exit).
         match std::fs::remove_file(&path) {
             Ok(_) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(anyhow!(
-                "status socket: failed to remove stale {}: {}", path.display(), e
-            )),
+            Err(e) => {
+                return Err(anyhow!(
+                    "status socket: failed to remove stale {}: {}",
+                    path.display(),
+                    e
+                ));
+            }
         }
 
         let listener = UnixListener::bind(&path)
@@ -90,8 +93,13 @@ impl StatusApi {
                 .name("status-api".into())
                 .spawn(move || {
                     accept_loop(
-                        listener, shutdown, args, route_config, stats,
-                        worker_health, epoch,
+                        listener,
+                        shutdown,
+                        args,
+                        route_config,
+                        stats,
+                        worker_health,
+                        epoch,
                     );
                 })
                 .context("status socket: spawn accept thread")?
@@ -99,7 +107,12 @@ impl StatusApi {
 
         info!("status API listening on {}", path.display());
 
-        Ok(Self { path, shutdown, listener_fd, accept_thread: Some(accept_thread) })
+        Ok(Self {
+            path,
+            shutdown,
+            listener_fd,
+            accept_thread: Some(accept_thread),
+        })
     }
 
     pub fn shutdown(&mut self) {
@@ -107,7 +120,9 @@ impl StatusApi {
 
         // Kick blocking accept() out with an EOF-like error so the thread
         // can observe the shutdown flag and exit.
-        unsafe { libc::shutdown(self.listener_fd, libc::SHUT_RDWR); }
+        unsafe {
+            libc::shutdown(self.listener_fd, libc::SHUT_RDWR);
+        }
 
         if let Some(h) = self.accept_thread.take() {
             let _ = h.join();
@@ -173,9 +188,7 @@ fn accept_loop(
         let spawn = thread::Builder::new()
             .name("status-api-conn".into())
             .spawn(move || {
-                handle_connection(
-                    stream, &args, &route_config, &stats, &worker_health, epoch,
-                );
+                handle_connection(stream, &args, &route_config, &stats, &worker_health, epoch);
                 active_c.fetch_sub(1, Ordering::SeqCst);
             });
 
@@ -284,7 +297,10 @@ struct RetryView {
 
 impl From<&Snapshot> for SnapshotView {
     fn from(s: &Snapshot) -> Self {
-        let cid_by_config: BTreeMap<u8, u64> = s.cid_by_config.iter().enumerate()
+        let cid_by_config: BTreeMap<u8, u64> = s
+            .cid_by_config
+            .iter()
+            .enumerate()
             .filter_map(|(i, &n)| (n > 0).then_some((i as u8, n)))
             .collect();
         SnapshotView {
@@ -443,7 +459,11 @@ fn build_config_response(
     let route = RouteView {
         path: rc.path.display().to_string(),
         configs: rc.configs().map(RouteConfigView::from).collect(),
-        fallback_pool: rc.fallback_servers.iter().map(|s| s.address.to_string()).collect(),
+        fallback_pool: rc
+            .fallback_servers
+            .iter()
+            .map(|s| s.address.to_string())
+            .collect(),
     };
 
     serde_json::to_value(ConfigResponse { daemon, route }).unwrap_or(Value::Null)

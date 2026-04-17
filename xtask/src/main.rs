@@ -2,18 +2,16 @@
 // Copyright (c) 2026 Jonathan Cormier
 // This file is part of Pesigitg.
 
-use std::string::String;
 use std::path::PathBuf;
 use std::process::{self, Command};
+use std::string::String;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 /// Emit a warning if the pinned eBPF nightly is older than this many days.
 const NIGHTLY_STALE_DAYS: i64 = 30;
 
 fn main() {
-    let args: Vec<String> = std::env::args()
-        .skip(1)
-        .collect();
+    let args: Vec<String> = std::env::args().skip(1).collect();
     let release: bool;
 
     match args.first().map(String::as_str) {
@@ -44,6 +42,12 @@ fn main() {
             build_man();
             eprintln!("[x] man total: {}", fmt_duration(total.elapsed()));
         }
+        Some("lint") => {
+            release = false;
+            let total = Instant::now();
+            run_lint();
+            eprintln!("[x] lint total: {}", fmt_duration(total.elapsed()));
+        }
         _ => {
             eprintln!(
                 "Usage: cargo xtask <COMMAND>\n\n\
@@ -51,6 +55,7 @@ fn main() {
                    build        Build the eBPF program and daemon\n  \
                    build-ebpf   Build only the eBPF program\n  \
                    build-man    Render man pages from man/*.md via pandoc\n  \
+                   lint         Run cargo fmt --check + clippy -D warnings\n  \
                    run          Build and run the daemon (use sudo)\n\n\
                  Options:\n  \
                    --release    Build in release mode"
@@ -80,15 +85,13 @@ fn build_ebpf(release: bool) -> PathBuf {
         .env_remove("RUSTUP_TOOLCHAIN")
         .arg("build")
         .arg("-q");
-    
+
     if release {
         cmd.arg("--release");
     }
 
     let t = Instant::now();
-    let status = cmd
-        .status()
-        .expect("failed to spawn cargo for eBPF build");
+    let status = cmd.status().expect("failed to spawn cargo for eBPF build");
 
     if !status.success() {
         eprintln!("[*] eBPF build failed");
@@ -142,12 +145,13 @@ fn build_daemon(release: bool, ebpf_obj: &std::path::Path) {
 }
 
 fn print_size(path: &std::path::Path, release: bool) {
-    let status = Command::new("rust-size")
-        .arg(path)
-        .status();
+    let status = Command::new("rust-size").arg(path).status();
 
     if let Err(e) = status {
-        eprintln!("[x] warning: rust-size not found ({}), skipping size report", e);
+        eprintln!(
+            "[x] warning: rust-size not found ({}), skipping size report",
+            e
+        );
     }
 
     let is_ebpf = path
@@ -168,18 +172,24 @@ fn print_size(path: &std::path::Path, release: bool) {
         if stripped {
             eprintln!("[x] note: binary is stripped (symbols removed)");
         } else {
-            eprintln!("[x] warning: binary is NOT stripped — check [profile.release] strip setting");
+            eprintln!(
+                "[x] warning: binary is NOT stripped — check [profile.release] strip setting"
+            );
         }
     }
 }
 
 fn print_toolchain(ebpf_dir: &std::path::Path) {
     let toolchain_file = ebpf_dir.join("rust-toolchain.toml");
-    
+
     let contents = match std::fs::read_to_string(&toolchain_file) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("[*] warning: cannot read {}: {}", toolchain_file.display(), e);
+            eprintln!(
+                "[*] warning: cannot read {}: {}",
+                toolchain_file.display(),
+                e
+            );
             return;
         }
     };
@@ -211,7 +221,9 @@ fn print_toolchain(ebpf_dir: &std::path::Path) {
             eprintln!(
                 "[*] warning: pinned nightly is {} days old (> {}); \
                  consider bumping {}",
-                age, NIGHTLY_STALE_DAYS, ebpf_dir.join("rust-toolchain.toml").display()
+                age,
+                NIGHTLY_STALE_DAYS,
+                ebpf_dir.join("rust-toolchain.toml").display()
             );
         }
     }
@@ -244,12 +256,47 @@ fn days_from_civil(y: i32, m: u32, d: u32) -> i64 {
 
 fn fmt_duration(d: std::time::Duration) -> String {
     let secs = d.as_secs();
-    
+
     if secs >= 60 {
         format!("{}m {:02}s", secs / 60, secs % 60)
     } else {
         format!("{}.{:02}s", secs, d.subsec_millis() / 10)
     }
+}
+
+fn run_lint() {
+    let root = workspace_root();
+
+    let t = Instant::now();
+    let status = Command::new(cargo())
+        .current_dir(&root)
+        .args(["fmt", "--all", "--", "--check"])
+        .status()
+        .expect("failed to spawn cargo fmt");
+    if !status.success() {
+        eprintln!("[*] cargo fmt --check failed");
+        process::exit(status.code().unwrap_or(1));
+    }
+    eprintln!("[x] fmt: {}", fmt_duration(t.elapsed()));
+
+    let t = Instant::now();
+    let status = Command::new(cargo())
+        .current_dir(&root)
+        .args([
+            "clippy",
+            "--workspace",
+            "--all-targets",
+            "--",
+            "-D",
+            "warnings",
+        ])
+        .status()
+        .expect("failed to spawn cargo clippy");
+    if !status.success() {
+        eprintln!("[*] cargo clippy failed");
+        process::exit(status.code().unwrap_or(1));
+    }
+    eprintln!("[x] clippy: {}", fmt_duration(t.elapsed()));
 }
 
 fn build_man() {
@@ -333,14 +380,18 @@ fn run_daemon(release: bool, args: &[String]) {
         .join("pesigitgd");
 
     // Pass remaining args (excluding --release) to the daemon
-    let daemon_args: Vec<&str> = args.iter()
+    let daemon_args: Vec<&str> = args
+        .iter()
         .map(String::as_str)
         .filter(|a| *a != "--release")
         .collect();
 
     let mut cmd = Command::new(&bin);
-    cmd.env("RUST_LOG", std::env::var("RUST_LOG").unwrap_or_else(|_| "pesigitgd=info".into()))
-        .args(&daemon_args);
+    cmd.env(
+        "RUST_LOG",
+        std::env::var("RUST_LOG").unwrap_or_else(|_| "pesigitgd=info".into()),
+    )
+    .args(&daemon_args);
 
     eprintln!("[x] running: {} {}", bin.display(), daemon_args.join(" "));
 
@@ -357,8 +408,7 @@ fn exec(cmd: &mut Command) -> std::io::Error {
 }
 
 fn cargo() -> String {
-    std::env::var("CARGO")
-        .unwrap_or_else(|_| "cargo".into())
+    std::env::var("CARGO").unwrap_or_else(|_| "cargo".into())
 }
 
 fn workspace_root() -> PathBuf {
@@ -366,9 +416,8 @@ fn workspace_root() -> PathBuf {
         .args(["locate-project", "--workspace", "--message-format=plain"])
         .output()
         .expect("failed to locate workspace root");
-    let path = String::from_utf8(output.stdout)
-        .expect("invalid utf-8 in cargo output");
-    
+    let path = String::from_utf8(output.stdout).expect("invalid utf-8 in cargo output");
+
     PathBuf::from(path.trim())
         .parent()
         .expect("Cargo.toml has no parent directory")

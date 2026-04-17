@@ -342,7 +342,10 @@ fn cid_route_records_dcid_for_rebinding() {
         dst_port: 9999,
     };
 
-    assert_eq!(conn.lookup(&unrelated_flow, Some(&dcid_key), now()), Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01]));
+    assert_eq!(
+        conn.lookup(&unrelated_flow, Some(&dcid_key), now()),
+        Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01])
+    );
 }
 
 #[test]
@@ -368,7 +371,13 @@ fn fallback_deterministic_across_tables() {
 
 /// Build an IPv4 ICMP Destination Unreachable frame wrapping an inner
 /// IPv4/UDP/QUIC packet (server→client direction).
-fn build_icmp_ipv4_frame(inner_quic: &[u8], inner_src_ip: [u8; 4], inner_dst_ip: [u8; 4], inner_src_port: u16, inner_dst_port: u16) -> Vec<u8> {
+fn build_icmp_ipv4_frame(
+    inner_quic: &[u8],
+    inner_src_ip: [u8; 4],
+    inner_dst_ip: [u8; 4],
+    inner_src_port: u16,
+    inner_dst_port: u16,
+) -> Vec<u8> {
     let mut f = Vec::new();
 
     // Ethernet
@@ -450,16 +459,17 @@ fn icmp_scid_routes_to_server() {
     // ICMP containing a server's long-header response: SCID is routable.
     let config = make_config();
     let inner_quic = build_quic_long_header_with_scid(
-        &[0xde, 0xad], // client DCID (irrelevant)
-        0,             // config_id=0
+        &[0xde, 0xad],       // client DCID (irrelevant)
+        0,                   // config_id=0
         &[0x00, 0x00, 0x01], // server_id
-        &[0xaa; 13],  // nonce
+        &[0xaa; 13],         // nonce
     );
     let mut frame = build_icmp_ipv4_frame(
         &inner_quic,
         [10, 0, 1, 10], // server (VIP)
         [10, 0, 0, 1],  // client
-        443, 12345,
+        443,
+        12345,
     );
     let mut conn = ConnectionTable::new();
 
@@ -497,8 +507,8 @@ fn icmp_fallback_to_connection_table() {
         &inner_quic,
         [10, 0, 1, 10], // server src = VIP (dst of original flow)
         [10, 0, 0, 1],  // client dst = client (src of original flow)
-        443,   // server port (dst_port of original flow)
-        12345, // client port (src_port of original flow)
+        443,            // server port (dst_port of original flow)
+        12345,          // client port (src_port of original flow)
     );
 
     assert!(matches!(
@@ -517,11 +527,7 @@ fn icmp_no_match_passes() {
 
     let mut inner_quic = vec![0x40]; // short header
     inner_quic.extend_from_slice(&[0x00; 20]);
-    let mut frame = build_icmp_ipv4_frame(
-        &inner_quic,
-        [10, 0, 1, 10], [10, 0, 0, 99],
-        443, 54321,
-    );
+    let mut frame = build_icmp_ipv4_frame(&inner_quic, [10, 0, 1, 10], [10, 0, 0, 99], 443, 54321);
 
     assert!(matches!(
         process_packet(&mut frame, &config, &mut conn, &LOCAL_MAC, now()),
@@ -540,11 +546,7 @@ fn icmp_truncated_inner_quic_falls_back() {
 
     // Only 8 bytes of inner QUIC — long header but way too short for SCID.
     let inner_quic = vec![0xc0, 0x00, 0x00, 0x00, 0x01, 0x02, 0x03, 0x04];
-    let mut frame = build_icmp_ipv4_frame(
-        &inner_quic,
-        [10, 0, 1, 10], [10, 0, 0, 1],
-        443, 12345,
-    );
+    let mut frame = build_icmp_ipv4_frame(&inner_quic, [10, 0, 1, 10], [10, 0, 0, 1], 443, 12345);
 
     assert!(matches!(
         process_packet(&mut frame, &config, &mut conn, &LOCAL_MAC, now()),

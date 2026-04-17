@@ -216,9 +216,8 @@ impl RetryConfig {
 /// the two keys can never be mistakenly swapped: the lengths don't
 /// collide and the error message names the service.
 fn parse_hex_retry_key(s: &str) -> Result<[u8; 32], RouteConfigError> {
-    let bytes = hex::decode(s).map_err(|e| {
-        RouteConfigError::Validation(format!("invalid hex retry token key: {e}"))
-    })?;
+    let bytes = hex::decode(s)
+        .map_err(|e| RouteConfigError::Validation(format!("invalid hex retry token key: {e}")))?;
 
     if bytes.len() != 32 {
         return Err(RouteConfigError::Validation(format!(

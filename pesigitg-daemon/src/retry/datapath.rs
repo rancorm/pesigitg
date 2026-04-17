@@ -37,7 +37,7 @@ use crate::config::retry::{RetryConfig, RetryMode};
 use crate::config::route::ConfigTable;
 use crate::quic::initial::{self, Initial, ParseError};
 
-use super::packet::{build_retry, INTEGRITY_TAG_LEN};
+use super::packet::{INTEGRITY_TAG_LEN, build_retry};
 use super::token::{TOKEN_LEN, VerifyError};
 
 /// Outcome of the Retry classifier for one received frame.
@@ -395,14 +395,7 @@ fn emit(
     // RFC 9000 §17.2.5: DCID of the Retry packet echoes the client's
     // SCID; SCID is opaque to the client so we reuse the ODCID — this
     // keeps the rewrite alloc-free and matches other LB implementations.
-    let n = match build_retry(
-        &mut retry_buf,
-        version,
-        odcid,
-        client_scid,
-        odcid,
-        &token,
-    ) {
+    let n = match build_retry(&mut retry_buf, version, odcid, client_scid, odcid, &token) {
         Ok(n) => n,
         Err(_) => return Outcome::Skip,
     };
@@ -565,8 +558,7 @@ fn write_ipv4_checksum(frame: &mut [u8], ip_offset: usize, ip_hdr_len: usize) {
 }
 
 fn write_ipv6_udp_checksum(frame: &mut [u8], layout: &FrameLayout) {
-    let udp_len =
-        u16::from_be_bytes([frame[layout.udp_offset + 4], frame[layout.udp_offset + 5]]);
+    let udp_len = u16::from_be_bytes([frame[layout.udp_offset + 4], frame[layout.udp_offset + 5]]);
     // Zero before summing.
     frame[layout.udp_offset + 6] = 0;
     frame[layout.udp_offset + 7] = 0;

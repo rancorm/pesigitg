@@ -41,7 +41,10 @@ mod tests {
 
     #[test]
     fn format_lowercase_and_padded() {
-        assert_eq!(format(&[0x01, 0x02, 0xab, 0xcd, 0xef, 0x00]), "01:02:ab:cd:ef:00");
+        assert_eq!(
+            format(&[0x01, 0x02, 0xab, 0xcd, 0xef, 0x00]),
+            "01:02:ab:cd:ef:00"
+        );
     }
 
     #[test]

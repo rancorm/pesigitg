@@ -53,10 +53,7 @@ pub enum Verdict {
 /// Parsed frame metadata returned by the frame parser.
 enum FrameMeta {
     /// Regular UDP/QUIC packet.
-    Udp {
-        quic_offset: usize,
-        flow: FlowKey,
-    },
+    Udp { quic_offset: usize, flow: FlowKey },
     /// ICMP error containing an echoed UDP/QUIC packet.
     Icmp {
         inner_quic_offset: usize,
@@ -87,9 +84,18 @@ pub fn process_packet(
         FrameMeta::Udp { quic_offset, flow } => {
             process_udp(frame, table, conn, quic_offset, flow, local_mac, now)
         }
-        FrameMeta::Icmp { inner_quic_offset, reversed_flow } => {
-            process_icmp(frame, table, conn, inner_quic_offset, reversed_flow, local_mac, now)
-        }
+        FrameMeta::Icmp {
+            inner_quic_offset,
+            reversed_flow,
+        } => process_icmp(
+            frame,
+            table,
+            conn,
+            inner_quic_offset,
+            reversed_flow,
+            local_mac,
+            now,
+        ),
     }
 }
 
@@ -109,7 +115,9 @@ fn process_udp(
     if let Some((dcid, config)) = cid::lookup_config(quic, table) {
         if let Some(server_idx) = cid::resolve_server_idx(dcid, config) {
             let server = &config.servers[server_idx];
-            if server.healthy && let Some(mac) = server.mac {
+            if server.healthy
+                && let Some(mac) = server.mac
+            {
                 // Record DCID mapping for NAT rebinding resilience.
                 conn.record_dcid(DcidKey::from_slice(dcid), mac, now);
                 frame[..6].copy_from_slice(&mac);
@@ -132,7 +140,8 @@ fn process_udp(
 
     // Fallback path: CID is unroutable (client-generated Initial, config
     // rotation mismatch, or reserved config_id 7).
-    let raw_dcid = table.fallback_cid_length()
+    let raw_dcid = table
+        .fallback_cid_length()
         .and_then(|len| cid::extract_raw_dcid(quic, len));
     let dcid_key = raw_dcid.map(DcidKey::from_slice);
 
@@ -325,14 +334,9 @@ fn parse_frame_icmp_ipv4(frame: &[u8], outer_ihl: usize) -> Option<FrameMeta> {
         frame[inner_ip_offset + 18],
         frame[inner_ip_offset + 19],
     ));
-    let inner_src_port = u16::from_be_bytes([
-        frame[inner_udp_offset],
-        frame[inner_udp_offset + 1],
-    ]);
-    let inner_dst_port = u16::from_be_bytes([
-        frame[inner_udp_offset + 2],
-        frame[inner_udp_offset + 3],
-    ]);
+    let inner_src_port = u16::from_be_bytes([frame[inner_udp_offset], frame[inner_udp_offset + 1]]);
+    let inner_dst_port =
+        u16::from_be_bytes([frame[inner_udp_offset + 2], frame[inner_udp_offset + 3]]);
 
     Some(FrameMeta::Icmp {
         inner_quic_offset,

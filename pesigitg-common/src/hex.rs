@@ -16,8 +16,7 @@ pub fn decode(s: &str) -> Result<Vec<u8>, String> {
     (0..s.len())
         .step_by(2)
         .map(|i| {
-            u8::from_str_radix(&s[i..i + 2], 16)
-                .map_err(|_| format!("invalid hex at position {i}"))
+            u8::from_str_radix(&s[i..i + 2], 16).map_err(|_| format!("invalid hex at position {i}"))
         })
         .collect()
 }
@@ -43,7 +42,10 @@ mod tests {
 
     #[test]
     fn decode_trims_whitespace() {
-        assert_eq!(decode("  deadbeef\n").unwrap(), vec![0xde, 0xad, 0xbe, 0xef]);
+        assert_eq!(
+            decode("  deadbeef\n").unwrap(),
+            vec![0xde, 0xad, 0xbe, 0xef]
+        );
     }
 
     #[test]

@@ -26,8 +26,12 @@ pub(crate) fn reload_config(args: &Arc<RwLock<Args>>, route_config: &Arc<RwLock<
 
     // Pair RELOADING=1 with MONOTONIC_USEC so systemd can track reload duration.
     match NotifyState::monotonic_usec_now() {
-        Ok(ts) => { systemd_notify!(NotifyState::Reloading, ts); }
-        Err(_) => { systemd_notify!(NotifyState::Reloading); }
+        Ok(ts) => {
+            systemd_notify!(NotifyState::Reloading, ts);
+        }
+        Err(_) => {
+            systemd_notify!(NotifyState::Reloading);
+        }
     }
 
     let config_path = args.read().expect("lock poisoned").config.clone();
@@ -66,17 +70,23 @@ pub(crate) fn reload_config(args: &Arc<RwLock<Args>>, route_config: &Arc<RwLock<
 
             info!("route config reloaded: {}", rc.path.display());
             info!("{}", rc);
-            
+
             log_draining_servers(&rc);
 
             *route_config.write().expect("lock poisoned") = rc;
         }
         Err(e) => {
-            error!("failed to reload route config: {}; keeping current settings", e);
+            error!(
+                "failed to reload route config: {}; keeping current settings",
+                e
+            );
         }
     }
 
-    notify_ready(&build_status(&args.read().expect("lock poisoned"), &route_config.read().expect("lock poisoned")));
+    notify_ready(&build_status(
+        &args.read().expect("lock poisoned"),
+        &route_config.read().expect("lock poisoned"),
+    ));
 
     debug!("reload_config: complete in {:.2?}", reload_start.elapsed());
 }
@@ -93,8 +103,12 @@ pub(crate) fn build_status(args: &Args, rc: &ConfigTable) -> String {
     for config in rc.configs() {
         for s in &config.servers {
             total += 1;
-            if s.healthy { healthy += 1; }
-            if s.draining { draining += 1; }
+            if s.healthy {
+                healthy += 1;
+            }
+            if s.draining {
+                draining += 1;
+            }
         }
     }
 
@@ -113,7 +127,10 @@ pub(crate) fn log_draining_servers(table: &ConfigTable) {
     for config in table.configs() {
         for server in &config.servers {
             if server.draining {
-                warn!("server {} is draining (config_id={})", server, config.config_id);
+                warn!(
+                    "server {} is draining (config_id={})",
+                    server, config.config_id
+                );
             }
         }
     }

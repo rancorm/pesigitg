@@ -7,7 +7,7 @@ use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use nix::fcntl::{Flock, FlockArg};
 
 use pesigitg_common::current_pid;
@@ -51,4 +51,3 @@ impl Drop for PidFile {
         let _ = fs::remove_file(&self.path);
     }
 }
-

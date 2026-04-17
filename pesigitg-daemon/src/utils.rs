@@ -93,7 +93,7 @@ pub fn is_aes_available() -> bool {
 }
 
 pub(crate) fn daemonize() -> anyhow::Result<()> {
-    use nix::unistd::{chdir, dup2_stdin, dup2_stdout, dup2_stderr, fork, setsid, ForkResult};
+    use nix::unistd::{ForkResult, chdir, dup2_stderr, dup2_stdin, dup2_stdout, fork, setsid};
     use pesigitg_common::exit;
 
     // First fork: parent exits, child continues

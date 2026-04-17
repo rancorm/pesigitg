@@ -149,8 +149,7 @@ pub fn parse_strict(packet: &[u8]) -> Result<Initial<'_>, ParseError> {
     let token = &packet[token_start..token_end];
 
     // Length (varint).
-    let (length, len_size) =
-        read_varint(&packet[token_end..]).ok_or(ParseError::LengthInvalid)?;
+    let (length, len_size) = read_varint(&packet[token_end..]).ok_or(ParseError::LengthInvalid)?;
     let pn_offset = token_end + len_size;
 
     // Length covers PN + payload bytes after the Length varint.
@@ -441,10 +440,7 @@ mod tests {
 
     #[test]
     fn varint_four_byte() {
-        assert_eq!(
-            read_varint(&[0x80, 0x00, 0x00, 0x25]),
-            Some((0x25, 4))
-        );
+        assert_eq!(read_varint(&[0x80, 0x00, 0x00, 0x25]), Some((0x25, 4)));
     }
 
     #[test]
@@ -488,9 +484,11 @@ mod tests {
     fn no_panic_on_adversarial_lengths() {
         // Various adversarial length byte combinations.
         let cases: &[&[u8]] = &[
-            &[0xc0, 0, 0, 0, 1, 0xff],                       // dcid_len=255 only
-            &[0xc0, 0, 0, 0, 1, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff],
-            &[0xc0, 0, 0, 0, 1, 0, 0xff],                    // scid_len=255
+            &[0xc0, 0, 0, 0, 1, 0xff], // dcid_len=255 only
+            &[
+                0xc0, 0, 0, 0, 1, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff,
+            ],
+            &[0xc0, 0, 0, 0, 1, 0, 0xff], // scid_len=255
             &[0xc0, 0, 0, 0, 1, 0, 0, 0xff, 0xff, 0xff, 0xff], // varint-ish garbage
         ];
         for pkt in cases {

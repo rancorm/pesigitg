@@ -25,28 +25,23 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use log::{error, warn, info, debug};
+use anyhow::{Result, anyhow, ensure};
+use log::{debug, error, info, warn};
+use pesigitg_common::{DEFAULT_ROUTE_CONFIG, current_pid, exit, pid_file};
 use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM, SIGUSR1, SIGUSR2};
 use signal_hook::iterator::Signals;
-use anyhow::{anyhow, ensure, Result};
-use pesigitg_common::{pid_file, DEFAULT_ROUTE_CONFIG, current_pid, exit};
 
 use args::parse_args;
+use config::route::ConfigTable;
 use config::{build_status, log_draining_servers, reload_config};
 use health::HealthChecker;
-use config::route::ConfigTable;
 use pidfile::PidFile;
 use stats::{Snapshot, StatsTable};
 use status_api::StatusApi;
-use threading::{get_hw_queues, plan_threads, WorkerPool};
+use threading::{WorkerPool, get_hw_queues, plan_threads};
 use utils::{
-    daemonize,
-    init_logging,
-    is_aes_available,
-    notify_ready,
-    num_cores,
-    running_under_systemd,
-    systemd_notify
+    daemonize, init_logging, is_aes_available, notify_ready, num_cores, running_under_systemd,
+    systemd_notify,
 };
 
 const LOOP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -62,8 +57,12 @@ fn main() -> Result<()> {
 
     // Setup logging: stderr in foreground mode (journald captures it), syslog otherwise
     match args.foreground {
-        true => { env_logger::init(); }
-        false => { init_logging()?; }
+        true => {
+            env_logger::init();
+        }
+        false => {
+            init_logging()?;
+        }
     }
 
     // PID file (unnecessary under systemd) and signal hooks
@@ -99,7 +98,10 @@ fn main() -> Result<()> {
     //  - Early Atom Celeron/Pentium processors
     //  - Some Xeon Phi models
     //  - BIOS/firmware disabling (rare)
-    ensure!(is_aes_available(), "AES-NI not available - try again please");
+    ensure!(
+        is_aes_available(),
+        "AES-NI not available - try again please"
+    );
     info!("AES-NI available");
 
     info!("number of cores: {}", num_cores());
@@ -116,7 +118,10 @@ fn main() -> Result<()> {
 
             // Warn about thread queue coverage
             if args.queues < current {
-                warn!("spawn {0} AF_XDP threads for full queue coverage (--queues {0})", current);
+                warn!(
+                    "spawn {0} AF_XDP threads for full queue coverage (--queues {0})",
+                    current
+                );
             }
         }
         Err(e) => {
@@ -179,7 +184,10 @@ fn main() -> Result<()> {
     // Resolve and log interface MAC
     let local_mac = utils::interface_mac(&args.interface)
         .map_err(|e| anyhow!("failed to get MAC for {}: {}", args.interface, e))?;
-    info!("interface MAC: {}", pesigitg_common::mac::format(&local_mac));
+    info!(
+        "interface MAC: {}",
+        pesigitg_common::mac::format(&local_mac)
+    );
 
     // Thread safe
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -196,7 +204,10 @@ fn main() -> Result<()> {
     debug!("worker pool spawned: T+{:.2?}", epoch.elapsed());
 
     // Notify systemd that we're ready with a live status string.
-    notify_ready(&build_status(&args, &route_config.read().expect("lock poisoned")));
+    notify_ready(&build_status(
+        &args,
+        &route_config.read().expect("lock poisoned"),
+    ));
 
     // Backends are probed on the first configured port only; see the
     // HEALTH CHECKING section of pesigitgd(8) for the rationale.
@@ -214,14 +225,17 @@ fn main() -> Result<()> {
     let worker_health = workers.health();
     let mut status_api = {
         let path = args.read().expect("lock poisoned").status_socket.clone();
-        path.map(|p| StatusApi::spawn(
-            p,
-            Arc::clone(&args),
-            Arc::clone(&route_config),
-            Arc::clone(&stats),
-            Arc::clone(&worker_health),
-            epoch,
-        )).transpose()?
+        path.map(|p| {
+            StatusApi::spawn(
+                p,
+                Arc::clone(&args),
+                Arc::clone(&route_config),
+                Arc::clone(&stats),
+                Arc::clone(&worker_health),
+                epoch,
+            )
+        })
+        .transpose()?
     };
 
     // Poll for signals with a timeout to allow watchdog keepalives
@@ -262,7 +276,9 @@ fn main() -> Result<()> {
                         info!("received signal {}, shutting down", sig);
 
                         sig_handle.close();
-                        if let Some(api) = status_api.as_mut() { api.shutdown(); }
+                        if let Some(api) = status_api.as_mut() {
+                            api.shutdown();
+                        }
                         workers.shutdown();
 
                         info!("all workers stopped");
@@ -332,7 +348,9 @@ fn main() -> Result<()> {
             );
 
             sig_handle.close();
-            if let Some(api) = status_api.as_mut() { api.shutdown(); }
+            if let Some(api) = status_api.as_mut() {
+                api.shutdown();
+            }
             workers.shutdown();
 
             return Err(anyhow!("worker thread(s) exited unexpectedly: {:?}", dead));

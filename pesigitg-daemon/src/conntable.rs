@@ -204,7 +204,10 @@ mod tests {
             dst_port: 443,
         };
 
-        assert_eq!(table.lookup(&other_flow, Some(&dcid), t), Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x05]));
+        assert_eq!(
+            table.lookup(&other_flow, Some(&dcid), t),
+            Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x05])
+        );
     }
 
     #[test]
@@ -224,7 +227,10 @@ mod tests {
             dst_port: 443,
         };
 
-        assert_eq!(table.lookup(&unrelated_flow, Some(&lookup_dcid), t), Some(mac));
+        assert_eq!(
+            table.lookup(&unrelated_flow, Some(&lookup_dcid), t),
+            Some(mac)
+        );
     }
 
     #[test]

@@ -56,7 +56,6 @@ pub const ICMPV6_TIME_EXCEEDED: u8 = 3;
 // Maximum IPv6 extension headers to walk before giving up
 pub const MAX_IPV6_EXT_HDRS: usize = 6;
 
-
 #[cfg(feature = "std")]
 #[allow(non_upper_case_globals)]
 pub const current_pid: fn() -> u32 = std::process::id;
@@ -72,6 +71,10 @@ pub fn pid_file(iface: &str) -> std::path::PathBuf {
 #[cfg(feature = "std")]
 #[macro_export]
 macro_rules! exit {
-    ($code:expr) => { std::process::exit($code) };
-    () => { std::process::exit(0) };
+    ($code:expr) => {
+        std::process::exit($code)
+    };
+    () => {
+        std::process::exit(0)
+    };
 }

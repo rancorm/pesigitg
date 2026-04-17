@@ -139,8 +139,8 @@ async fn main() -> Result<()> {
     ));
 
     // -- Endpoint --
-    let mut endpoint = Endpoint::client("0.0.0.0:0".parse().unwrap())
-        .context("creating endpoint")?;
+    let mut endpoint =
+        Endpoint::client("0.0.0.0:0".parse().unwrap()).context("creating endpoint")?;
     endpoint.set_default_client_config(client_config);
 
     // -- Connect --

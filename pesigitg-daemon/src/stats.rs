@@ -248,7 +248,7 @@ impl Snapshot {
         for (i, slot) in cid_by_config.iter_mut().enumerate() {
             *slot = self.cid_by_config[i].wrapping_sub(prev.cid_by_config[i]);
         }
-        
+
         Snapshot {
             rx_packets: self.rx_packets.wrapping_sub(prev.rx_packets),
             forwarded: self.forwarded.wrapping_sub(prev.forwarded),
@@ -256,15 +256,25 @@ impl Snapshot {
             cid_by_config,
             cid_unroutable: self.cid_unroutable.wrapping_sub(prev.cid_unroutable),
             fallback_routed: self.fallback_routed.wrapping_sub(prev.fallback_routed),
-            draining_forwarded: self.draining_forwarded.wrapping_sub(prev.draining_forwarded),
+            draining_forwarded: self
+                .draining_forwarded
+                .wrapping_sub(prev.draining_forwarded),
             icmp_forwarded: self.icmp_forwarded.wrapping_sub(prev.icmp_forwarded),
             passed: self.passed.wrapping_sub(prev.passed),
             pending_fill_peak: self.pending_fill_peak,
-            retry_initials_seen: self.retry_initials_seen.wrapping_sub(prev.retry_initials_seen),
+            retry_initials_seen: self
+                .retry_initials_seen
+                .wrapping_sub(prev.retry_initials_seen),
             retry_issued: self.retry_issued.wrapping_sub(prev.retry_issued),
-            retry_token_validated: self.retry_token_validated.wrapping_sub(prev.retry_token_validated),
-            retry_token_invalid: self.retry_token_invalid.wrapping_sub(prev.retry_token_invalid),
-            retry_token_expired: self.retry_token_expired.wrapping_sub(prev.retry_token_expired),
+            retry_token_validated: self
+                .retry_token_validated
+                .wrapping_sub(prev.retry_token_validated),
+            retry_token_invalid: self
+                .retry_token_invalid
+                .wrapping_sub(prev.retry_token_invalid),
+            retry_token_expired: self
+                .retry_token_expired
+                .wrapping_sub(prev.retry_token_expired),
             retry_parse_error: self.retry_parse_error.wrapping_sub(prev.retry_parse_error),
         }
     }
@@ -302,21 +312,21 @@ impl fmt::Display for Snapshot {
         )?;
 
         self.format_cid_by_config(f)?;
-        
+
         if self.cid_unroutable > 0 {
             write!(f, " cid_unroutable={}", self.cid_unroutable)?;
         }
-        
+
         if self.draining_forwarded > 0 {
             write!(f, " draining={}", self.draining_forwarded)?;
         }
-        
+
         write!(
             f,
             " fallback={} icmp={}) pass={}",
             self.fallback_routed, self.icmp_forwarded, self.passed,
         )?;
-        
+
         if self.pending_fill_peak > 0 {
             write!(f, " pending_fill_peak={}", self.pending_fill_peak)?;
         }
@@ -359,16 +369,16 @@ impl StatsTable {
 
     pub fn aggregate(&self) -> Snapshot {
         let mut total = Snapshot::default();
-        
+
         for slot in self.slots.iter() {
             total.rx_packets += slot.rx_packets.load(Ordering::Relaxed);
             total.forwarded += slot.forwarded.load(Ordering::Relaxed);
             total.cid_routed += slot.cid_routed.load(Ordering::Relaxed);
-            
+
             for i in 0..7 {
                 total.cid_by_config[i] += slot.cid_by_config[i].load(Ordering::Relaxed);
             }
-            
+
             total.cid_unroutable += slot.cid_unroutable.load(Ordering::Relaxed);
             total.fallback_routed += slot.fallback_routed.load(Ordering::Relaxed);
             total.draining_forwarded += slot.draining_forwarded.load(Ordering::Relaxed);

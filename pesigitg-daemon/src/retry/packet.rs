@@ -19,34 +19,30 @@
 //! integration live in sibling modules.
 
 use aes_gcm::{
-    aead::{AeadInPlace, KeyInit},
     Aes128Gcm, Nonce,
+    aead::{AeadInPlace, KeyInit},
 };
 
 use crate::quic::initial::{QUIC_V1, QUIC_V2};
 
 /// RFC 9001 §5.8 v1 Retry Integrity Tag key.
 const RETRY_KEY_V1: [u8; 16] = [
-    0xbe, 0x0c, 0x69, 0x0b, 0x9f, 0x66, 0x57, 0x5a,
-    0x1d, 0x76, 0x6b, 0x54, 0xe3, 0x68, 0xc8, 0x4e,
+    0xbe, 0x0c, 0x69, 0x0b, 0x9f, 0x66, 0x57, 0x5a, 0x1d, 0x76, 0x6b, 0x54, 0xe3, 0x68, 0xc8, 0x4e,
 ];
 
 /// RFC 9001 §5.8 v1 Retry Integrity Tag nonce.
 const RETRY_NONCE_V1: [u8; 12] = [
-    0x46, 0x15, 0x99, 0xd3, 0x5d, 0x63, 0x2b, 0xf2,
-    0x23, 0x98, 0x25, 0xbb,
+    0x46, 0x15, 0x99, 0xd3, 0x5d, 0x63, 0x2b, 0xf2, 0x23, 0x98, 0x25, 0xbb,
 ];
 
 /// RFC 9369 §3.2 v2 Retry Integrity Tag key.
 const RETRY_KEY_V2: [u8; 16] = [
-    0x8f, 0xb4, 0xb0, 0x1b, 0x56, 0xac, 0x48, 0xe2,
-    0x60, 0xfb, 0xcb, 0xce, 0xad, 0x7c, 0xcc, 0x92,
+    0x8f, 0xb4, 0xb0, 0x1b, 0x56, 0xac, 0x48, 0xe2, 0x60, 0xfb, 0xcb, 0xce, 0xad, 0x7c, 0xcc, 0x92,
 ];
 
 /// RFC 9369 §3.2 v2 Retry Integrity Tag nonce.
 const RETRY_NONCE_V2: [u8; 12] = [
-    0xd8, 0x69, 0x69, 0xbc, 0x2d, 0x7c, 0x6d, 0x99,
-    0x90, 0xef, 0xb0, 0x4a,
+    0xd8, 0x69, 0x69, 0xbc, 0x2d, 0x7c, 0x6d, 0x99, 0x90, 0xef, 0xb0, 0x4a,
 ];
 
 /// Size of the trailing integrity tag.
@@ -104,10 +100,7 @@ pub fn build_retry(
     scid: &[u8],
     token: &[u8],
 ) -> Result<usize, BuildError> {
-    if odcid.len() > MAX_CID_LEN
-        || dcid.len() > MAX_CID_LEN
-        || scid.len() > MAX_CID_LEN
-    {
+    if odcid.len() > MAX_CID_LEN || dcid.len() > MAX_CID_LEN || scid.len() > MAX_CID_LEN {
         return Err(BuildError::CidTooLong);
     }
 
@@ -187,8 +180,7 @@ pub fn compute_integrity_tag(
     pseudo[1..1 + odcid.len()].copy_from_slice(odcid);
     pseudo[1 + odcid.len()..pseudo_len].copy_from_slice(retry_without_tag);
 
-    let cipher = Aes128Gcm::new_from_slice(key)
-        .expect("Retry key is exactly 16 bytes");
+    let cipher = Aes128Gcm::new_from_slice(key).expect("Retry key is exactly 16 bytes");
     let nonce = Nonce::from_slice(iv);
 
     // AAD-only authentication: empty plaintext → no ciphertext, the
@@ -265,7 +257,8 @@ mod tests {
         assert_eq!(&out[17..49], &token);
 
         // Recompute the tag from the body and verify self-consistency.
-        let recomputed = compute_integrity_tag(QUIC_V1, &odcid, &out[..n - INTEGRITY_TAG_LEN]).unwrap();
+        let recomputed =
+            compute_integrity_tag(QUIC_V1, &odcid, &out[..n - INTEGRITY_TAG_LEN]).unwrap();
         assert_eq!(&out[n - INTEGRITY_TAG_LEN..n], &recomputed);
     }
 
@@ -374,7 +367,8 @@ mod tests {
         assert_eq!(&out[1..5], &QUIC_V2.to_be_bytes());
 
         // Recompute the tag and verify self-consistency.
-        let recomputed = compute_integrity_tag(QUIC_V2, &odcid, &out[..n - INTEGRITY_TAG_LEN]).unwrap();
+        let recomputed =
+            compute_integrity_tag(QUIC_V2, &odcid, &out[..n - INTEGRITY_TAG_LEN]).unwrap();
         assert_eq!(&out[n - INTEGRITY_TAG_LEN..n], &recomputed);
     }
 

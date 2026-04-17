@@ -6,10 +6,10 @@ use std::os::fd::AsRawFd;
 use std::path::Path;
 use std::time::Instant;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
+use aya::Ebpf;
 use aya::maps::{HashMap, XskMap};
 use aya::programs::{Xdp, XdpFlags};
-use aya::Ebpf;
 use log::{debug, info};
 
 /// Force 8-byte alignment for the embedded eBPF ELF object.
@@ -71,9 +71,7 @@ pub fn load_ebpf(path: Option<&Path>, interface: &str, ports: &[u16]) -> Result<
         }
         _ => {
             if EMBEDDED_EBPF.is_empty() {
-                bail!(
-                    "no embedded eBPF object; build with `cargo xtask build`"
-                );
+                bail!("no embedded eBPF object; build with `cargo xtask build`");
             }
 
             Ebpf::load(EMBEDDED_EBPF).context("failed to load embedded eBPF object")?
@@ -89,14 +87,16 @@ pub fn load_ebpf(path: Option<&Path>, interface: &str, ports: &[u16]) -> Result<
         .context("'pesigitg' is not an XDP program")?;
 
     let attach_start = Instant::now();
-    program.load()
-        .context("failed to load XDP program")?;
+    program.load().context("failed to load XDP program")?;
     program
         .attach(interface, XdpFlags::DRV_MODE)
         .context("failed to attach XDP program to interface")?;
 
     info!("XDP program attached to '{}'", interface);
-    debug!("XDP program load+attach took {:.2?}", attach_start.elapsed());
+    debug!(
+        "XDP program load+attach took {:.2?}",
+        attach_start.elapsed()
+    );
 
     {
         let mut port_map: HashMap<_, u16, u8> = HashMap::try_from(

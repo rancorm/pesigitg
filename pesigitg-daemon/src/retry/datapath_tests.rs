@@ -6,8 +6,7 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 
 const LOCAL_MAC: [u8; 6] = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66];
 const CLIENT_MAC: [u8; 6] = [0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa];
-const KEY_HEX: &str =
-    "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20";
+const KEY_HEX: &str = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20";
 
 fn make_table(retry_toml: &str) -> ConfigTable {
     let toml = format!(
@@ -151,14 +150,7 @@ impl TestFrame {
             Err(_) => return Outcome::Skip,
         };
         let mut retry_buf = [0u8; 128];
-        let n = match build_retry(
-            &mut retry_buf,
-            version,
-            odcid,
-            client_scid,
-            odcid,
-            &token,
-        ) {
+        let n = match build_retry(&mut retry_buf, version, odcid, client_scid, odcid, &token) {
             Ok(n) => n,
             Err(_) => return Outcome::Skip,
         };
@@ -176,7 +168,11 @@ impl TestFrame {
         self.len = total;
 
         if layout.is_ipv4 {
-            write_ipv4_checksum(&mut self.buf[..self.len], layout.ip_offset, layout.ip_hdr_len);
+            write_ipv4_checksum(
+                &mut self.buf[..self.len],
+                layout.ip_offset,
+                layout.ip_hdr_len,
+            );
         } else {
             write_ipv6_udp_checksum(&mut self.buf[..self.len], layout);
         }
@@ -193,8 +189,8 @@ fn build_udp_v4(
     dst_port: u16,
 ) -> Vec<u8> {
     let mut f = Vec::new();
-    f.extend_from_slice(&LOCAL_MAC);   // dst mac (us)
-    f.extend_from_slice(&CLIENT_MAC);  // src mac (client/upstream)
+    f.extend_from_slice(&LOCAL_MAC); // dst mac (us)
+    f.extend_from_slice(&CLIENT_MAC); // src mac (client/upstream)
     f.extend_from_slice(&ETH_P_IP.to_be_bytes());
 
     f.push(0x45);
@@ -425,7 +421,10 @@ fn disabled_short_circuits() {
     let quic = build_v1_initial(&[0xaa; 8], &[0xbb; 4], &[]);
     let frame = build_udp_v4(&quic, [203, 0, 113, 1], [10, 0, 0, 1], 12345, 4433);
     let mut f = TestFrame::new(&frame);
-    assert_eq!(f.try_handle_slice(&table, &LOCAL_MAC, 1_000).0, Outcome::Skip);
+    assert_eq!(
+        f.try_handle_slice(&table, &LOCAL_MAC, 1_000).0,
+        Outcome::Skip
+    );
     // Frame bytes untouched.
     assert_eq!(&f.buf[..f.len], frame.as_slice());
 }
@@ -440,12 +439,18 @@ fn port_filter_scopes_handling() {
     // dst port 4433 is not in the [443] list → Skip.
     let frame_wrong = build_udp_v4(&quic, [203, 0, 113, 1], [10, 0, 0, 1], 12345, 4433);
     let mut fw = TestFrame::new(&frame_wrong);
-    assert_eq!(fw.try_handle_slice(&table, &LOCAL_MAC, 1_000).0, Outcome::Skip);
+    assert_eq!(
+        fw.try_handle_slice(&table, &LOCAL_MAC, 1_000).0,
+        Outcome::Skip
+    );
 
     // dst port 443 is in the list → Emitted.
     let frame_ok = build_udp_v4(&quic, [203, 0, 113, 1], [10, 0, 0, 1], 12345, 443);
     let mut fo = TestFrame::new(&frame_ok);
-    assert_eq!(fo.try_handle_slice(&table, &LOCAL_MAC, 1_000).0, Outcome::Emitted);
+    assert_eq!(
+        fo.try_handle_slice(&table, &LOCAL_MAC, 1_000).0,
+        Outcome::Emitted
+    );
 }
 
 #[test]
@@ -468,7 +473,11 @@ fn ipv4_emits_reflected_frame() {
 
     // IPv4 header swapped.
     assert_eq!(&f.buf[14 + 12..14 + 16], &[10, 0, 0, 1], "src ip = VIP");
-    assert_eq!(&f.buf[14 + 16..14 + 20], &[203, 0, 113, 1], "dst ip = client");
+    assert_eq!(
+        &f.buf[14 + 16..14 + 20],
+        &[203, 0, 113, 1],
+        "dst ip = client"
+    );
 
     // UDP ports swapped.
     assert_eq!(&f.buf[14 + 20..14 + 22], &4433u16.to_be_bytes());
@@ -498,7 +507,10 @@ fn ipv4_emitted_token_round_trips() {
     let src_ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7));
     let frame = build_udp_v4(&quic, [203, 0, 113, 7], [10, 0, 0, 1], 12345, 4433);
     let mut f = TestFrame::new(&frame);
-    assert_eq!(f.try_handle_slice(&table, &LOCAL_MAC, 2_000).0, Outcome::Emitted);
+    assert_eq!(
+        f.try_handle_slice(&table, &LOCAL_MAC, 2_000).0,
+        Outcome::Emitted
+    );
 
     // Parse the emitted Retry back out and verify its token.
     let payload_off = 14 + 20 + 8;
@@ -563,7 +575,10 @@ fn non_udp_is_skipped() {
     frame.push(0x01); // ICMP
     frame.extend_from_slice(&[0u8; 10]);
     let mut f = TestFrame::new(&frame);
-    assert_eq!(f.try_handle_slice(&table, &LOCAL_MAC, 1_000).0, Outcome::Skip);
+    assert_eq!(
+        f.try_handle_slice(&table, &LOCAL_MAC, 1_000).0,
+        Outcome::Skip
+    );
 }
 
 #[test]
@@ -669,7 +684,10 @@ fn v2_emitted_token_round_trips() {
     let src_ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7));
     let frame = build_udp_v4(&quic, [203, 0, 113, 7], [10, 0, 0, 1], 12345, 4433);
     let mut f = TestFrame::new(&frame);
-    assert_eq!(f.try_handle_slice(&table, &LOCAL_MAC, 2_000).0, Outcome::Emitted);
+    assert_eq!(
+        f.try_handle_slice(&table, &LOCAL_MAC, 2_000).0,
+        Outcome::Emitted
+    );
 
     // Extract token from the emitted v2 Retry and verify it.
     let payload_off = 14 + 20 + 8;

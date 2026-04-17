@@ -62,7 +62,11 @@ pub struct ndmsg {
 impl NetlinkSocket {
     fn open() -> io::Result<Self> {
         let fd = unsafe {
-            libc::socket(libc::AF_NETLINK, libc::SOCK_RAW | libc::SOCK_CLOEXEC, libc::NETLINK_ROUTE)
+            libc::socket(
+                libc::AF_NETLINK,
+                libc::SOCK_RAW | libc::SOCK_CLOEXEC,
+                libc::NETLINK_ROUTE,
+            )
         };
 
         if fd < 0 {
@@ -79,7 +83,7 @@ impl NetlinkSocket {
                 std::mem::size_of::<libc::sockaddr_nl>() as libc::socklen_t,
             )
         };
-        
+
         if ret < 0 {
             let err = io::Error::last_os_error();
             unsafe { libc::close(fd) };
@@ -127,7 +131,11 @@ pub fn resolve_macs(servers: &mut [Server]) {
 
         match table.get(&server.address) {
             Some(&mac) => {
-                info!("resolved {} -> {}", server.address, pesigitg_common::mac::format(&mac));
+                info!(
+                    "resolved {} -> {}",
+                    server.address,
+                    pesigitg_common::mac::format(&mac)
+                );
                 server.mac = Some(mac);
             }
             None => {
@@ -150,7 +158,7 @@ pub fn resolve_macs(servers: &mut [Server]) {
 /// Send `RTM_GETNEIGH | NLM_F_DUMP` and collect all valid entries into a map.
 fn query_neighbour_table() -> io::Result<HashMap<IpAddr, [u8; 6]>> {
     let sock = NetlinkSocket::open()?;
-    
+
     send_dump_request(&sock)?;
     recv_neigh_entries(&sock)
 }
@@ -163,7 +171,7 @@ fn send_dump_request(sock: &NetlinkSocket) -> io::Result<()> {
     }
 
     let mut req: Request = unsafe { std::mem::zeroed() };
-    
+
     req.hdr.nlmsg_len = std::mem::size_of::<Request>() as u32;
     req.hdr.nlmsg_type = RTM_GETNEIGH;
     req.hdr.nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP;
@@ -191,9 +199,7 @@ fn recv_neigh_entries(sock: &NetlinkSocket) -> io::Result<HashMap<IpAddr, [u8; 6
     let mut buf = vec![0u8; 65536];
 
     'recv: loop {
-        let n = unsafe {
-            libc::recv(sock.0, buf.as_mut_ptr() as *mut libc::c_void, buf.len(), 0)
-        };
+        let n = unsafe { libc::recv(sock.0, buf.as_mut_ptr() as *mut libc::c_void, buf.len(), 0) };
 
         if n < 0 {
             return Err(io::Error::last_os_error());
@@ -211,8 +217,8 @@ fn recv_neigh_entries(sock: &NetlinkSocket) -> io::Result<HashMap<IpAddr, [u8; 6
             }
 
             match hdr.nlmsg_type {
-                NLMSG_DONE   => break 'recv,
-                NLMSG_ERROR  => return Err(io::Error::from_raw_os_error(libc::EPROTO)),
+                NLMSG_DONE => break 'recv,
+                NLMSG_ERROR => return Err(io::Error::from_raw_os_error(libc::EPROTO)),
                 RTM_NEWNEIGH => parse_neigh_msg(&buf[offset..offset + msg_len], &mut table),
                 _ => {}
             }
@@ -262,7 +268,9 @@ fn parse_neigh_msg(buf: &[u8], table: &mut HashMap<IpAddr, [u8; 6]>) {
         // Upper 2 bits of nla_type are NLA_F_* flags; mask them off.
         match nla.nla_type & 0x3fff {
             NDA_DST if family == AF_INET && data.len() == 4 => {
-                dst_ip = Some(IpAddr::V4(Ipv4Addr::new(data[0], data[1], data[2], data[3])));
+                dst_ip = Some(IpAddr::V4(Ipv4Addr::new(
+                    data[0], data[1], data[2], data[3],
+                )));
             }
 
             NDA_DST if family == AF_INET6 && data.len() == 16 => {
@@ -270,7 +278,7 @@ fn parse_neigh_msg(buf: &[u8], table: &mut HashMap<IpAddr, [u8; 6]>) {
                 octets.copy_from_slice(data);
                 dst_ip = Some(IpAddr::V6(Ipv6Addr::from(octets)));
             }
-            
+
             NDA_LLADDR if data.len() == 6 => {
                 let mut mac = [0u8; 6];
                 mac.copy_from_slice(data);

@@ -52,7 +52,10 @@ impl XskSocket {
 
         // Try zero-copy first, then fall back to copy mode.
         let modes = [
-            (BindFlags::XDP_ZEROCOPY | BindFlags::XDP_USE_NEED_WAKEUP, XdpMode::ZeroCopy),
+            (
+                BindFlags::XDP_ZEROCOPY | BindFlags::XDP_USE_NEED_WAKEUP,
+                XdpMode::ZeroCopy,
+            ),
             (BindFlags::XDP_USE_NEED_WAKEUP, XdpMode::Copy),
         ];
 
@@ -63,12 +66,8 @@ impl XskSocket {
                 .build()
                 .expect("invalid UMEM config");
 
-            let (umem, descs) = Umem::new(
-                umem_config,
-                NonZeroU32::new(NUM_FRAMES).unwrap(),
-                false,
-            )
-            .context("failed to create UMEM")?;
+            let (umem, descs) = Umem::new(umem_config, NonZeroU32::new(NUM_FRAMES).unwrap(), false)
+                .context("failed to create UMEM")?;
 
             let socket_config = SocketConfig::builder()
                 .libbpf_flags(LibbpfFlags::XSK_LIBBPF_FLAGS_INHIBIT_PROG_LOAD)

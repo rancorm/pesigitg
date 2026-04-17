@@ -16,8 +16,7 @@ server_id_length = 3
 nonce_length = 13
 "#;
 
-const RETRY_KEY_HEX: &str =
-    "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20";
+const RETRY_KEY_HEX: &str = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20";
 
 #[test]
 fn retry_absent_is_none() {
@@ -80,7 +79,10 @@ fn retry_load_block_under_wrong_mode_rejected() {
          token_key = \"{RETRY_KEY_HEX}\"\n\n[retry.load]\ntrigger_rate = 1\n"
     );
     let err = ConfigTable::from_str(&toml).unwrap_err();
-    assert!(err.to_string().contains("only valid when retry.mode = 'load'"));
+    assert!(
+        err.to_string()
+            .contains("only valid when retry.mode = 'load'")
+    );
 }
 
 #[test]
@@ -118,9 +120,7 @@ fn retry_bad_mode_rejected() {
 
 #[test]
 fn retry_bad_key_length_rejected() {
-    let toml = format!(
-        "{BASE_CFG}\n[retry]\nenabled = true\ntoken_key = \"deadbeef\"\n"
-    );
+    let toml = format!("{BASE_CFG}\n[retry]\nenabled = true\ntoken_key = \"deadbeef\"\n");
     let err = ConfigTable::from_str(&toml).unwrap_err();
     assert!(err.to_string().contains("32 bytes"));
 }
@@ -159,9 +159,7 @@ fn retry_ports_dedupe_and_sort() {
 #[test]
 fn retry_token_key_redacted_in_debug() {
     // A full RetryConfig Debug print must not leak key bytes.
-    let toml = format!(
-        "{BASE_CFG}\n[retry]\nenabled = true\ntoken_key = \"{RETRY_KEY_HEX}\"\n"
-    );
+    let toml = format!("{BASE_CFG}\n[retry]\nenabled = true\ntoken_key = \"{RETRY_KEY_HEX}\"\n");
     let table = ConfigTable::from_str(&toml).unwrap();
     let dbg = format!("{:?}", table.retry.unwrap());
     assert!(dbg.contains("<redacted>"));

@@ -78,7 +78,9 @@ pub struct TokenKey {
 
 impl fmt::Debug for TokenKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("TokenKey").field("key", &"<redacted>").finish()
+        f.debug_struct("TokenKey")
+            .field("key", &"<redacted>")
+            .finish()
     }
 }
 
@@ -108,8 +110,7 @@ impl TokenKey {
         let ts = now_ms.to_be_bytes();
         out[..TS_LEN].copy_from_slice(&ts);
 
-        let mut mac = HmacSha256::new_from_slice(&self.key)
-            .expect("HMAC accepts any key length");
+        let mut mac = HmacSha256::new_from_slice(&self.key).expect("HMAC accepts any key length");
         feed(&mut mac, client, &ts, odcid);
         let full = mac.finalize().into_bytes();
         out[TS_LEN..].copy_from_slice(&full[..MAC_LEN]);
@@ -139,8 +140,7 @@ impl TokenKey {
         ts_bytes.copy_from_slice(&token[..TS_LEN]);
         let ts_ms = u64::from_be_bytes(ts_bytes);
 
-        let mut mac = HmacSha256::new_from_slice(&self.key)
-            .expect("HMAC accepts any key length");
+        let mut mac = HmacSha256::new_from_slice(&self.key).expect("HMAC accepts any key length");
         feed(&mut mac, client, &ts_bytes, odcid);
 
         // Constant-time truncated-MAC comparison via the hmac crate.
@@ -185,10 +185,9 @@ mod tests {
     use std::net::{Ipv4Addr, Ipv6Addr};
 
     const KEY: [u8; 32] = [
-        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
-        0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
-        0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
-        0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+        0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d,
+        0x1e, 0x1f,
     ];
 
     fn key() -> TokenKey {

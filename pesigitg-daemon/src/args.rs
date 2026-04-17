@@ -5,8 +5,10 @@
 use std::fmt;
 use std::path::PathBuf;
 
-use anyhow::{bail, Result};
-use pesigitg_common::{DEFAULT_INTF, DEFAULT_PORT, DEFAULT_QUEUES, MAX_QUEUES, PROC_NAME, TAGLINE, exit};
+use anyhow::{Result, bail};
+use pesigitg_common::{
+    DEFAULT_INTF, DEFAULT_PORT, DEFAULT_QUEUES, MAX_QUEUES, PROC_NAME, TAGLINE, exit,
+};
 
 use crate::config::daemon::FileConfig;
 
@@ -55,7 +57,12 @@ pub fn parse_args() -> Result<Args> {
 
     // --version / -V
     if pargs.contains(["-V", "--version"]) {
-        println!("{} {} ({})", PROC_NAME, env!("CARGO_PKG_VERSION"), env!("BUILD_DATE"));
+        println!(
+            "{} {} ({})",
+            PROC_NAME,
+            env!("CARGO_PKG_VERSION"),
+            env!("BUILD_DATE")
+        );
         println!("{}", env!("RUSTC_VERSION"));
         println!("platform: {}", env!("TARGET"));
 
@@ -76,7 +83,11 @@ pub fn parse_args() -> Result<Args> {
             -s, --status-socket <PATH> Unix-domain socket for JSON status API (disabled if unset)\n  \
             -f, --foreground          Run in foreground (don't daemonize)\n  \
             -V, --version             Print version\
-        ", PROC_NAME, TAGLINE, env!("CARGO_PKG_VERSION"));
+        ",
+            PROC_NAME,
+            TAGLINE,
+            env!("CARGO_PKG_VERSION")
+        );
 
         #[cfg(debug_assertions)]
         {
@@ -108,9 +119,7 @@ pub fn parse_args() -> Result<Args> {
     }
 
     // If config file provided, use it as base
-    let file_config = config.as_ref().map(|path| {
-        FileConfig::from_file(path)
-    }).transpose()?;
+    let file_config = config.as_ref().map(FileConfig::from_file).transpose()?;
 
     // CLI -> config file -> defaults
     let queues = queues

@@ -108,10 +108,9 @@ fn make_encryption(key_hex: &Option<String>, sid_len: u8, nonce_len: u8) -> Resu
 /// Supports both nested `[[configs]]` format and the flat top-level layout
 /// used by the current lb.toml.
 fn resolve_config(path: &str, server_id_hex: &str) -> Result<CidGenParams> {
-    let text = std::fs::read_to_string(path)
-        .with_context(|| format!("reading config: {path}"))?;
-    let file: ConfigFile = toml::from_str(&text)
-        .with_context(|| format!("parsing config: {path}"))?;
+    let text = std::fs::read_to_string(path).with_context(|| format!("reading config: {path}"))?;
+    let file: ConfigFile =
+        toml::from_str(&text).with_context(|| format!("parsing config: {path}"))?;
 
     let server_id = hex::decode(server_id_hex)
         .map_err(anyhow::Error::msg)
@@ -122,10 +121,11 @@ fn resolve_config(path: &str, server_id_hex: &str) -> Result<CidGenParams> {
         if raw.server_id_length as usize != server_id.len() {
             continue;
         }
-        
-        let has_server = raw.servers.iter().any(|s| {
-            hex::decode(&s.id).is_ok_and(|id| id == server_id)
-        });
+
+        let has_server = raw
+            .servers
+            .iter()
+            .any(|s| hex::decode(&s.id).is_ok_and(|id| id == server_id));
 
         if !has_server {
             continue;
@@ -145,9 +145,10 @@ fn resolve_config(path: &str, server_id_hex: &str) -> Result<CidGenParams> {
         (file.config_id, file.server_id_length, file.nonce_length)
         && sid_len as usize == server_id.len()
     {
-        let has_server = file.servers.iter().any(|s| {
-            hex::decode(&s.id).is_ok_and(|id| id == server_id)
-        });
+        let has_server = file
+            .servers
+            .iter()
+            .any(|s| hex::decode(&s.id).is_ok_and(|id| id == server_id));
 
         if has_server {
             return Ok(CidGenParams {
@@ -163,12 +164,13 @@ fn resolve_config(path: &str, server_id_hex: &str) -> Result<CidGenParams> {
     bail!("server_id {server_id_hex} not found in any config in {path}");
 }
 
-fn generate_self_signed_cert() -> Result<(Vec<CertificateDer<'static>>, PrivatePkcs8KeyDer<'static>)> {
+fn generate_self_signed_cert() -> Result<(Vec<CertificateDer<'static>>, PrivatePkcs8KeyDer<'static>)>
+{
     let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()])
         .context("generating self-signed cert")?;
     let cert_der = CertificateDer::from(cert.cert);
     let key_der = PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der());
-    
+
     Ok((vec![cert_der], key_der))
 }
 
@@ -257,7 +259,10 @@ where
         .body(())
         .context("building response")?;
 
-    stream.send_response(resp).await.context("sending response")?;
+    stream
+        .send_response(resp)
+        .await
+        .context("sending response")?;
     stream
         .send_data(Bytes::from(body))
         .await
@@ -413,14 +418,12 @@ async fn main() -> Result<()> {
     });
 
     // Socket and endpoint
-    let socket = UdpSocket::bind(args.listen)
-        .context("binding UDP socket")?;
+    let socket = UdpSocket::bind(args.listen).context("binding UDP socket")?;
     let endpoint = Endpoint::new(
         ep_config,
         Some(server_config),
         socket,
-        quinn::default_runtime()
-            .ok_or_else(|| anyhow::anyhow!("no async runtime"))?,
+        quinn::default_runtime().ok_or_else(|| anyhow::anyhow!("no async runtime"))?,
     )
     .context("creating endpoint")?;
 
@@ -490,16 +493,16 @@ async fn handle_connection(incoming: quinn::Incoming, info: &ServerInfo) -> Resu
             }
             Ok(None) => {
                 eprintln!("welman: [{remote}] connection closed");
-                
+
                 return Ok(());
             }
             Err(e) => {
                 let msg = e.to_string();
 
                 if msg.contains("aborted by peer") || msg.contains("H3_NO_ERROR") {
-                        eprintln!("welman: [{remote}] connection closed by client");
+                    eprintln!("welman: [{remote}] connection closed by client");
                 } else {
-                        eprintln!("welman: [{remote}] accept error: {}", e);
+                    eprintln!("welman: [{remote}] accept error: {}", e);
                 }
 
                 return Ok(());

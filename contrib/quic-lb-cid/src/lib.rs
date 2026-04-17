@@ -13,8 +13,8 @@
 //! - Single-pass AES-128-ECB (server_id_length + nonce_length == 16)
 //! - Four-pass Feistel (server_id_length + nonce_length != 16)
 
-use aes::cipher::{BlockEncrypt, KeyInit, generic_array::GenericArray};
 use aes::Aes128;
+use aes::cipher::{BlockEncrypt, KeyInit, generic_array::GenericArray};
 use quinn::ConnectionIdGenerator;
 use rand::RngCore;
 
@@ -184,8 +184,8 @@ mod tests {
     use super::*;
 
     const TEST_KEY: [u8; 16] = [
-        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
-        0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+        0x0f,
     ];
 
     #[test]
@@ -203,13 +203,8 @@ mod tests {
 
     #[test]
     fn config_id_encoded_in_top_bits() {
-        let mut cid_gen = QuicLbCidGenerator::new(
-            3,
-            vec![0x00, 0x01],
-            5,
-            Encryption::Plaintext,
-            true,
-        );
+        let mut cid_gen =
+            QuicLbCidGenerator::new(3, vec![0x00, 0x01], 5, Encryption::Plaintext, true);
         let cid = cid_gen.generate_cid();
         let bytes: &[u8] = cid.as_ref();
         assert_eq!(bytes[0] >> 5, 3);
@@ -218,13 +213,7 @@ mod tests {
     #[test]
     fn plaintext_server_id_readable() {
         let sid = vec![0xde, 0xad, 0xbe];
-        let mut cid_gen = QuicLbCidGenerator::new(
-            0,
-            sid.clone(),
-            4,
-            Encryption::Plaintext,
-            true,
-        );
+        let mut cid_gen = QuicLbCidGenerator::new(0, sid.clone(), 4, Encryption::Plaintext, true);
         let cid = cid_gen.generate_cid();
         // In plaintext mode, server_id is at bytes [1..4].
         let bytes: &[u8] = cid.as_ref();
@@ -234,12 +223,10 @@ mod tests {
     #[test]
     fn encrypted_cid_differs_from_plaintext() {
         let sid = vec![0x00, 0x00, 0x01];
-        let mut cid_gen_plain = QuicLbCidGenerator::new(
-            0, sid.clone(), 13, Encryption::Plaintext, true,
-        );
-        let mut cid_gen_enc = QuicLbCidGenerator::new(
-            0, sid, 13, Encryption::SinglePass { key: TEST_KEY }, true,
-        );
+        let mut cid_gen_plain =
+            QuicLbCidGenerator::new(0, sid.clone(), 13, Encryption::Plaintext, true);
+        let mut cid_gen_enc =
+            QuicLbCidGenerator::new(0, sid, 13, Encryption::SinglePass { key: TEST_KEY }, true);
 
         let plain = cid_gen_plain.generate_cid();
         let enc = cid_gen_enc.generate_cid();

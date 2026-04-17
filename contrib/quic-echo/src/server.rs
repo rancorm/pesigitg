@@ -20,8 +20,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use pesigitg_common::hex;
-use quinn::Endpoint;
 use quic_lb_cid::{Encryption, QuicLbCidGenerator};
+use quinn::Endpoint;
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use tokio::signal;
 use tokio::time;
@@ -64,10 +64,9 @@ struct CidGenParams {
 
 /// Find the config entry containing the requested server_id.
 fn resolve_config(path: &str, server_id_hex: &str) -> Result<CidGenParams> {
-    let text = std::fs::read_to_string(path)
-        .with_context(|| format!("reading config: {path}"))?;
-    let file: ConfigFile = toml::from_str(&text)
-        .with_context(|| format!("parsing config: {path}"))?;
+    let text = std::fs::read_to_string(path).with_context(|| format!("reading config: {path}"))?;
+    let file: ConfigFile =
+        toml::from_str(&text).with_context(|| format!("parsing config: {path}"))?;
 
     let server_id = hex::decode(server_id_hex)
         .map_err(anyhow::Error::msg)
@@ -78,9 +77,10 @@ fn resolve_config(path: &str, server_id_hex: &str) -> Result<CidGenParams> {
             continue;
         }
 
-        let has_server = raw.servers.iter().any(|s| {
-            hex::decode(&s.id).is_ok_and(|id| id == server_id)
-        });
+        let has_server = raw
+            .servers
+            .iter()
+            .any(|s| hex::decode(&s.id).is_ok_and(|id| id == server_id));
         if !has_server {
             continue;
         }
@@ -122,7 +122,8 @@ fn resolve_config(path: &str, server_id_hex: &str) -> Result<CidGenParams> {
 // TLS (self-signed for testing)
 // ---------------------------------------------------------------------------
 
-fn generate_self_signed_cert() -> Result<(Vec<CertificateDer<'static>>, PrivatePkcs8KeyDer<'static>)> {
+fn generate_self_signed_cert() -> Result<(Vec<CertificateDer<'static>>, PrivatePkcs8KeyDer<'static>)>
+{
     let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()])
         .context("generating self-signed cert")?;
     let cert_der = CertificateDer::from(cert.cert);
@@ -249,8 +250,7 @@ async fn main() -> Result<()> {
         ep_config,
         Some(server_config),
         socket,
-        quinn::default_runtime()
-            .ok_or_else(|| anyhow::anyhow!("no async runtime"))?,
+        quinn::default_runtime().ok_or_else(|| anyhow::anyhow!("no async runtime"))?,
     )
     .context("creating endpoint")?;
 
@@ -275,7 +275,7 @@ async fn main() -> Result<()> {
     }
 
     endpoint.close(0u32.into(), b"bye");
-    
+
     Ok(())
 }
 
@@ -289,16 +289,13 @@ async fn handle_connection(incoming: quinn::Incoming) -> Result<()> {
         match conn.accept_bi().await {
             Ok((mut send, mut recv)) => {
                 tokio::spawn(async move {
-                    let result = time::timeout(
-                        std::time::Duration::from_secs(10),
-                        async {
-                            let data = recv.read_to_end(64 * 1024).await?;
-                            eprintln!("quic-echo: [{remote}] echo {len} bytes", len = data.len());
-                            send.write_all(&data).await?;
-                            send.finish()?;
-                            Ok::<(), anyhow::Error>(())
-                        },
-                    )
+                    let result = time::timeout(std::time::Duration::from_secs(10), async {
+                        let data = recv.read_to_end(64 * 1024).await?;
+                        eprintln!("quic-echo: [{remote}] echo {len} bytes", len = data.len());
+                        send.write_all(&data).await?;
+                        send.finish()?;
+                        Ok::<(), anyhow::Error>(())
+                    })
                     .await;
                     match result {
                         Ok(Ok(())) => {}

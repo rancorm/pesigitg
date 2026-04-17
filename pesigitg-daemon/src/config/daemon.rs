@@ -5,7 +5,7 @@
 use core::fmt;
 use std::path::PathBuf;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use bytesize::ByteSize;
 
 use pesigitg_common::{DEFAULT_INTF, DEFAULT_QUEUES, MAX_CONFIG_SIZE, MAX_QUEUES};
@@ -40,12 +40,16 @@ impl FileConfig {
             let line = line.trim();
 
             // Skip empty or comment lines
-            if line.is_empty() || line.starts_with('#') { continue; }
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
 
             let Some((k, v)) = line.split_once('=') else {
                 eprintln!(
                     "warning: {}:{}: malformed line (expected 'key = value'): {:?}",
-                    path.display(), lineno + 1, line
+                    path.display(),
+                    lineno + 1,
+                    line
                 );
                 continue;
             };
@@ -76,12 +80,20 @@ impl FileConfig {
                 }
                 other => eprintln!(
                     "warning: {}:{}: unknown key {:?} (ignored) — typo?",
-                    path.display(), lineno + 1, other
+                    path.display(),
+                    lineno + 1,
+                    other
                 ),
             }
         }
 
-        Ok(FileConfig { ports, interface, queues, route_config, status_socket })
+        Ok(FileConfig {
+            ports,
+            interface,
+            queues,
+            route_config,
+            status_socket,
+        })
     }
 }
 
@@ -97,16 +109,22 @@ impl fmt::Display for FileConfig {
         }
 
         writeln!(f)?;
-        writeln!(f, "  route config: {}",
+        writeln!(
+            f,
+            "  route config: {}",
             self.route_config
-            .as_deref()
-            .and_then(|p| p.to_str())
-            .unwrap_or("<none>"))?;
-        writeln!(f, "  status socket: {}",
+                .as_deref()
+                .and_then(|p| p.to_str())
+                .unwrap_or("<none>")
+        )?;
+        writeln!(
+            f,
+            "  status socket: {}",
             self.status_socket
-            .as_deref()
-            .and_then(|p| p.to_str())
-            .unwrap_or("<disabled>"))?;
+                .as_deref()
+                .and_then(|p| p.to_str())
+                .unwrap_or("<disabled>")
+        )?;
 
         Ok(())
     }
@@ -140,7 +158,7 @@ mod tests {
             route_config: None,
             status_socket: None,
         };
-        
+
         assert_eq!(config.ports.len(), 1);
         assert_eq!(config.ports[0], 443);
     }
@@ -154,7 +172,7 @@ mod tests {
             route_config: None,
             status_socket: None,
         };
-        
+
         assert!(config.ports.is_empty());
     }
 
@@ -168,7 +186,7 @@ mod tests {
             route_config: None,
             status_socket: None,
         };
-        
+
         assert_eq!(config.ports.len(), 101);
         assert_eq!(config.ports, ports);
     }
@@ -182,7 +200,7 @@ mod tests {
             route_config: None,
             status_socket: None,
         };
-        
+
         assert_eq!(*config.ports.first().unwrap(), 0);
         assert_eq!(*config.ports.last().unwrap(), 65535);
     }
@@ -197,7 +215,7 @@ mod tests {
                 route_config: None,
                 status_socket: None,
             };
-            
+
             assert_eq!(config.interface, name);
         }
     }
@@ -211,7 +229,7 @@ mod tests {
             route_config: None,
             status_socket: None,
         };
-        
+
         assert_eq!(config.queues, 128);
     }
 
@@ -224,9 +242,9 @@ mod tests {
             route_config: None,
             status_socket: None,
         };
-        
+
         let mut cloned = config.clone();
-        
+
         cloned.ports.push(9443);
         cloned.interface = "eth1".to_string();
         cloned.queues = 8;
@@ -251,9 +269,9 @@ mod tests {
             route_config: None,
             status_socket: None,
         };
-        
+
         let debug = format!("{:?}", config);
-        
+
         assert!(debug.contains("443"));
         assert!(debug.contains("eth0"));
         assert!(debug.contains("4"));
@@ -269,9 +287,9 @@ mod tests {
             route_config: None,
             status_socket: None,
         };
-        
+
         let pretty = format!("{:#?}", config);
-        
+
         // Pretty-printed debug spans multiple lines
         assert!(pretty.contains('\n'));
         assert!(pretty.contains("FileConfig"));

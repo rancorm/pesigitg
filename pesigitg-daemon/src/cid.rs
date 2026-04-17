@@ -19,7 +19,10 @@ use crate::config::route::{ConfigTable, Encryption, RouteConfig};
 ///
 /// Returns the DCID slice and the matching config, or `None` if the packet is
 /// malformed, config_id is reserved (7), or no config exists for that id.
-pub fn lookup_config<'a, 'b>(quic: &'a [u8], table: &'b ConfigTable) -> Option<(&'a [u8], &'b RouteConfig)> {
+pub fn lookup_config<'a, 'b>(
+    quic: &'a [u8],
+    table: &'b ConfigTable,
+) -> Option<(&'a [u8], &'b RouteConfig)> {
     let first_octet = first_cid_octet(quic)?;
     let config_id = first_octet >> 5;
     if config_id == 7 {
@@ -102,14 +105,14 @@ fn extract_dcid_bytes(quic: &[u8], cid_length: u8) -> Option<&[u8]> {
         if quic.len() < 6 {
             return None;
         }
-        
+
         let dcid_len = quic[5] as usize;
         let end = 6 + dcid_len;
-        
+
         if quic.len() < end {
             return None;
         }
-        
+
         &quic[6..end]
     } else {
         // Short Header: [header(1)][dcid(cid_length bytes)]
@@ -119,7 +122,7 @@ fn extract_dcid_bytes(quic: &[u8], cid_length: u8) -> Option<&[u8]> {
         if quic.len() < end {
             return None;
         }
-        
+
         &quic[1..end]
     };
 
@@ -144,9 +147,8 @@ pub fn resolve_server_idx(dcid: &[u8], config: &RouteConfig) -> Option<usize> {
     // Copy payload to stack buffer for in-place decryption.
     // Max payload = server_id(15) + nonce(18) capped at 19.
     let mut buf = [0u8; 19];
-    
-    buf[..payload_len]
-        .copy_from_slice(&dcid[1..1 + payload_len]);
+
+    buf[..payload_len].copy_from_slice(&dcid[1..1 + payload_len]);
 
     match &config.encryption {
         Encryption::Plaintext => {}
@@ -175,7 +177,6 @@ fn decrypt_single_pass(buf: &mut [u8; 19], cipher: &Aes128) {
 /// Reverses the encryption by running passes 3, 2, 1, 0. Each pass
 /// uses AES-ECB *encrypt* (Feistel round functions are always forward).
 fn decrypt_four_pass(buf: &mut [u8; 19], sid_len: usize, nonce_len: usize, cipher: &Aes128) {
-
     for i in (0..4u8).rev() {
         let mut block = [0u8; 16];
 
@@ -183,11 +184,11 @@ fn decrypt_four_pass(buf: &mut [u8; 19], sid_len: usize, nonce_len: usize, ciphe
             // Odd pass: encrypt Left (server_id), XOR into Right (nonce)
             block[..sid_len].copy_from_slice(&buf[..sid_len]);
             block[0] ^= i;
-            
+
             let mut ga = *GenericArray::from_slice(&block);
-            
+
             cipher.encrypt_block(&mut ga);
-            
+
             for j in 0..nonce_len {
                 buf[sid_len + j] ^= ga[j];
             }
@@ -195,11 +196,11 @@ fn decrypt_four_pass(buf: &mut [u8; 19], sid_len: usize, nonce_len: usize, ciphe
             // Even pass: encrypt Right (nonce), XOR into Left (server_id)
             block[..nonce_len].copy_from_slice(&buf[sid_len..sid_len + nonce_len]);
             block[0] ^= i;
-            
+
             let mut ga = *GenericArray::from_slice(&block);
-            
+
             cipher.encrypt_block(&mut ga);
-            
+
             for j in 0..sid_len {
                 buf[j] ^= ga[j];
             }
@@ -210,19 +211,24 @@ fn decrypt_four_pass(buf: &mut [u8; 19], sid_len: usize, nonce_len: usize, ciphe
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aes::cipher::KeyInit;
     use crate::config::route::Server;
+    use aes::cipher::KeyInit;
 
     const TEST_KEY: [u8; 16] = [
-        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
-        0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+        0x0f,
     ];
 
     fn test_cipher() -> Aes128 {
         Aes128::new(GenericArray::from_slice(&TEST_KEY))
     }
 
-    fn make_config(encryption: Encryption, config_id: u8, sid_len: u8, nonce_len: u8) -> RouteConfig {
+    fn make_config(
+        encryption: Encryption,
+        config_id: u8,
+        sid_len: u8,
+        nonce_len: u8,
+    ) -> RouteConfig {
         RouteConfig {
             config_id,
             first_octet_encodes_cid_length: true,
@@ -258,22 +264,22 @@ mod tests {
             if i % 2 == 0 {
                 block[..nonce_len].copy_from_slice(&buf[sid_len..sid_len + nonce_len]);
                 block[0] ^= i;
-                
+
                 let mut ga = *GenericArray::from_slice(&block);
-                
+
                 cipher.encrypt_block(&mut ga);
-                
+
                 for j in 0..sid_len {
                     buf[j] ^= ga[j];
                 }
             } else {
                 block[..sid_len].copy_from_slice(&buf[..sid_len]);
                 block[0] ^= i;
-                
+
                 let mut ga = *GenericArray::from_slice(&block);
-                
+
                 cipher.encrypt_block(&mut ga);
-                
+
                 for j in 0..nonce_len {
                     buf[sid_len + j] ^= ga[j];
                 }
@@ -288,7 +294,7 @@ mod tests {
         let config = make_config(Encryption::Plaintext, 0, 3, 13);
 
         let mut dcid = vec![0x00]; // first octet, config_id=0
-        
+
         dcid.extend_from_slice(&[0x00, 0x00, 0x01]); // server_id
         dcid.extend_from_slice(&[0x00; 13]); // nonce
 
@@ -300,7 +306,7 @@ mod tests {
         let config = make_config(Encryption::Plaintext, 0, 3, 13);
 
         let mut dcid = vec![0x00];
-        
+
         dcid.extend_from_slice(&[0xff, 0xff, 0xff]); // unknown server_id
         dcid.extend_from_slice(&[0x00; 13]);
 
@@ -310,25 +316,30 @@ mod tests {
     #[test]
     fn resolve_single_pass_round_trip() {
         let config = make_config(
-            Encryption::SinglePass { key: TEST_KEY, cipher: test_cipher() },
-            0, 3, 13,
+            Encryption::SinglePass {
+                key: TEST_KEY,
+                cipher: test_cipher(),
+            },
+            0,
+            3,
+            13,
         );
 
         // Build a plaintext CID payload: server_id || nonce
         let mut payload = [0u8; 16];
-        
+
         payload[0..3].copy_from_slice(&[0x00, 0x00, 0x01]); // server_id
         payload[3..16].copy_from_slice(&[0x42; 13]); // nonce
 
         // Encrypt with AES-128-ECB
         let cipher = Aes128::new(GenericArray::from_slice(&TEST_KEY));
         let mut block = *GenericArray::from_slice(&payload);
-        
+
         cipher.encrypt_block(&mut block);
 
         // Build the full CID: [first_octet][encrypted_payload]
         let mut dcid = vec![0x00]; // config_id=0
-        
+
         dcid.extend_from_slice(&block);
 
         assert_eq!(resolve_server_idx(&dcid, &config), Some(0));
@@ -337,13 +348,18 @@ mod tests {
     #[test]
     fn resolve_four_pass_round_trip() {
         let config = make_config(
-            Encryption::FourPass { key: TEST_KEY, cipher: test_cipher() },
-            1, 3, 4,
+            Encryption::FourPass {
+                key: TEST_KEY,
+                cipher: test_cipher(),
+            },
+            1,
+            3,
+            4,
         );
 
         // Plaintext payload: server_id(3) || nonce(4)
         let mut payload = [0u8; 7];
-        
+
         payload[0..3].copy_from_slice(&[0x00, 0x00, 0x01]);
         payload[3..7].copy_from_slice(&[0x42; 4]);
 
@@ -352,7 +368,7 @@ mod tests {
 
         // Build CID: [first_octet (config_id=1 -> 0x20)][encrypted_payload]
         let mut dcid = vec![0x20]; // config_id=1
-        
+
         dcid.extend_from_slice(&payload);
 
         assert_eq!(resolve_server_idx(&dcid, &config), Some(0));
@@ -426,17 +442,17 @@ mod tests {
 
         let original = [0xde, 0xad, 0xbe, 0x01, 0x02, 0x03, 0x04];
         let mut buf = [0u8; 19];
-        
+
         buf[..7].copy_from_slice(&original);
 
         encrypt_four_pass(&mut buf[..7], sid_len, nonce_len, &TEST_KEY);
-        
+
         // Encrypted should differ from original
         assert_ne!(&buf[..7], &original);
 
         // Decrypt
         let mut dbuf = [0u8; 19];
-        
+
         dbuf[..7].copy_from_slice(&buf[..7]);
         decrypt_four_pass(&mut dbuf, sid_len, nonce_len, &test_cipher());
 
