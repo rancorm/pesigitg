@@ -205,14 +205,14 @@ fn print_toolchain(ebpf_dir: &std::path::Path) {
 
         eprintln!();
 
-        if let Some(age) = nightly_age_days(&ch) {
-            if age > NIGHTLY_STALE_DAYS {
-                eprintln!(
-                    "[*] warning: pinned nightly is {} days old (> {}); \
-                     consider bumping {}",
-                    age, NIGHTLY_STALE_DAYS, ebpf_dir.join("rust-toolchain.toml").display()
-                );
-            }
+        if let Some(age) = nightly_age_days(&ch)
+            && age > NIGHTLY_STALE_DAYS
+        {
+            eprintln!(
+                "[*] warning: pinned nightly is {} days old (> {}); \
+                 consider bumping {}",
+                age, NIGHTLY_STALE_DAYS, ebpf_dir.join("rust-toolchain.toml").display()
+            );
         }
     }
 }
