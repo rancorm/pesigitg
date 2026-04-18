@@ -12,3 +12,9 @@ std = [] # gates std-dependent code
 
 [dependencies]
 # no_std-compatible dependencies only here
+
+# Self-reference with `std` enabled so `cargo test -p pesigitg-common` runs the
+# `hex` and `mac` module tests — they live behind `#[cfg(feature = "std")]` and
+# would otherwise silently report "0 passed" under the no_std default.
+[dev-dependencies]
+pesigitg-common = { path = ".", features = ["std"] }

@@ -1028,6 +1028,9 @@ dependencies = [
 [[package]]
 name = "pesigitg-common"
 version = "0.1.0"
+dependencies = [
+ "pesigitg-common",
+]
 
 [[package]]
 name = "pesigitg-daemon"
