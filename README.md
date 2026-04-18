@@ -222,7 +222,7 @@ it shares the `RwLock` swap with the rest of the route table on `SIGHUP`.
 enabled      = true
 token_key    = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
 mode         = "load"                 # observe | always | load
-token_lifetime_secs = 10              # 1..=86400, default 10
+token_lifetime_secs = 10              # 1..86400, default 10
 ports        = [443, 8443]            # optional; empty = every daemon port
 
 [retry.load]
