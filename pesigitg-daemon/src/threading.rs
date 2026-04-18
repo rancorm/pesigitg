@@ -412,28 +412,195 @@ fn select_cores(interface: &str, queue_count: u32) -> Vec<usize> {
             .and_then(|s| s.trim().parse::<i32>().ok())
             .unwrap_or(0);
 
-    let mut local_cores = Vec::new();
-    let mut remote_cores = Vec::new();
+    let cpus: Vec<(usize, i32)> = (0..num_cores())
+        .map(|cpu| {
+            let path = format!(
+                "/sys/devices/system/cpu/cpu{}/topology/physical_package_id",
+                cpu
+            );
+            let numa = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|s| s.trim().parse::<i32>().ok())
+                .unwrap_or(0);
+            (cpu, numa)
+        })
+        .collect();
 
-    for cpu in 0..num_cores() {
-        let path = format!(
-            "/sys/devices/system/cpu/cpu{}/topology/physical_package_id",
-            cpu
-        );
-        let numa = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|s| s.trim().parse::<i32>().ok())
-            .unwrap_or(0);
+    pick_numa_local_cores(nic_numa, &cpus, queue_count)
+}
 
+/// Pick up to `queue_count` CPU cores preferring those on the same NUMA
+/// node as `nic_numa`, falling back to remote cores to fill the quota.
+/// CPU order is preserved within each bucket.
+fn pick_numa_local_cores(nic_numa: i32, cpus: &[(usize, i32)], queue_count: u32) -> Vec<usize> {
+    let mut local = Vec::new();
+    let mut remote = Vec::new();
+
+    for &(cpu, numa) in cpus {
         if numa == nic_numa {
-            local_cores.push(cpu);
+            local.push(cpu);
         } else {
-            remote_cores.push(cpu);
+            remote.push(cpu);
         }
     }
 
-    // Prefer NUMA-local cores, fall back to remote
-    local_cores.extend(remote_cores);
-    local_cores.truncate(queue_count as usize);
-    local_cores
+    local.extend(remote);
+    local.truncate(queue_count as usize);
+    local
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    // ---------- pick_numa_local_cores ----------
+
+    #[test]
+    fn pick_numa_local_cores_prefers_local_numa() {
+        let cpus = [(0, 1), (1, 0), (2, 1), (3, 0)];
+        // nic on node 0: cpu 1 and 3 are local.
+        let picked = pick_numa_local_cores(0, &cpus, 4);
+
+        assert_eq!(picked, vec![1, 3, 0, 2]);
+    }
+
+    #[test]
+    fn pick_numa_local_cores_fills_with_remote_when_local_insufficient() {
+        let cpus = [(0, 0), (1, 1), (2, 1), (3, 1)];
+        // Only cpu 0 is local; queue_count=3 needs two remote fillers.
+        let picked = pick_numa_local_cores(0, &cpus, 3);
+
+        assert_eq!(picked, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn pick_numa_local_cores_truncates_to_queue_count() {
+        let cpus = [(0, 0), (1, 0), (2, 0), (3, 0)];
+        let picked = pick_numa_local_cores(0, &cpus, 2);
+
+        assert_eq!(picked, vec![0, 1]);
+    }
+
+    #[test]
+    fn pick_numa_local_cores_returns_empty_for_zero_queue_count() {
+        let cpus = [(0, 0), (1, 1)];
+        assert!(pick_numa_local_cores(0, &cpus, 0).is_empty());
+    }
+
+    #[test]
+    fn pick_numa_local_cores_no_local_falls_entirely_to_remote() {
+        let cpus = [(0, 1), (1, 1), (2, 1)];
+        // nic on node 0 but no cpu reports node 0.
+        let picked = pick_numa_local_cores(0, &cpus, 2);
+
+        assert_eq!(picked, vec![0, 1]);
+    }
+
+    // ---------- WorkerPool lifecycle ----------
+
+    fn park_worker(queue_id: u32, shutdown: Arc<AtomicBool>) -> Worker {
+        let handle = thread::Builder::new()
+            .name(format!("test-q{}", queue_id))
+            .spawn(move || {
+                while !shutdown.load(Ordering::Relaxed) {
+                    thread::sleep(Duration::from_millis(1));
+                }
+            })
+            .expect("spawn test worker");
+        Worker { queue_id, handle }
+    }
+
+    fn finished_worker(queue_id: u32) -> Worker {
+        let (tx, rx) = mpsc::channel::<()>();
+        let handle = thread::Builder::new()
+            .name(format!("test-done-q{}", queue_id))
+            .spawn(move || {
+                let _ = rx.recv();
+            })
+            .expect("spawn test worker");
+        drop(tx);
+        // Wait until the thread observes the disconnect and exits.
+        while !handle.is_finished() {
+            thread::yield_now();
+        }
+        Worker { queue_id, handle }
+    }
+
+    fn test_pool(workers: Vec<Worker>, shutdown: Arc<AtomicBool>) -> WorkerPool {
+        let health = Arc::new(WorkerHealth {
+            expected: workers.len(),
+            alive: AtomicUsize::new(workers.len()),
+        });
+        WorkerPool {
+            workers,
+            shutdown,
+            health,
+        }
+    }
+
+    #[test]
+    fn worker_pool_initial_health_matches_worker_count() {
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let workers = (0..3)
+            .map(|q| park_worker(q, Arc::clone(&shutdown)))
+            .collect();
+        let mut pool = test_pool(workers, Arc::clone(&shutdown));
+
+        let health = pool.health();
+        assert_eq!(health.expected, 3);
+        assert_eq!(health.alive.load(Ordering::Relaxed), 3);
+
+        pool.shutdown();
+    }
+
+    #[test]
+    fn refresh_health_reflects_finished_workers() {
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let workers = vec![
+            park_worker(0, Arc::clone(&shutdown)),
+            finished_worker(1),
+            park_worker(2, Arc::clone(&shutdown)),
+        ];
+
+        let mut pool = test_pool(workers, Arc::clone(&shutdown));
+
+        pool.refresh_health();
+        assert_eq!(pool.health().alive.load(Ordering::Relaxed), 2);
+
+        pool.shutdown();
+    }
+
+    #[test]
+    fn dead_queues_returns_finished_worker_ids() {
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let workers = vec![
+            park_worker(0, Arc::clone(&shutdown)),
+            finished_worker(7),
+            finished_worker(9),
+        ];
+
+        let mut pool = test_pool(workers, Arc::clone(&shutdown));
+
+        let mut dead = pool.dead_queues();
+        dead.sort();
+        assert_eq!(dead, vec![7, 9]);
+
+        pool.shutdown();
+    }
+
+    #[test]
+    fn shutdown_sets_flag_joins_and_drains_workers() {
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let workers = (0..3)
+            .map(|q| park_worker(q, Arc::clone(&shutdown)))
+            .collect();
+        let mut pool = test_pool(workers, Arc::clone(&shutdown));
+
+        pool.shutdown();
+
+        assert!(shutdown.load(Ordering::Relaxed));
+        assert!(pool.workers.is_empty());
+    }
 }
