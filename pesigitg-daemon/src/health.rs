@@ -211,62 +211,7 @@ impl HealthChecker {
         let probes = self.probe_all(&due);
         debug!("probe batch complete in {:.2?}", batch_start.elapsed());
 
-        // Phase 2: update per-address health state, log transitions.
-        let mut changed = false;
-
-        for (&addr, &ok) in &probes {
-            let s = self.state.get_mut(&addr).expect("state inserted above");
-
-            if ok {
-                s.consecutive_failures = 0;
-                s.next_probe_at = now + PROBE_INTERVAL;
-
-                if !s.healthy {
-                    info!("{} is back up", addr);
-
-                    s.healthy = true;
-                    changed = true;
-                }
-            } else {
-                s.consecutive_failures += 1;
-                s.next_probe_at = now + Self::backoff_for(s.consecutive_failures);
-
-                if s.healthy && s.consecutive_failures >= FAILURE_THRESHOLD {
-                    warn!(
-                        "{} is down ({} consecutive probe failures)",
-                        addr, FAILURE_THRESHOLD
-                    );
-
-                    s.healthy = false;
-                    changed = true;
-                }
-            }
-        }
-
-        // Phase 3: sync healthy flag on server structs.
-        if changed {
-            for rc in config.configs_mut() {
-                for server in &mut rc.servers {
-                    if let Some(s) = self.state.get(&server.address) {
-                        server.healthy = s.healthy;
-                    }
-                }
-            }
-        }
-
-        changed
-    }
-
-    /// Returns the delay until the next probe for a server with the
-    /// given number of consecutive failures. Entries past the end of
-    /// [`BACKOFF_SCHEDULE`] are clamped to the final entry.
-    fn backoff_for(failures: u32) -> Duration {
-        if failures < FAILURE_THRESHOLD {
-            PROBE_INTERVAL
-        } else {
-            let idx = (failures - FAILURE_THRESHOLD) as usize;
-            BACKOFF_SCHEDULE[idx.min(BACKOFF_SCHEDULE.len() - 1)]
-        }
+        apply_probe_results(&mut self.state, &probes, now, config)
     }
 
     /// Probe all addresses concurrently and return results.
@@ -321,6 +266,72 @@ impl HealthChecker {
     }
 }
 
+/// Apply a batch of probe outcomes to per-server health state and
+/// mirror any transitions onto the `ConfigTable`. Returns `true` if
+/// any server changed health state (caller should rebuild fallback
+/// servers).
+fn apply_probe_results(
+    state: &mut HashMap<IpAddr, ServerHealth>,
+    probes: &HashMap<IpAddr, bool>,
+    now: Instant,
+    config: &mut ConfigTable,
+) -> bool {
+    let mut changed = false;
+
+    for (&addr, &ok) in probes {
+        let s = state.get_mut(&addr).expect("state missing for probed addr");
+
+        if ok {
+            s.consecutive_failures = 0;
+            s.next_probe_at = now + PROBE_INTERVAL;
+
+            if !s.healthy {
+                info!("{} is back up", addr);
+
+                s.healthy = true;
+                changed = true;
+            }
+        } else {
+            s.consecutive_failures += 1;
+            s.next_probe_at = now + backoff_for(s.consecutive_failures);
+
+            if s.healthy && s.consecutive_failures >= FAILURE_THRESHOLD {
+                warn!(
+                    "{} is down ({} consecutive probe failures)",
+                    addr, FAILURE_THRESHOLD
+                );
+
+                s.healthy = false;
+                changed = true;
+            }
+        }
+    }
+
+    if changed {
+        for rc in config.configs_mut() {
+            for server in &mut rc.servers {
+                if let Some(s) = state.get(&server.address) {
+                    server.healthy = s.healthy;
+                }
+            }
+        }
+    }
+
+    changed
+}
+
+/// Returns the delay until the next probe for a server with the
+/// given number of consecutive failures. Entries past the end of
+/// [`BACKOFF_SCHEDULE`] are clamped to the final entry.
+fn backoff_for(failures: u32) -> Duration {
+    if failures < FAILURE_THRESHOLD {
+        PROBE_INTERVAL
+    } else {
+        let idx = (failures - FAILURE_THRESHOLD) as usize;
+        BACKOFF_SCHEDULE[idx.min(BACKOFF_SCHEDULE.len() - 1)]
+    }
+}
+
 impl fmt::Display for ServerHealth {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(
@@ -346,5 +357,229 @@ impl fmt::Display for HealthChecker {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::Ipv4Addr;
+
+    const SAMPLE_TOML: &str = r#"
+[[configs]]
+config_id = 0
+server_id_length = 2
+nonce_length = 5
+
+[[configs.servers]]
+id = "0001"
+address = "10.0.0.1"
+
+[[configs.servers]]
+id = "0002"
+address = "10.0.0.2"
+"#;
+
+    fn addr_v4(last: u8) -> IpAddr {
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, last))
+    }
+
+    fn fixture_state(entries: &[(IpAddr, u32, bool)]) -> HashMap<IpAddr, ServerHealth> {
+        let now = Instant::now();
+        entries
+            .iter()
+            .map(|&(addr, failures, healthy)| {
+                (
+                    addr,
+                    ServerHealth {
+                        consecutive_failures: failures,
+                        healthy,
+                        next_probe_at: now,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    // ---------- backoff_for ----------
+
+    #[test]
+    fn backoff_for_below_threshold_uses_probe_interval() {
+        assert_eq!(backoff_for(0), PROBE_INTERVAL);
+        assert_eq!(backoff_for(1), PROBE_INTERVAL);
+        assert_eq!(backoff_for(FAILURE_THRESHOLD - 1), PROBE_INTERVAL);
+    }
+
+    #[test]
+    fn backoff_for_at_threshold_uses_schedule_entries() {
+        assert_eq!(backoff_for(FAILURE_THRESHOLD), BACKOFF_SCHEDULE[0]);
+        assert_eq!(backoff_for(FAILURE_THRESHOLD + 1), BACKOFF_SCHEDULE[1]);
+    }
+
+    #[test]
+    fn backoff_for_past_schedule_clamps_to_last_entry() {
+        let last = *BACKOFF_SCHEDULE.last().unwrap();
+        let last_idx = BACKOFF_SCHEDULE.len() as u32 - 1;
+        assert_eq!(backoff_for(FAILURE_THRESHOLD + last_idx), last);
+        assert_eq!(backoff_for(FAILURE_THRESHOLD + 100), last);
+    }
+
+    // ---------- apply_probe_results ----------
+
+    #[test]
+    fn success_on_new_address_flips_healthy_and_marks_changed() {
+        let addr = addr_v4(1);
+        let mut state = fixture_state(&[(addr, 0, false)]);
+        let probes: HashMap<IpAddr, bool> = [(addr, true)].into_iter().collect();
+        let mut table = ConfigTable::from_str(SAMPLE_TOML).unwrap();
+
+        let changed = apply_probe_results(&mut state, &probes, Instant::now(), &mut table);
+
+        assert!(changed);
+        assert!(state[&addr].healthy);
+        assert_eq!(state[&addr].consecutive_failures, 0);
+    }
+
+    #[test]
+    fn success_on_already_healthy_resets_failures_without_changing() {
+        let addr = addr_v4(1);
+        let mut state = fixture_state(&[(addr, 2, true)]);
+        let probes: HashMap<IpAddr, bool> = [(addr, true)].into_iter().collect();
+        let mut table = ConfigTable::from_str(SAMPLE_TOML).unwrap();
+
+        let changed = apply_probe_results(&mut state, &probes, Instant::now(), &mut table);
+
+        assert!(!changed);
+        assert!(state[&addr].healthy);
+        assert_eq!(state[&addr].consecutive_failures, 0);
+    }
+
+    #[test]
+    fn failure_below_threshold_keeps_healthy_and_does_not_change() {
+        let addr = addr_v4(1);
+        let mut state = fixture_state(&[(addr, 0, true)]);
+        let probes: HashMap<IpAddr, bool> = [(addr, false)].into_iter().collect();
+        let mut table = ConfigTable::from_str(SAMPLE_TOML).unwrap();
+
+        let changed = apply_probe_results(&mut state, &probes, Instant::now(), &mut table);
+
+        assert!(!changed);
+        assert!(state[&addr].healthy);
+        assert_eq!(state[&addr].consecutive_failures, 1);
+    }
+
+    #[test]
+    fn failure_at_threshold_flips_unhealthy_and_marks_changed() {
+        let addr = addr_v4(1);
+        let mut state = fixture_state(&[(addr, FAILURE_THRESHOLD - 1, true)]);
+        let probes: HashMap<IpAddr, bool> = [(addr, false)].into_iter().collect();
+        let mut table = ConfigTable::from_str(SAMPLE_TOML).unwrap();
+
+        let changed = apply_probe_results(&mut state, &probes, Instant::now(), &mut table);
+
+        assert!(changed);
+        assert!(!state[&addr].healthy);
+        assert_eq!(state[&addr].consecutive_failures, FAILURE_THRESHOLD);
+    }
+
+    #[test]
+    fn already_unhealthy_failure_just_increments_counter() {
+        let addr = addr_v4(1);
+        let mut state = fixture_state(&[(addr, FAILURE_THRESHOLD + 5, false)]);
+        let probes: HashMap<IpAddr, bool> = [(addr, false)].into_iter().collect();
+        let mut table = ConfigTable::from_str(SAMPLE_TOML).unwrap();
+
+        let changed = apply_probe_results(&mut state, &probes, Instant::now(), &mut table);
+
+        assert!(!changed);
+        assert!(!state[&addr].healthy);
+        assert_eq!(state[&addr].consecutive_failures, FAILURE_THRESHOLD + 6);
+    }
+
+    #[test]
+    fn recovery_from_unhealthy_marks_changed_and_resets_failures() {
+        let addr = addr_v4(1);
+        let mut state = fixture_state(&[(addr, 10, false)]);
+        let probes: HashMap<IpAddr, bool> = [(addr, true)].into_iter().collect();
+        let mut table = ConfigTable::from_str(SAMPLE_TOML).unwrap();
+
+        let changed = apply_probe_results(&mut state, &probes, Instant::now(), &mut table);
+
+        assert!(changed);
+        assert!(state[&addr].healthy);
+        assert_eq!(state[&addr].consecutive_failures, 0);
+    }
+
+    #[test]
+    fn next_probe_at_uses_probe_interval_on_success() {
+        let addr = addr_v4(1);
+        let mut state = fixture_state(&[(addr, 0, true)]);
+        let probes: HashMap<IpAddr, bool> = [(addr, true)].into_iter().collect();
+        let mut table = ConfigTable::from_str(SAMPLE_TOML).unwrap();
+        let now = Instant::now();
+
+        apply_probe_results(&mut state, &probes, now, &mut table);
+
+        assert_eq!(state[&addr].next_probe_at, now + PROBE_INTERVAL);
+    }
+
+    #[test]
+    fn next_probe_at_uses_backoff_on_failure() {
+        let addr = addr_v4(1);
+        let mut state = fixture_state(&[(addr, FAILURE_THRESHOLD, false)]);
+        let probes: HashMap<IpAddr, bool> = [(addr, false)].into_iter().collect();
+        let mut table = ConfigTable::from_str(SAMPLE_TOML).unwrap();
+        let now = Instant::now();
+
+        apply_probe_results(&mut state, &probes, now, &mut table);
+
+        // failures: FAILURE_THRESHOLD -> +1 -> FAILURE_THRESHOLD + 1 -> BACKOFF_SCHEDULE[1].
+        assert_eq!(state[&addr].next_probe_at, now + BACKOFF_SCHEDULE[1]);
+    }
+
+    #[test]
+    fn transition_mirrors_healthy_flag_onto_config_servers() {
+        let addr_1 = addr_v4(1);
+        let addr_2 = addr_v4(2);
+        let mut state = fixture_state(&[(addr_1, 0, false), (addr_2, 0, true)]);
+        let probes: HashMap<IpAddr, bool> = [(addr_1, true), (addr_2, true)].into_iter().collect();
+        let mut table = ConfigTable::from_str(SAMPLE_TOML).unwrap();
+
+        // Pre-condition: parsed servers start unhealthy.
+        for rc in table.configs() {
+            for s in &rc.servers {
+                assert!(!s.healthy);
+            }
+        }
+
+        let changed = apply_probe_results(&mut state, &probes, Instant::now(), &mut table);
+
+        assert!(changed);
+        for rc in table.configs() {
+            for s in &rc.servers {
+                assert!(s.healthy, "{} should mirror healthy state", s.address);
+            }
+        }
+    }
+
+    #[test]
+    fn no_transition_skips_config_mirror() {
+        let addr = addr_v4(1);
+        let mut state = fixture_state(&[(addr, 0, true)]);
+        let probes: HashMap<IpAddr, bool> = [(addr, true)].into_iter().collect();
+        let mut table = ConfigTable::from_str(SAMPLE_TOML).unwrap();
+        // server.healthy starts false; state has it true. If the mirror ran
+        // despite changed=false, it would flip the config's server to true.
+
+        let changed = apply_probe_results(&mut state, &probes, Instant::now(), &mut table);
+
+        assert!(!changed);
+        for rc in table.configs() {
+            for s in &rc.servers {
+                if s.address == addr {
+                    assert!(!s.healthy, "config should not be mirrored when unchanged");
+                }
+            }
+        }
     }
 }
