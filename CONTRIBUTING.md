@@ -49,6 +49,20 @@ The eBPF crate targets `bpfel-unknown-none` and requires `-Z build-std=core`. Th
 cargo test
 ```
 
+### Dependency Audit
+
+Supply-chain and license drift are checked via [cargo-deny](https://embarkstudios.github.io/cargo-deny/):
+
+```sh
+cargo install cargo-deny --locked
+cargo deny check
+```
+
+The policy lives in `deny.toml`: a permissive-license allowlist compatible
+with GPL-3.0-or-later, the RUSTSEC advisory database, duplicate-version
+warnings, and a crates.io-only source restriction. Adding a new transitive
+license requires updating the allowlist with a review note.
+
 ## How to Contribute
 
 ### Reporting Bugs

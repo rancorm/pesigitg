@@ -1,0 +1,60 @@
+# cargo-deny configuration. Run: `cargo deny check`
+#
+# Covers four checks:
+#   * advisories — RUSTSEC advisory database (vulns, unmaintained, unsound)
+#   * licenses   — workspace + transitive deps must use an allowlisted license
+#   * bans       — duplicate-version detection
+#   * sources    — restrict to crates.io
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+
+[licenses]
+version = 2
+# Permissive / public-domain-equivalent licenses that appear in the tree and
+# are compatible with GPL-3.0-or-later (our workspace license). Adding a new
+# license here should be a deliberate review decision, not a drive-by.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "NCSA",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+    # Workspace crates themselves:
+    "GPL-3.0-or-later",
+    "LicenseRef-Commercial",
+    # r-efi (transitive via WASI backends); GPL-3 downstream is compatible.
+    "LGPL-2.1-or-later",
+]
+confidence-threshold = 0.9
+
+[licenses.private]
+# Skip the unpublished workspace-internal fuzz crate.
+ignore = true
+
+[bans]
+# Workspace already has duplicates we're knowingly carrying (bitflags 1/2,
+# hashbrown 0.15/0.17, rand 0.9/0.10, multiple windows-sys majors via aya /
+# quinn / rustls). Warn so upgrades don't quietly pile on more.
+multiple-versions = "warn"
+wildcards = "deny"
+# Path deps inside the workspace have no version requirement, which would
+# otherwise trip the wildcards check.
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
