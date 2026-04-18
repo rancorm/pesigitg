@@ -48,6 +48,12 @@ fn main() {
             run_lint();
             eprintln!("[x] lint total: {}", fmt_duration(total.elapsed()));
         }
+        Some("fuzz") => {
+            release = false;
+            let total = Instant::now();
+            run_fuzz(&args[1..]);
+            eprintln!("[x] fuzz total: {}", fmt_duration(total.elapsed()));
+        }
         _ => {
             eprintln!(
                 "Usage: cargo xtask <COMMAND>\n\n\
@@ -55,6 +61,8 @@ fn main() {
                    build        Build the eBPF program and daemon\n  \
                    build-ebpf   Build only the eBPF program\n  \
                    build-man    Render man pages from man/*.md via pandoc\n  \
+                   fuzz         Build a libFuzzer target (workaround for cargo-fuzz \
+                                 + LLVM ≥ 16, see fn run_fuzz)\n  \
                    lint         Run cargo fmt --check + clippy -D warnings\n  \
                    run          Build and run the daemon (use sudo)\n\n\
                  Options:\n  \
@@ -297,6 +305,105 @@ fn run_lint() {
         process::exit(status.code().unwrap_or(1));
     }
     eprintln!("[x] clippy: {}", fmt_duration(t.elapsed()));
+}
+
+/// Build (and optionally smoke-run) a libFuzzer target without going
+/// through `cargo fuzz`.
+///
+/// Why: cargo-fuzz 0.13.1 hard-codes `-Cpasses=sancov-module` in the
+/// RUSTFLAGS it passes to rustc. That is the legacy LLVM pass-manager
+/// invocation for SanitizerCoverage; it has been a no-op since LLVM 16,
+/// so on a recent nightly the sancov pass never runs and the link step
+/// fails with `undefined symbol: __sancov_gen_*`. Until cargo-fuzz ships
+/// a fix we replicate its `cargo build` invocation minus that flag.
+///
+/// Usage:
+///   cargo xtask fuzz <target>            # build only
+///   cargo xtask fuzz <target> --smoke    # build + 30s libFuzzer run
+fn run_fuzz(args: &[String]) {
+    let target = match args.iter().find(|a| !a.starts_with("--")) {
+        Some(t) => t,
+        None => {
+            eprintln!("Usage: cargo xtask fuzz <target> [--smoke]");
+            process::exit(1);
+        }
+    };
+    let smoke = args.iter().any(|a| a == "--smoke");
+
+    let root = workspace_root();
+    let fuzz_manifest = root.join("pesigitg-daemon/fuzz/Cargo.toml");
+
+    // Same RUSTFLAGS cargo-fuzz 0.13.1 sets, minus `-Cpasses=sancov-module`.
+    let rustflags = "-Cllvm-args=-sanitizer-coverage-level=4 \
+                     -Cllvm-args=-sanitizer-coverage-inline-8bit-counters \
+                     -Cllvm-args=-sanitizer-coverage-pc-table \
+                     -Cllvm-args=-sanitizer-coverage-trace-compares \
+                     --cfg fuzzing \
+                     -Cllvm-args=-simplifycfg-branch-fold-threshold=0 \
+                     -Zsanitizer=address \
+                     -Cllvm-args=-sanitizer-coverage-stack-depth \
+                     -Cdebug-assertions \
+                     -Ccodegen-units=1";
+
+    // Linux x86_64 only. Other hosts would need a different sanitizer
+    // story (libfuzzer-sys's build.rs is platform-gated) and we don't
+    // claim to support them yet.
+    let triple = "x86_64-unknown-linux-gnu";
+
+    let t = Instant::now();
+    let status = Command::new(cargo())
+        .env("RUSTUP_TOOLCHAIN", "nightly")
+        .env("RUSTFLAGS", rustflags)
+        .env("ASAN_OPTIONS", "detect_odr_violation=0")
+        .arg("build")
+        .arg("--manifest-path")
+        .arg(&fuzz_manifest)
+        .args(["--target", triple, "--release", "--bin", target])
+        .status()
+        .expect("failed to spawn cargo for fuzz build");
+
+    if !status.success() {
+        eprintln!("[*] fuzz build failed");
+        process::exit(status.code().unwrap_or(1));
+    }
+    eprintln!("[x] fuzz build {}: {}", target, fmt_duration(t.elapsed()));
+
+    let bin = root
+        .join("target")
+        .join(triple)
+        .join("release")
+        .join(target);
+
+    if !smoke {
+        eprintln!("[x] binary: {}", bin.display());
+        return;
+    }
+
+    let corpus = root.join("pesigitg-daemon/fuzz/corpus").join(target);
+    let artifacts = root.join("pesigitg-daemon/fuzz/artifacts").join(target);
+
+    for dir in [&corpus, &artifacts] {
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            eprintln!("[*] cannot create {}: {}", dir.display(), e);
+            process::exit(1);
+        }
+    }
+
+    let artifact_prefix = format!("-artifact_prefix={}/", artifacts.display());
+
+    let t = Instant::now();
+    let status = Command::new(&bin)
+        .arg(&corpus)
+        .arg(&artifact_prefix)
+        .arg("-max_total_time=30")
+        .status()
+        .expect("failed to spawn fuzz binary");
+
+    if !status.success() {
+        eprintln!("[*] fuzz smoke {} failed", target);
+        process::exit(status.code().unwrap_or(1));
+    }
+    eprintln!("[x] fuzz smoke {}: {}", target, fmt_duration(t.elapsed()));
 }
 
 fn build_man() {
