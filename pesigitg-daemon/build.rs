@@ -9,6 +9,11 @@ macro_rules! rustc_env {
 }
 
 fn main() {
+    // `--cfg fuzzing` is set by libFuzzer harness builds (cargo-fuzz and
+    // our `xtask fuzz` wrapper); register it so `unexpected_cfgs` stays
+    // quiet under `clippy -D warnings`.
+    println!("cargo::rustc-check-cfg=cfg(fuzzing)");
+
     rustc_env!("TARGET", std::env::var("TARGET").unwrap());
 
     let rustc = std::process::Command::new("rustc")

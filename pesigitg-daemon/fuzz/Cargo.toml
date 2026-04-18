@@ -7,14 +7,21 @@ edition = "2024"
 [package.metadata]
 cargo-fuzz = true
 
+# `--cfg fuzzing` is set by libFuzzer harness builds (xtask fuzz, cargo
+# fuzz). Register it so `unexpected_cfgs` stays quiet on the
+# `#[cfg(fuzzing)]` shim in packet.rs.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
+
 [dependencies]
 libfuzzer-sys = "0.4"
 
-# Deps for the config_parse target. These match the daemon's direct
-# deps so `#[path]`-included modules resolve identically.
+# Match the daemon's direct deps so `#[path]`-included modules resolve
+# identically to a normal `pesigitg-daemon` build.
 aes = { workspace = true }
 hmac = "0.12"
 pesigitg-common = { workspace = true, features = ["std"] }
+rustc-hash = "2"
 serde = { workspace = true }
 sha2 = "0.10"
 toml = { workspace = true }
@@ -29,6 +36,27 @@ bench = false
 [[bin]]
 name = "config_parse"
 path = "fuzz_targets/config_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cid_extract"
+path = "fuzz_targets/cid_extract.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cid_decrypt"
+path = "fuzz_targets/cid_decrypt.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "packet_parse"
+path = "fuzz_targets/packet_parse.rs"
 test = false
 doc = false
 bench = false

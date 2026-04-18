@@ -493,3 +493,11 @@ fn parse_frame_icmpv6(frame: &[u8], icmp_offset: usize) -> Option<FrameMeta> {
 #[cfg(test)]
 #[path = "packet_tests.rs"]
 mod tests;
+
+// Fuzz-only entry point. Lets the libFuzzer harness in `fuzz/` exercise
+// the frame parser without making `parse_frame` or `FrameMeta` part of
+// the crate's normal API surface.
+#[cfg(fuzzing)]
+pub(crate) fn fuzz_parse_frame(frame: &[u8]) -> bool {
+    parse_frame(frame).is_some()
+}
