@@ -493,3 +493,271 @@ fn build_config_response(
 
     serde_json::to_value(ConfigResponse { daemon, route }).unwrap_or(Value::Null)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use aes::Aes128;
+    use aes::cipher::KeyInit;
+    use aes::cipher::generic_array::GenericArray;
+
+    fn fixture_args() -> Args {
+        Args {
+            ports: vec![443, 4433],
+            interface: "lo".into(),
+            queues: 2,
+            config: Some(PathBuf::from("/etc/pesigitgd.toml")),
+            routeconfig: Some(PathBuf::from("/etc/pesigitgd-route.toml")),
+            status_socket: Some(PathBuf::from("/run/pesigitgd.sock")),
+            #[cfg(debug_assertions)]
+            ebpf_obj: None,
+            foreground: true,
+        }
+    }
+
+    fn fixture_table() -> ConfigTable {
+        ConfigTable::from_str(
+            r#"
+[[configs]]
+config_id = 0
+server_id_length = 2
+nonce_length = 5
+
+[[configs.servers]]
+id = "0001"
+address = "10.0.0.1"
+
+[[configs.servers]]
+id = "0002"
+address = "2001:db8::1"
+"#,
+        )
+        .unwrap()
+    }
+
+    fn worker_health(alive: usize, expected: usize) -> Arc<WorkerHealth> {
+        Arc::new(WorkerHealth {
+            expected,
+            alive: AtomicUsize::new(alive),
+        })
+    }
+
+    // ---------- DTO conversions ----------
+
+    #[test]
+    fn snapshot_view_filters_zero_cid_configs() {
+        let snap = Snapshot {
+            cid_by_config: [3, 0, 5, 0, 0, 0, 1],
+            ..Snapshot::default()
+        };
+        let view = SnapshotView::from(&snap);
+        assert_eq!(view.cid_by_config.len(), 3);
+        assert_eq!(view.cid_by_config[&0], 3);
+        assert_eq!(view.cid_by_config[&2], 5);
+        assert_eq!(view.cid_by_config[&6], 1);
+    }
+
+    #[test]
+    fn snapshot_view_omits_cid_by_config_when_all_zero() {
+        let view = SnapshotView::from(&Snapshot::default());
+        assert!(view.cid_by_config.is_empty());
+    }
+
+    #[test]
+    fn snapshot_view_preserves_top_level_counters() {
+        let snap = Snapshot {
+            rx_packets: 10,
+            forwarded: 9,
+            cid_routed: 4,
+            fallback_routed: 3,
+            cid_unroutable: 1,
+            draining_forwarded: 1,
+            icmp_forwarded: 0,
+            passed: 1,
+            pending_fill_peak: 7,
+            ..Snapshot::default()
+        };
+
+        let view = SnapshotView::from(&snap);
+        assert_eq!(view.rx_packets, 10);
+        assert_eq!(view.forwarded, 9);
+        assert_eq!(view.cid_routed, 4);
+        assert_eq!(view.fallback_routed, 3);
+        assert_eq!(view.cid_unroutable, 1);
+        assert_eq!(view.draining_forwarded, 1);
+        assert_eq!(view.icmp_forwarded, 0);
+        assert_eq!(view.passed, 1);
+        assert_eq!(view.pending_fill_peak, 7);
+    }
+
+    #[test]
+    fn snapshot_view_nests_retry_subtree() {
+        let snap = Snapshot {
+            retry_initials_seen: 5,
+            retry_issued: 4,
+            retry_token_validated: 3,
+            retry_token_invalid: 2,
+            retry_token_expired: 1,
+            retry_parse_error: 1,
+            ..Snapshot::default()
+        };
+
+        let value = serde_json::to_value(SnapshotView::from(&snap)).unwrap();
+        let retry = &value["retry"];
+        assert_eq!(retry["initials_seen"], 5);
+        assert_eq!(retry["issued"], 4);
+        assert_eq!(retry["token_validated"], 3);
+        assert_eq!(retry["token_invalid"], 2);
+        assert_eq!(retry["token_expired"], 1);
+        assert_eq!(retry["parse_error"], 1);
+    }
+
+    #[test]
+    fn version_response_uses_compile_time_constants() {
+        let v = build_version_response();
+        assert_eq!(v["name"], pesigitg_common::PROC_NAME);
+        assert_eq!(v["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(v["build_date"], env!("BUILD_DATE"));
+        assert_eq!(v["rustc_version"], env!("RUSTC_VERSION"));
+        assert_eq!(v["target"], env!("TARGET"));
+    }
+
+    #[test]
+    fn health_response_status_ok_when_alive_meets_expected() {
+        let wh = worker_health(4, 4);
+        let v = build_health_response(&wh, Instant::now());
+        assert_eq!(v["status"], "ok");
+        assert_eq!(v["workers_alive"], 4);
+        assert_eq!(v["workers_expected"], 4);
+    }
+
+    #[test]
+    fn health_response_status_ok_when_alive_exceeds_expected() {
+        // Documents the `alive >= expected` rule: spurious extras don't
+        // get reported as degraded.
+        let wh = worker_health(5, 4);
+        let v = build_health_response(&wh, Instant::now());
+        assert_eq!(v["status"], "ok");
+    }
+
+    #[test]
+    fn health_response_status_degraded_when_alive_below_expected() {
+        let wh = worker_health(2, 4);
+        let v = build_health_response(&wh, Instant::now());
+        assert_eq!(v["status"], "degraded");
+        assert_eq!(v["workers_alive"], 2);
+    }
+
+    #[test]
+    fn encryption_name_maps_three_variants() {
+        let key = [0u8; 16];
+        let cipher = Aes128::new(GenericArray::from_slice(&key));
+        assert_eq!(encryption_name(&Encryption::Plaintext), "plaintext");
+        assert_eq!(
+            encryption_name(&Encryption::SinglePass {
+                key,
+                cipher: cipher.clone(),
+            }),
+            "single_pass"
+        );
+        assert_eq!(
+            encryption_name(&Encryption::FourPass { key, cipher }),
+            "four_pass"
+        );
+    }
+
+    #[test]
+    fn config_response_serializes_args_and_route() {
+        let args = Arc::new(RwLock::new(fixture_args()));
+        let table = Arc::new(RwLock::new(fixture_table()));
+        let v = build_config_response(&args, &table);
+
+        assert_eq!(v["daemon"]["interface"], "lo");
+        assert_eq!(v["daemon"]["ports"], json!([443, 4433]));
+        assert_eq!(v["daemon"]["queues"], 2);
+        assert_eq!(v["daemon"]["foreground"], true);
+        assert_eq!(v["daemon"]["status_socket_path"], "/run/pesigitgd.sock");
+
+        let configs = v["route"]["configs"].as_array().unwrap();
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0]["config_id"], 0);
+        assert_eq!(configs[0]["encryption"], "plaintext");
+
+        let servers = configs[0]["servers"].as_array().unwrap();
+        assert_eq!(servers.len(), 2);
+        assert_eq!(servers[0]["id"], "0001");
+        assert_eq!(servers[0]["address"], "10.0.0.1");
+    }
+
+    // ---------- handle_connection over a UnixStream pair ----------
+
+    fn drive_handle_connection(request: &[u8]) -> Value {
+        let (server, client) = UnixStream::pair().unwrap();
+        let args = Arc::new(RwLock::new(fixture_args()));
+        let table = Arc::new(RwLock::new(fixture_table()));
+        let stats = Arc::new(StatsTable::new(1));
+        let wh = worker_health(1, 1);
+        let epoch = Instant::now();
+
+        let handle = thread::spawn(move || {
+            handle_connection(server, &args, &table, &stats, &wh, epoch);
+        });
+
+        // Write in a thread so ECONNRESET from the server closing early
+        // (e.g., on oversized requests) doesn't poison the read side.
+        let req = request.to_vec();
+        let mut write_client = client.try_clone().unwrap();
+        let writer = thread::spawn(move || {
+            let _ = write_client.write_all(&req);
+            let _ = write_client.shutdown(std::net::Shutdown::Write);
+        });
+
+        let mut read_client = client;
+        let mut buf = Vec::new();
+        read_client.read_to_end(&mut buf).unwrap();
+        let _ = writer.join();
+        handle.join().unwrap();
+
+        let line = buf.split(|&b| b == b'\n').next().unwrap();
+        serde_json::from_slice(line).expect("response is JSON")
+    }
+
+    #[test]
+    fn handle_connection_root_lists_endpoints() {
+        let v = drive_handle_connection(b"GET /\n");
+        let endpoints = v["endpoints"].as_array().unwrap();
+        assert!(endpoints.iter().any(|e| e == "/health"));
+        assert!(endpoints.iter().any(|e| e == "/version"));
+        assert!(endpoints.iter().any(|e| e == "/stats"));
+        assert!(endpoints.iter().any(|e| e == "/config"));
+    }
+
+    #[test]
+    fn handle_connection_unknown_endpoint() {
+        let v = drive_handle_connection(b"GET /nope\n");
+        assert_eq!(v["error"], "unknown endpoint");
+    }
+
+    #[test]
+    fn handle_connection_request_too_long() {
+        // Exactly MAX_REQUEST_BYTES with no newline fills the buffer;
+        // the next loop iteration reports truncation. Writing any more
+        // would leave unread bytes in the recv queue and race a RST.
+        let req = vec![b'A'; MAX_REQUEST_BYTES];
+        let v = drive_handle_connection(&req);
+        assert_eq!(v["error"], "request too long");
+    }
+
+    #[test]
+    fn handle_connection_handles_crlf_terminator() {
+        let v = drive_handle_connection(b"GET /\r\n");
+        assert!(v["endpoints"].is_array());
+    }
+
+    #[test]
+    fn handle_connection_dispatches_version() {
+        let v = drive_handle_connection(b"GET /version\n");
+        assert_eq!(v["version"], env!("CARGO_PKG_VERSION"));
+    }
+}
