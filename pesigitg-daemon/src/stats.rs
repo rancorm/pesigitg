@@ -367,6 +367,11 @@ impl StatsTable {
         &self.slots[index]
     }
 
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.slots.len()
+    }
+
     pub fn aggregate(&self) -> Snapshot {
         let mut total = Snapshot::default();
 
@@ -397,5 +402,229 @@ impl StatsTable {
         }
 
         total
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn snapshot_with_all_ones() -> Snapshot {
+        Snapshot {
+            rx_packets: 1,
+            forwarded: 1,
+            cid_routed: 1,
+            cid_by_config: [1; 7],
+            cid_unroutable: 1,
+            fallback_routed: 1,
+            draining_forwarded: 1,
+            icmp_forwarded: 1,
+            passed: 1,
+            pending_fill_peak: 1,
+            retry_initials_seen: 1,
+            retry_issued: 1,
+            retry_token_validated: 1,
+            retry_token_invalid: 1,
+            retry_token_expired: 1,
+            retry_parse_error: 1,
+        }
+    }
+
+    #[test]
+    fn delta_of_equal_snapshots_is_zero_linear_fields() {
+        let s = snapshot_with_all_ones();
+        let d = s.delta(&s);
+        assert_eq!(d.rx_packets, 0);
+        assert_eq!(d.forwarded, 0);
+        assert_eq!(d.cid_routed, 0);
+        assert_eq!(d.cid_by_config, [0; 7]);
+        assert_eq!(d.cid_unroutable, 0);
+        assert_eq!(d.fallback_routed, 0);
+        assert_eq!(d.draining_forwarded, 0);
+        assert_eq!(d.icmp_forwarded, 0);
+        assert_eq!(d.passed, 0);
+        assert_eq!(d.retry_initials_seen, 0);
+        assert_eq!(d.retry_issued, 0);
+        assert_eq!(d.retry_token_validated, 0);
+        assert_eq!(d.retry_token_invalid, 0);
+        assert_eq!(d.retry_token_expired, 0);
+        assert_eq!(d.retry_parse_error, 0);
+    }
+
+    #[test]
+    fn delta_preserves_pending_fill_peak_from_self() {
+        // pending_fill_peak is a high-water mark, not a rate — delta keeps
+        // the current value rather than subtracting the previous peak.
+        let prev = Snapshot {
+            pending_fill_peak: 10,
+            ..Snapshot::default()
+        };
+        let cur = Snapshot {
+            pending_fill_peak: 42,
+            ..Snapshot::default()
+        };
+        assert_eq!(cur.delta(&prev).pending_fill_peak, 42);
+
+        // Even if cur < prev (peak was observed earlier and not since),
+        // delta must still report the current peak, not an underflow.
+        let cur = Snapshot {
+            pending_fill_peak: 5,
+            ..Snapshot::default()
+        };
+        assert_eq!(cur.delta(&prev).pending_fill_peak, 5);
+    }
+
+    #[test]
+    fn delta_subtracts_per_config_slot_elementwise() {
+        let prev = Snapshot {
+            cid_by_config: [0, 1, 2, 3, 4, 5, 6],
+            ..Snapshot::default()
+        };
+        let cur = Snapshot {
+            cid_by_config: [0, 2, 4, 6, 8, 10, 12],
+            ..Snapshot::default()
+        };
+        assert_eq!(cur.delta(&prev).cid_by_config, [0, 1, 2, 3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn delta_uses_wrapping_sub_when_counters_are_reset() {
+        // Linear counters are monotonic in production; wrapping_sub guards
+        // against a hypothetical reset/rollover yielding a nonsensically
+        // large delta rather than a panic.
+        let prev = Snapshot {
+            rx_packets: 100,
+            ..Snapshot::default()
+        };
+        let cur = Snapshot {
+            rx_packets: 40,
+            ..Snapshot::default()
+        };
+        assert_eq!(cur.delta(&prev).rx_packets, u64::MAX - 60 + 1);
+    }
+
+    #[test]
+    fn display_omits_cid_breakdown_when_all_zero() {
+        let s = Snapshot::default();
+        let out = format!("{}", s);
+        assert!(!out.contains("c0="));
+        assert!(!out.contains('['));
+        assert!(out.contains("rx=0"));
+    }
+
+    #[test]
+    fn display_includes_only_nonzero_cid_slots() {
+        let mut s = Snapshot::default();
+        s.cid_by_config[0] = 3;
+        s.cid_by_config[2] = 5;
+        let out = format!("{}", s);
+        assert!(out.contains("c0=3"));
+        assert!(out.contains("c2=5"));
+        assert!(!out.contains("c1="));
+        assert!(!out.contains("c3="));
+    }
+
+    #[test]
+    fn display_omits_retry_section_when_no_initials_seen() {
+        let s = Snapshot::default();
+        let out = format!("{}", s);
+        assert!(!out.contains("retry("));
+    }
+
+    #[test]
+    fn display_includes_retry_section_when_initials_seen() {
+        let s = Snapshot {
+            retry_initials_seen: 5,
+            retry_issued: 2,
+            retry_token_validated: 1,
+            retry_token_invalid: 1,
+            retry_token_expired: 0,
+            retry_parse_error: 1,
+            ..Snapshot::default()
+        };
+        let out = format!("{}", s);
+        assert!(out.contains("retry(seen=5"));
+        assert!(out.contains("issued=2"));
+        assert!(out.contains("parse_err=1"));
+    }
+
+    #[test]
+    fn display_omits_draining_when_zero() {
+        let s = Snapshot::default();
+        let out = format!("{}", s);
+        assert!(!out.contains("draining="));
+    }
+
+    #[test]
+    fn display_omits_pending_fill_peak_when_zero() {
+        let s = Snapshot::default();
+        let out = format!("{}", s);
+        assert!(!out.contains("pending_fill_peak"));
+    }
+
+    #[test]
+    fn aggregate_of_empty_table_is_default() {
+        let t = StatsTable::new(0);
+        assert_eq!(t.len(), 0);
+        let agg = t.aggregate();
+        assert_eq!(agg.rx_packets, 0);
+        assert_eq!(agg.pending_fill_peak, 0);
+    }
+
+    #[test]
+    fn aggregate_sums_linear_counters_and_maxes_peak() {
+        let t = StatsTable::new(3);
+        t.slot(0).rx_packets.store(10, Ordering::Relaxed);
+        t.slot(1).rx_packets.store(20, Ordering::Relaxed);
+        t.slot(2).rx_packets.store(30, Ordering::Relaxed);
+
+        t.slot(0).pending_fill_peak.store(5, Ordering::Relaxed);
+        t.slot(1).pending_fill_peak.store(99, Ordering::Relaxed);
+        t.slot(2).pending_fill_peak.store(12, Ordering::Relaxed);
+
+        // cid_by_config per-slot must be summed element-wise.
+        t.slot(0).cid_by_config[0].store(1, Ordering::Relaxed);
+        t.slot(1).cid_by_config[0].store(2, Ordering::Relaxed);
+        t.slot(2).cid_by_config[3].store(7, Ordering::Relaxed);
+
+        let agg = t.aggregate();
+        assert_eq!(agg.rx_packets, 60);
+        assert_eq!(agg.pending_fill_peak, 99);
+        assert_eq!(agg.cid_by_config[0], 3);
+        assert_eq!(agg.cid_by_config[3], 7);
+    }
+
+    #[test]
+    fn batch_flush_rolls_up_into_worker_stats() {
+        let t = StatsTable::new(1);
+        let mut batch = BatchStats::new();
+        batch.record_cid_forward(2);
+        batch.record_cid_forward(2);
+        batch.record_fallback_forward();
+        batch.record_icmp_forward();
+        batch.record_draining_forward();
+        batch.record_cid_unroutable();
+        batch.record_pass();
+        batch.flush(t.slot(0));
+
+        let agg = t.aggregate();
+        assert_eq!(agg.cid_routed, 2);
+        assert_eq!(agg.cid_by_config[2], 2);
+        // forwarded = cid_routed + fallback_routed + icmp_forwarded (not draining).
+        assert_eq!(agg.forwarded, 2 + 1 + 1);
+        assert_eq!(agg.fallback_routed, 1);
+        assert_eq!(agg.icmp_forwarded, 1);
+        assert_eq!(agg.draining_forwarded, 1);
+        assert_eq!(agg.cid_unroutable, 1);
+        assert_eq!(agg.passed, 1);
+    }
+
+    #[test]
+    fn record_pending_fill_keeps_max_not_last() {
+        let t = StatsTable::new(1);
+        t.slot(0).record_pending_fill(50);
+        t.slot(0).record_pending_fill(10); // lower — must not overwrite
+        t.slot(0).record_pending_fill(30);
+        assert_eq!(t.aggregate().pending_fill_peak, 50);
     }
 }
