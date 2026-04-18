@@ -1068,7 +1068,13 @@ dependencies = [
 name = "pesigitg-daemon-fuzz"
 version = "0.0.0"
 dependencies = [
+ "aes",
+ "hmac",
  "libfuzzer-sys",
+ "pesigitg-common",
+ "serde",
+ "sha2",
+ "toml",
 ]
 
 [[package]]

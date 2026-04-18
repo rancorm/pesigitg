@@ -10,9 +10,25 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 
+# Deps for the config_parse target. These match the daemon's direct
+# deps so `#[path]`-included modules resolve identically.
+aes = { workspace = true }
+hmac = "0.12"
+pesigitg-common = { workspace = true, features = ["std"] }
+serde = { workspace = true }
+sha2 = "0.10"
+toml = { workspace = true }
+
 [[bin]]
 name = "initial_parse"
 path = "fuzz_targets/initial_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "config_parse"
+path = "fuzz_targets/config_parse.rs"
 test = false
 doc = false
 bench = false
