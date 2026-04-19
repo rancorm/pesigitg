@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# ok.sh — Probe the pesigitgd /health endpoint and exit based on status.
 #
-# Usage: ok.sh [-s SOCKET] [-v]
-#   -s, --socket PATH   Status socket (default: /run/pesigitg/status.sock)
-#   -v, --verbose       Print the full JSON response
+# ok.sh [Probe per-interface pesigitgd /health endpoint and exit with status]
+#
+# Usage: ok.sh [-i INTF] [-s SOCKET] [-v]
+#   -i, --interface INTF Interface of socket
+#   -s, --socket PATH    Status socket (default: /run/pesigitg/status-eth0.sock)
+#   -v, --verbose        Print the full JSON response
 #
 # Exit codes:
 #   0 — status ok
@@ -20,7 +22,8 @@
 
 set -euo pipefail
 
-SOCKET="/run/pesigitg/status.sock"
+INTF="eth0"
+SOCKET="/run/pesigitg/status-$INTF.sock"
 VERBOSE=0
 
 usage() {
@@ -29,6 +32,10 @@ usage() {
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        -i|--interface)
+			INTF="$2";
+			SOCKET="/run/pesigitg/status-$INTF.sock";
+			shift 2 ;;
         -s|--socket)  SOCKET="$2"; shift 2 ;;
         -v|--verbose) VERBOSE=1; shift ;;
         -h|--help)    usage; exit 0 ;;
