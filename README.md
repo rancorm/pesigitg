@@ -202,8 +202,7 @@ at the LB instead of having *N* backends each pay the validation cost.
 
 Tokens are HMAC-SHA256 over `(source IP, original DCID, mint timestamp)`
 using a 32-byte key. There is no per-connection state: a token is valid
-iff it verifies against that tuple and hasn't aged past
-`token_lifetime_secs`.
+if it verifies against that tuple and hasn't aged past `token_lifetime_secs`.
 
 ### Modes
 
