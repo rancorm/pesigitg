@@ -89,11 +89,14 @@ pub fn get_hw_queues(interface: &str) -> std::io::Result<(u32, u32)> {
     Ok((channels.combined_count, channels.max_combined))
 }
 
-pub fn plan_threads(interface: &str, max_threads: Option<u32>) -> Vec<ThreadConfig> {
+pub fn plan_threads(
+    interface: &str,
+    max_threads: Option<u32>,
+) -> anyhow::Result<Vec<ThreadConfig>> {
     let (hw_queues, _) = get_hw_queues(interface).unwrap_or((1, 1));
     let available_cores = num_cores();
     let requested = max_threads.unwrap_or(hw_queues);
-    let count = resolve_thread_count(hw_queues, requested, available_cores);
+    let count = non_zero_worker_count(hw_queues, requested, available_cores)?;
 
     if count < requested {
         warn!(
@@ -102,18 +105,14 @@ pub fn plan_threads(interface: &str, max_threads: Option<u32>) -> Vec<ThreadConf
         );
     }
 
-    if count == 0 {
-        return Vec::new();
-    }
-
     let numa_cores = select_cores(interface, count);
 
-    (0..count)
+    Ok((0..count)
         .map(|i| ThreadConfig {
             queue_id: i,
             core_id: numa_cores[i as usize],
         })
-        .collect()
+        .collect())
 }
 
 /// Resolve the number of worker threads to spawn: the smaller of the NIC's
@@ -122,6 +121,28 @@ pub fn plan_threads(interface: &str, max_threads: Option<u32>) -> Vec<ThreadConf
 /// NUMA-local core list when the host has fewer cores than queues.
 fn resolve_thread_count(hw_queues: u32, requested: u32, available_cores: usize) -> u32 {
     requested.min(hw_queues).min(available_cores as u32)
+}
+
+/// Same as `resolve_thread_count` but refuses to return zero. A zero
+/// result means one of the three inputs is zero (the NIC reports no
+/// combined channels, the args validator let through a zero request,
+/// or the kernel reports no parallelism) — all unrecoverable, so fail
+/// loudly at startup instead of silently spawning a no-op daemon.
+fn non_zero_worker_count(
+    hw_queues: u32,
+    requested: u32,
+    available_cores: usize,
+) -> anyhow::Result<u32> {
+    let count = resolve_thread_count(hw_queues, requested, available_cores);
+    if count == 0 {
+        anyhow::bail!(
+            "no workers to spawn: hw queues = {}, requested = {}, cpu cores = {}",
+            hw_queues,
+            requested,
+            available_cores
+        );
+    }
+    Ok(count)
 }
 
 /// Pin the calling thread to a specific CPU core.
@@ -633,6 +654,37 @@ mod tests {
     #[test]
     fn resolve_thread_count_zero_cores_returns_zero() {
         assert_eq!(resolve_thread_count(4, 4, 0), 0);
+    }
+
+    // ---------- non_zero_worker_count ----------
+
+    #[test]
+    fn non_zero_worker_count_succeeds_when_all_positive() {
+        assert_eq!(non_zero_worker_count(4, 4, 8).unwrap(), 4);
+    }
+
+    #[test]
+    fn non_zero_worker_count_errors_when_hw_queues_zero() {
+        // Ethtool reports 0 combined channels — misconfigured NIC.
+        let err = non_zero_worker_count(0, 4, 8).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("hw queues = 0"), "msg={msg}");
+    }
+
+    #[test]
+    fn non_zero_worker_count_errors_when_available_cores_zero() {
+        // Pathological: available_parallelism() returned 0.
+        let err = non_zero_worker_count(4, 4, 0).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("cpu cores = 0"), "msg={msg}");
+    }
+
+    #[test]
+    fn non_zero_worker_count_errors_when_requested_zero() {
+        // args validator should already reject this, but belt-and-braces.
+        let err = non_zero_worker_count(4, 0, 8).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("requested = 0"), "msg={msg}");
     }
 
     // ---------- parse_cpulist ----------

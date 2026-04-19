@@ -166,7 +166,7 @@ fn main() -> Result<()> {
     // Plan and spawn AF_XDP worker threads, one per NIC queue.
     // Workers create their own AF_XDP sockets and register them with
     // the eBPF XSKS map.
-    let thread_plan = plan_threads(&args.interface, Some(args.queues));
+    let thread_plan = plan_threads(&args.interface, Some(args.queues))?;
 
     for t in &thread_plan {
         info!("thread planned: queue={} -> core={}", t.queue_id, t.core_id);
