@@ -2,8 +2,10 @@
 // Copyright (c) 2026 Jonathan Cormier
 // This file is part of Pesigitg.
 
+use std::collections::HashMap;
 use std::ffi::CString;
 use std::os::fd::BorrowedFd;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread::{self, JoinHandle};
@@ -420,9 +422,10 @@ fn worker_loop(
 }
 
 fn select_cores(interface: &str, queue_count: u32) -> Vec<usize> {
-    // Prefer cores on the same NUMA node as the NIC
-    // Read from /sys/class/net/<interface>/device/numa_node
-    // Then pick cores from that node
+    // Prefer cores on the same NUMA node as the NIC. On AMD EPYC
+    // NPS>1 (and anything else with multiple NUMA nodes per socket)
+    // the CPU's `topology/physical_package_id` reports the *socket*,
+    // not the node — so read node<N>/cpulist instead.
 
     let nic_numa =
         std::fs::read_to_string(format!("/sys/class/net/{}/device/numa_node", interface))
@@ -430,21 +433,83 @@ fn select_cores(interface: &str, queue_count: u32) -> Vec<usize> {
             .and_then(|s| s.trim().parse::<i32>().ok())
             .unwrap_or(0);
 
+    let numa_map = read_cpu_numa_map_from(Path::new("/sys/devices/system/node"));
+
     let cpus: Vec<(usize, i32)> = (0..num_cores())
-        .map(|cpu| {
-            let path = format!(
-                "/sys/devices/system/cpu/cpu{}/topology/physical_package_id",
-                cpu
-            );
-            let numa = std::fs::read_to_string(&path)
-                .ok()
-                .and_then(|s| s.trim().parse::<i32>().ok())
-                .unwrap_or(0);
-            (cpu, numa)
-        })
+        .map(|cpu| (cpu, numa_map.get(&cpu).copied().unwrap_or(0)))
         .collect();
 
     pick_numa_local_cores(nic_numa, &cpus, queue_count)
+}
+
+/// Parse a Linux sysfs cpulist (e.g. `"0-7,16,24-31"`) into a flat list
+/// of CPU ids. Malformed parts are silently skipped — this is a
+/// best-effort read of a kernel-formatted file.
+fn parse_cpulist(s: &str) -> Vec<usize> {
+    let mut out = Vec::new();
+    for part in s.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        match part.split_once('-') {
+            Some((lo, hi)) => {
+                if let (Ok(lo), Ok(hi)) = (lo.parse::<usize>(), hi.parse::<usize>()) {
+                    for cpu in lo..=hi {
+                        out.push(cpu);
+                    }
+                }
+            }
+            None => {
+                if let Ok(cpu) = part.parse::<usize>() {
+                    out.push(cpu);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Build a cpu->node map from `(node_id, cpulist)` pairs. Last writer
+/// wins if a cpu appears under multiple nodes (shouldn't happen in
+/// kernel-reported data).
+fn build_cpu_numa_map(entries: &[(i32, &str)]) -> HashMap<usize, i32> {
+    let mut map = HashMap::new();
+    for &(node, cpulist) in entries {
+        for cpu in parse_cpulist(cpulist) {
+            map.insert(cpu, node);
+        }
+    }
+    map
+}
+
+/// Enumerate `node<N>` directories under `node_root` and return a
+/// cpu->node map built from their `cpulist` files. Returns an empty
+/// map if the root is unreadable (non-NUMA kernels, containers without
+/// the sysfs subtree, etc.) — callers fall back to treating every cpu
+/// as node 0.
+fn read_cpu_numa_map_from(node_root: &Path) -> HashMap<usize, i32> {
+    let dir = match std::fs::read_dir(node_root) {
+        Ok(d) => d,
+        Err(_) => return HashMap::new(),
+    };
+    let mut entries: Vec<(i32, String)> = Vec::new();
+    for e in dir.flatten() {
+        let name = e.file_name();
+        let name = name.to_string_lossy();
+        let Some(rest) = name.strip_prefix("node") else {
+            continue;
+        };
+        let Ok(node) = rest.parse::<i32>() else {
+            continue;
+        };
+        let cpulist_path = e.path().join("cpulist");
+        if let Ok(s) = std::fs::read_to_string(&cpulist_path) {
+            entries.push((node, s.trim().to_string()));
+        }
+    }
+    let refs: Vec<(i32, &str)> = entries.iter().map(|(n, s)| (*n, s.as_str())).collect();
+    build_cpu_numa_map(&refs)
 }
 
 /// Pick up to `queue_count` CPU cores preferring those on the same NUMA
@@ -506,6 +571,75 @@ mod tests {
     #[test]
     fn resolve_thread_count_zero_cores_returns_zero() {
         assert_eq!(resolve_thread_count(4, 4, 0), 0);
+    }
+
+    // ---------- parse_cpulist ----------
+
+    #[test]
+    fn parse_cpulist_single_range() {
+        assert_eq!(parse_cpulist("0-5"), vec![0, 1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn parse_cpulist_single_cpu() {
+        assert_eq!(parse_cpulist("7"), vec![7]);
+    }
+
+    #[test]
+    fn parse_cpulist_multiple_ranges() {
+        // EPYC NPS=4 style: each node owns a non-contiguous CPU set.
+        assert_eq!(parse_cpulist("0-3,16-19"), vec![0, 1, 2, 3, 16, 17, 18, 19]);
+    }
+
+    #[test]
+    fn parse_cpulist_mixed_singles_and_ranges() {
+        assert_eq!(parse_cpulist("0,2-3,7"), vec![0, 2, 3, 7]);
+    }
+
+    #[test]
+    fn parse_cpulist_empty_string() {
+        assert!(parse_cpulist("").is_empty());
+    }
+
+    #[test]
+    fn parse_cpulist_skips_malformed_parts() {
+        // Unparseable tokens should be dropped, not panic.
+        assert_eq!(parse_cpulist("0-2,junk,5"), vec![0, 1, 2, 5]);
+    }
+
+    #[test]
+    fn parse_cpulist_tolerates_whitespace() {
+        assert_eq!(parse_cpulist(" 0-1 ,  4 "), vec![0, 1, 4]);
+    }
+
+    // ---------- build_cpu_numa_map ----------
+
+    #[test]
+    fn build_cpu_numa_map_single_node() {
+        let map = build_cpu_numa_map(&[(0, "0-3")]);
+        for cpu in 0..=3 {
+            assert_eq!(map.get(&cpu), Some(&0));
+        }
+        assert!(!map.contains_key(&4));
+    }
+
+    #[test]
+    fn build_cpu_numa_map_epyc_nps4_style() {
+        // Regression for the socket-vs-NUMA bug: a single-socket AMD
+        // with NPS=4 exposes four NUMA nodes, and each CPU belongs to
+        // exactly one node — even though `physical_package_id` would
+        // report socket 0 for all of them.
+        let map = build_cpu_numa_map(&[(0, "0-3"), (1, "4-7"), (2, "8-11"), (3, "12-15")]);
+        assert_eq!(map.get(&0), Some(&0));
+        assert_eq!(map.get(&5), Some(&1));
+        assert_eq!(map.get(&10), Some(&2));
+        assert_eq!(map.get(&15), Some(&3));
+    }
+
+    #[test]
+    fn build_cpu_numa_map_empty_input_yields_empty_map() {
+        let map = build_cpu_numa_map(&[]);
+        assert!(map.is_empty());
     }
 
     // ---------- pick_numa_local_cores ----------
