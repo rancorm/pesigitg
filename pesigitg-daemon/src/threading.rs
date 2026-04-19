@@ -10,7 +10,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use libc::{AF_INET, SOCK_DGRAM, c_char, ioctl, socket};
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use nix::sched::{CpuSet, sched_setaffinity};
 use nix::unistd::Pid;
 use xsk_rs::FrameDesc;
@@ -88,13 +88,23 @@ pub fn get_hw_queues(interface: &str) -> std::io::Result<(u32, u32)> {
 }
 
 pub fn plan_threads(interface: &str, max_threads: Option<u32>) -> Vec<ThreadConfig> {
-    let (queue_count, _) = get_hw_queues(interface).unwrap_or((1, 1));
-    let numa_cores = select_cores(interface, queue_count);
+    let (hw_queues, _) = get_hw_queues(interface).unwrap_or((1, 1));
+    let available_cores = num_cores();
+    let requested = max_threads.unwrap_or(hw_queues);
+    let count = resolve_thread_count(hw_queues, requested, available_cores);
 
-    let count = match max_threads {
-        Some(max) => queue_count.min(max),
-        None => queue_count,
-    };
+    if count < requested {
+        warn!(
+            "worker count clamped to {} (requested {}, hw queues {}, cpu cores {})",
+            count, requested, hw_queues, available_cores
+        );
+    }
+
+    if count == 0 {
+        return Vec::new();
+    }
+
+    let numa_cores = select_cores(interface, count);
 
     (0..count)
         .map(|i| ThreadConfig {
@@ -102,6 +112,14 @@ pub fn plan_threads(interface: &str, max_threads: Option<u32>) -> Vec<ThreadConf
             core_id: numa_cores[i as usize],
         })
         .collect()
+}
+
+/// Resolve the number of worker threads to spawn: the smaller of the NIC's
+/// hardware queue count, the user-requested count, and the CPU cores
+/// available for pinning. Prevents `plan_threads` from indexing past the
+/// NUMA-local core list when the host has fewer cores than queues.
+fn resolve_thread_count(hw_queues: u32, requested: u32, available_cores: usize) -> u32 {
+    requested.min(hw_queues).min(available_cores as u32)
 }
 
 /// Pin the calling thread to a specific CPU core.
@@ -454,6 +472,41 @@ mod tests {
     use super::*;
     use std::sync::mpsc;
     use std::time::Duration;
+
+    // ---------- resolve_thread_count ----------
+
+    #[test]
+    fn resolve_thread_count_no_clamp_when_all_sufficient() {
+        // Host has headroom: requested is the binding constraint.
+        assert_eq!(resolve_thread_count(16, 8, 32), 8);
+    }
+
+    #[test]
+    fn resolve_thread_count_clamped_by_hw_queues() {
+        // User asked for more workers than the NIC can feed.
+        assert_eq!(resolve_thread_count(4, 16, 32), 4);
+    }
+
+    #[test]
+    fn resolve_thread_count_clamped_by_available_cores() {
+        // Regression: panic when min(hw_queues, requested) > num_cores().
+        assert_eq!(resolve_thread_count(64, 64, 16), 16);
+    }
+
+    #[test]
+    fn resolve_thread_count_all_three_constraints_tie() {
+        assert_eq!(resolve_thread_count(8, 8, 8), 8);
+    }
+
+    #[test]
+    fn resolve_thread_count_zero_requested_returns_zero() {
+        assert_eq!(resolve_thread_count(4, 0, 4), 0);
+    }
+
+    #[test]
+    fn resolve_thread_count_zero_cores_returns_zero() {
+        assert_eq!(resolve_thread_count(4, 4, 0), 0);
+    }
 
     // ---------- pick_numa_local_cores ----------
 
