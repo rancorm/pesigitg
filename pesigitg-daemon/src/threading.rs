@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Jonathan Cormier
 // This file is part of Pesigitg.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
 use std::os::fd::BorrowedFd;
 use std::path::Path;
@@ -422,10 +422,11 @@ fn worker_loop(
 }
 
 fn select_cores(interface: &str, queue_count: u32) -> Vec<usize> {
-    // Prefer cores on the same NUMA node as the NIC. On AMD EPYC
-    // NPS>1 (and anything else with multiple NUMA nodes per socket)
-    // the CPU's `topology/physical_package_id` reports the *socket*,
-    // not the node — so read node<N>/cpulist instead.
+    // Prefer cores on the same NUMA node as the NIC, and within each
+    // NUMA bucket prefer SMT primaries before their hyperthread
+    // siblings. On AMD EPYC NPS>1 (and anything else with multiple
+    // NUMA nodes per socket) the CPU's `topology/physical_package_id`
+    // reports the *socket*, not the node — so read node<N>/cpulist.
 
     let nic_numa =
         std::fs::read_to_string(format!("/sys/class/net/{}/device/numa_node", interface))
@@ -434,11 +435,19 @@ fn select_cores(interface: &str, queue_count: u32) -> Vec<usize> {
             .unwrap_or(0);
 
     let numa_map = read_cpu_numa_map_from(Path::new("/sys/devices/system/node"));
+    let primaries = read_smt_primaries_from(Path::new("/sys/devices/system/cpu"));
 
-    let cpus: Vec<(usize, i32)> = (0..num_cores())
-        .map(|cpu| (cpu, numa_map.get(&cpu).copied().unwrap_or(0)))
+    let cpus_with_smt: Vec<(usize, i32, bool)> = (0..num_cores())
+        .map(|cpu| {
+            let numa = numa_map.get(&cpu).copied().unwrap_or(0);
+            // Empty primaries set => sysfs unreadable, treat every CPU
+            // as a primary (no reordering).
+            let is_primary = primaries.is_empty() || primaries.contains(&cpu);
+            (cpu, numa, is_primary)
+        })
         .collect();
 
+    let cpus = order_primaries_first(&cpus_with_smt);
     pick_numa_local_cores(nic_numa, &cpus, queue_count)
 }
 
@@ -510,6 +519,59 @@ fn read_cpu_numa_map_from(node_root: &Path) -> HashMap<usize, i32> {
     }
     let refs: Vec<(i32, &str)> = entries.iter().map(|(n, s)| (*n, s.as_str())).collect();
     build_cpu_numa_map(&refs)
+}
+
+/// A logical CPU is its physical core's "primary" when its id is the
+/// lowest in the sysfs `thread_siblings_list`. Pinning primaries first
+/// spreads load across distinct physical cores before doubling up on
+/// SMT siblings, which share L1d/L2 and execution resources.
+fn is_smt_primary(cpu: usize, siblings_list: &str) -> bool {
+    parse_cpulist(siblings_list)
+        .into_iter()
+        .min()
+        .is_some_and(|min| min == cpu)
+}
+
+/// Enumerate `cpu<N>` directories under `cpu_root`, read each CPU's
+/// `topology/thread_siblings_list`, and return the set of primaries.
+/// Returns an empty set when the subtree isn't readable — callers
+/// treat that as "SMT info unavailable, don't reorder".
+fn read_smt_primaries_from(cpu_root: &Path) -> HashSet<usize> {
+    let mut primaries = HashSet::new();
+    let dir = match std::fs::read_dir(cpu_root) {
+        Ok(d) => d,
+        Err(_) => return primaries,
+    };
+    for e in dir.flatten() {
+        let name = e.file_name();
+        let name = name.to_string_lossy();
+        let Some(rest) = name.strip_prefix("cpu") else {
+            continue;
+        };
+        let Ok(cpu) = rest.parse::<usize>() else {
+            continue;
+        };
+        let siblings_path = e.path().join("topology/thread_siblings_list");
+        if let Ok(s) = std::fs::read_to_string(&siblings_path)
+            && is_smt_primary(cpu, s.trim())
+        {
+            primaries.insert(cpu);
+        }
+    }
+    primaries
+}
+
+/// Stable partition: primaries first, siblings after. Preserves CPU
+/// order within each group so callers downstream (`pick_numa_local_cores`)
+/// see primaries ahead of their SMT siblings within each NUMA bucket.
+fn order_primaries_first(cpus: &[(usize, i32, bool)]) -> Vec<(usize, i32)> {
+    let (primaries, siblings): (Vec<_>, Vec<_>) =
+        cpus.iter().partition(|&&(_, _, is_primary)| is_primary);
+    primaries
+        .into_iter()
+        .chain(siblings)
+        .map(|&(cpu, numa, _)| (cpu, numa))
+        .collect()
 }
 
 /// Pick up to `queue_count` CPU cores preferring those on the same NUMA
@@ -640,6 +702,93 @@ mod tests {
     fn build_cpu_numa_map_empty_input_yields_empty_map() {
         let map = build_cpu_numa_map(&[]);
         assert!(map.is_empty());
+    }
+
+    // ---------- is_smt_primary ----------
+
+    #[test]
+    fn is_smt_primary_true_for_min_sibling() {
+        // Intel HT style: logical CPUs 0 and 8 share a physical core.
+        assert!(is_smt_primary(0, "0,8"));
+    }
+
+    #[test]
+    fn is_smt_primary_false_for_non_min_sibling() {
+        assert!(!is_smt_primary(8, "0,8"));
+    }
+
+    #[test]
+    fn is_smt_primary_true_when_no_siblings() {
+        // Non-SMT CPU: sibling list is just itself.
+        assert!(is_smt_primary(4, "4"));
+    }
+
+    #[test]
+    fn is_smt_primary_handles_range_syntax() {
+        // Some kernels emit thread_siblings_list as a range.
+        assert!(is_smt_primary(2, "2-3"));
+        assert!(!is_smt_primary(3, "2-3"));
+    }
+
+    #[test]
+    fn is_smt_primary_false_on_unparseable_list() {
+        // Empty / garbage => no min, no primary claim.
+        assert!(!is_smt_primary(0, ""));
+    }
+
+    // ---------- order_primaries_first ----------
+
+    #[test]
+    fn order_primaries_first_separates_by_flag() {
+        // 4 logical CPUs, SMT pairs (0,1) and (2,3) with 0 and 2 primary.
+        let input = [(0, 0, true), (1, 0, false), (2, 0, true), (3, 0, false)];
+        assert_eq!(
+            order_primaries_first(&input),
+            vec![(0, 0), (2, 0), (1, 0), (3, 0)]
+        );
+    }
+
+    #[test]
+    fn order_primaries_first_preserves_original_order_within_groups() {
+        // Stability matters — NUMA ordering downstream depends on it.
+        let input = [(5, 1, false), (0, 0, true), (3, 1, true), (2, 0, false)];
+        assert_eq!(
+            order_primaries_first(&input),
+            vec![(0, 0), (3, 1), (5, 1), (2, 0)]
+        );
+    }
+
+    #[test]
+    fn order_primaries_first_no_primaries_preserves_all() {
+        let input = [(0, 0, false), (1, 0, false)];
+        assert_eq!(order_primaries_first(&input), vec![(0, 0), (1, 0)]);
+    }
+
+    #[test]
+    fn order_primaries_first_all_primaries_preserves_all() {
+        let input = [(0, 0, true), (1, 0, true)];
+        assert_eq!(order_primaries_first(&input), vec![(0, 0), (1, 0)]);
+    }
+
+    #[test]
+    fn order_primaries_first_then_pick_numa_prefers_physical_cores() {
+        // End-to-end check: on an 8-logical, 4-physical box with the
+        // NIC on node 0 and only 2 queues, we should pin queues to
+        // two different physical cores (primaries 0 and 2), not both
+        // siblings of the same physical core.
+        let cpus = [
+            (0, 0, true),  // core A primary
+            (1, 0, false), // core A sibling
+            (2, 0, true),  // core B primary
+            (3, 0, false), // core B sibling
+            (4, 0, true),  // core C primary
+            (5, 0, false),
+            (6, 0, true),
+            (7, 0, false),
+        ];
+        let ordered = order_primaries_first(&cpus);
+        let picked = pick_numa_local_cores(0, &ordered, 2);
+        assert_eq!(picked, vec![0, 2]);
     }
 
     // ---------- pick_numa_local_cores ----------
