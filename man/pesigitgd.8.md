@@ -43,7 +43,10 @@ taking precedence:
 **-q**, **--queues** *NUM*
 :   Number of NIC RX queues to bind AF_XDP sockets to. Must be between 1
     and 256. Default: 1. The interface must have at least *NUM* combined
-    channels configured (see **ethtool**(8) **-l**/**-L**).
+    channels configured (see **ethtool**(8) **-l**/**-L**). Effective
+    worker count is silently clamped to the number of CPU cores when
+    *NUM* exceeds the host's available parallelism; see **TUNING** below
+    for the full pairing rules.
 
 **-c**, **--config** *PATH*
 :   Path to a daemon config file. See **pesigitgd.conf**(5). CLI flags
@@ -106,6 +109,61 @@ supported.
 
 Send **SIGHUP** to reset the exponential backoff on unhealthy servers so
 they are re-probed on the next cycle.
+
+# TUNING
+
+Each AF_XDP worker owns one NIC RX queue and is pinned to one logical
+CPU. The daemon picks workers and cores at startup; there are no
+runtime knobs.
+
+## Worker count
+
+The effective worker count is the smaller of:
+
+1. **--queues** (CLI / config),
+2. the NIC's reported combined channel count (from **ethtool**(8)),
+3. the host's available CPU parallelism
+   (**sched_getaffinity**(2) / *nproc*).
+
+When the effective count is below what was requested, a warning line
+is logged naming all three bounds. The daemon does **not** spawn more
+workers than cores — pinning two workers to the same CPU would
+serialize them under load.
+
+## NIC channel count
+
+The NIC must be configured with **exactly** as many combined channels
+as the daemon's effective worker count. Any RX queue the daemon did
+not bind an AF_XDP socket to is a packet sink — the XDP program's
+lookup into the per-queue socket map misses and the packet is
+**dropped**. Size the NIC to match:
+
+    ethtool -L <interface> combined <N>
+
+## Core placement
+
+Each worker is pinned via **sched_setaffinity**(2) to a CPU chosen in
+this preference order:
+
+1. same NUMA node as the NIC, SMT primary,
+2. same NUMA node as the NIC, SMT sibling (hyperthread),
+3. different NUMA node, SMT primary,
+4. different NUMA node, SMT sibling.
+
+The NIC's NUMA node is read from
+*/sys/class/net/INTERFACE/device/numa_node*. Per-CPU NUMA membership
+is read from */sys/devices/system/node/nodeN/cpulist* (not the
+socket-level *topology/physical_package_id*, which is wrong on AMD
+NPS>1 and similar multi-node-per-socket platforms). SMT primaries are
+identified as the lowest logical CPU id in each
+*/sys/devices/system/cpu/cpuN/topology/thread_siblings_list*. Kernels
+that don't expose these subtrees fall back to single-node,
+single-primary treatment.
+
+The daemon does **not** isolate the chosen cores from the kernel
+scheduler. For latency-sensitive deployments, combine **--queues**
+with **isolcpus=** or a **cpuset**(7) cgroup so the pinned workers
+are not preempted by unrelated userspace.
 
 # STATUS API
 

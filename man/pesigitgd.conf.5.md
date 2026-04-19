@@ -47,7 +47,10 @@ require restarting the daemon.
 **queues** = *NUM*
 :   Number of NIC RX queues to bind AF_XDP sockets to. Must be between 1
     and 256. Default: 1. The interface must have at least *NUM* combined
-    channels configured (see **ethtool**(8) **-l**/**-L**).
+    channels configured (see **ethtool**(8) **-l**/**-L**). Effective
+    worker count is clamped to the host's CPU parallelism; see
+    **TUNING** in **pesigitgd**(8) for the pairing rules and NIC sizing
+    requirements.
 
 **route_config** = *PATH*
 :   Path to the TOML route/CID configuration file; see

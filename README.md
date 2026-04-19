@@ -154,7 +154,7 @@ CLI flags and config-file keys are equivalent; CLI wins on conflict. The config 
 |------|------------|---------|-------------|
 | `-i, --interface <NAME>` | `interface` | `eth0` | Data-plane interface to attach XDP to. |
 | `-p, --port <PORT>` | `port` | — | UDP port to steer to user space. Repeat for multiple ports. |
-| `-q, --queues <NUM>` | `queues` | `1` | AF_XDP worker threads (one per NIC queue). |
+| `-q, --queues <NUM>` | `queues` | `1` | AF_XDP worker threads (one per NIC queue). Clamped to available CPU cores; workers are NUMA- and SMT-aware. See `man 8 pesigitgd` **TUNING** for the pairing rules and NIC sizing (`ethtool -L`). |
 | `-c, --config <PATH>` | — | — | Path to this daemon config file. |
 | — | `route_config` | `/etc/pesigitg/lb.toml` | Route table (backends, CID encryption, optional QUIC Retry service). Relative paths resolve against the daemon config's directory. |
 | `-s, --status-socket <PATH>` | `status_socket` | unset (disabled) | Unix-domain socket for the JSON status API. |
