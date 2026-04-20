@@ -4,6 +4,7 @@ members = [
 	"pesigitg-daemon",
 	"pesigitg-daemon/fuzz",
 	"pesigitg-common",
+	"pesigitg-control",
 	"xtask",
 	"contrib/quic-lb-cid",
 	"contrib/quic-echo",
@@ -45,6 +46,9 @@ toml = "0.8"
 
 # Error handling
 anyhow = "1"
+
+# Arguments
+pico-args = "0.5"
 
 [profile.release]
 opt-level = 3

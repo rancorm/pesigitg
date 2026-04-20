@@ -1,0 +1,16 @@
+[package]
+name = "pesigitg-control"
+description = "Daemon control"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "pesigitg-ctl"
+path = "src/main.rs"
+
+[dependencies]
+pesigitg-common = { workspace = true, features = ["std"] }
+
+pico-args = { workspace = true }
