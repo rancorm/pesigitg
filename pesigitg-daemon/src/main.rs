@@ -258,9 +258,25 @@ fn main() -> Result<()> {
                         info!("stats dump: {}", stats.aggregate());
                     }
                     SIGUSR2 => {
-                        let a = args.read().expect("lock poisoned");
-                        let rc = route_config.read().expect("lock poisoned");
-                        info!("config dump:\n{}{}", *a, *rc);
+                        // Handoff shutdown: leave XDP program and map pins in
+                        // place so the next daemon invocation adopts them,
+                        // eliminating the XDP-reload drop window. See
+                        // thursday-toil phase 1.
+                        systemd_notify!(sd_notify::NotifyState::Stopping);
+
+                        info!("received SIGUSR2, beginning handoff shutdown");
+
+                        ebpf.lock().expect("lock poisoned").set_handoff();
+
+                        sig_handle.close();
+                        if let Some(api) = status_api.as_mut() {
+                            api.shutdown();
+                        }
+                        workers.shutdown();
+
+                        info!("all workers stopped; pins preserved for handoff");
+
+                        return Ok(());
                     }
                     SIGINT | SIGTERM => {
                         systemd_notify!(sd_notify::NotifyState::Stopping);

@@ -85,13 +85,16 @@ taking precedence:
     schema.
 
 **SIGUSR2**
-:   Dump the full runtime config to the log: daemon args, active route
-    slots, per-server IP/MAC/health/drain status, fallback pool membership,
-    and retry settings.
+:   Handoff shutdown — gracefully stop AF_XDP workers and exit, but leave
+    the XDP program and eBPF map pins in bpffs. The next **pesigitgd**
+    invocation on the same interface will adopt the running program and
+    maps instead of reloading from scratch, eliminating the XDP-attach
+    and map-population gap during restart. See **RESTART** below.
 
 **SIGINT**, **SIGTERM**
-:   Graceful shutdown — stop all AF_XDP workers, close the status socket
-    (if any), and exit.
+:   Graceful cold shutdown — stop all AF_XDP workers, close the status
+    socket (if any), remove all bpffs pins (detaching the XDP program),
+    and exit.
 
 # HEALTH CHECKING
 
@@ -109,6 +112,43 @@ supported.
 
 Send **SIGHUP** to reset the exponential backoff on unhealthy servers so
 they are re-probed on the next cycle.
+
+# RESTART
+
+**pesigitgd** supports two shutdown modes with different restart
+characteristics.
+
+**Cold shutdown** (**SIGINT**, **SIGTERM**) tears everything down: workers
+stop, the XDP program is detached from the interface, and all bpffs pins
+are removed. A subsequent invocation performs a full load + attach + map
+population cycle. During that window, packets bypass the daemon.
+
+**Handoff shutdown** (**SIGUSR2**) preserves the in-kernel state. The XDP
+program stays attached (the pinned FdLink keeps it alive), and the **XSKS**
+and **PORTS** maps remain populated. The next invocation opens the pins,
+skips the program load / attach step entirely, reconciles the **PORTS**
+map against the configured port list, and re-registers fresh AF_XDP
+sockets into **XSKS**.
+
+The handoff path is intended for in-place daemon upgrades and configuration
+changes that cannot be applied via **SIGHUP** (e.g. binary update, worker
+count change). It does *not* eliminate all packet loss: the new daemon
+still needs to re-bind AF_XDP sockets to the same queues, and the kernel
+returns *EBUSY* until the old sockets are fully released. During that
+rebind window, packets matched by the XDP program are still redirected
+to **XSKS** but hit empty slots and are dropped by the kernel. Expect the
+restart drop window to shrink from hundreds of milliseconds (cold) to
+tens of milliseconds (handoff), not to zero.
+
+To wire handoff shutdown into **systemd**(1), set
+*ExecStop=/bin/kill -USR2 $MAINPID* and *Restart=always* on the service
+unit. **systemctl restart** will then go via **SIGUSR2** and the newly
+spawned instance will adopt the pinned install.
+
+If an earlier daemon crashed and left stale pins, the next invocation
+attempts to adopt them and falls back to cold boot if adoption fails
+(removing the stale pins first). To force a cold start manually, remove
+the pin root (see **FILES**) before invocation.
 
 # TUNING
 
@@ -313,6 +353,13 @@ The **retry** sub-object groups counters from the QUIC Retry service
 :   Runtime directory for status sockets. Created automatically by
     **systemd**(1) via *RuntimeDirectory=* or, on manual invocation, by
     the daemon at bind time.
+
+*/sys/fs/bpf/pesigitg/INTERFACE/*
+:   Pin root for the XDP program link (*link*), the **XSKS** map, and the
+    **PORTS** map. Populated on cold boot and consumed on handoff restart
+    (see **RESTART**). Cold shutdown (**SIGTERM** / **SIGINT**) removes
+    the contents; handoff shutdown (**SIGUSR2**) leaves them in place.
+    Requires a mounted **bpffs**(5) at */sys/fs/bpf*.
 
 # EXIT STATUS
 

@@ -21,13 +21,13 @@ use pesigitg_common::{
 };
 
 #[map]
-static PORTS: HashMap<u16, u8> = HashMap::with_max_entries(MAX_PORTS, 0);
+static PORTS: HashMap<u16, u8> = HashMap::pinned(MAX_PORTS, 0);
 
 /// AF_XDP socket map, indexed by RX queue id.  The daemon registers one
 /// socket per hardware queue; the XDP program redirects matched packets
 /// to the socket bound to the queue the packet arrived on.
 #[map]
-static XSKS: XskMap = XskMap::with_max_entries(MAX_QUEUES, 0);
+static XSKS: XskMap = XskMap::pinned(MAX_QUEUES, 0);
 
 #[xdp]
 pub fn pesigitg(ctx: XdpContext) -> u32 {
