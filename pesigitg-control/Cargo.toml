@@ -14,3 +14,4 @@ path = "src/main.rs"
 pesigitg-common = { workspace = true, features = ["std"] }
 
 pico-args = { workspace = true }
+libc = "0.2"
