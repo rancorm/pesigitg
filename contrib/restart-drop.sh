@@ -30,7 +30,8 @@
 #   2 — bad arguments / missing prerequisites
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (c) 2026 Pesigitg
+# Copyright (c) 2026 Jonathan Cormier
+# This file is part of Pesigitg.
 
 set -euo pipefail
 

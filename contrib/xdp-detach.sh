@@ -3,7 +3,8 @@
 # xdp-detach.sh — Detach BPF-linked XDP programs from an interface.
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (c) 2026 Pesigitg
+# Copyright (c) 2026 Jonathan Cormier
+# This file is part of Pesigitg.
 
 set -euo pipefail
 

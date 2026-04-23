@@ -18,7 +18,8 @@
 # (mode 0660 by default — run as root or add your user to its group).
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (c) 2026 Pesigitg
+# Copyright (c) 2026 Jonathan Cormier
+# This file is part of Pesigitg.
 
 set -euo pipefail
 

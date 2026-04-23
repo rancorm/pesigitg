@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: GPL-3.0-or-later OR Commercial
+// Copyright (c) 2026 Jonathan Cormier
+// This file is part of Pesigitg.
+
 use std::{ffi::OsString, fs};
 use std::str::FromStr;
 use std::path::Path;
