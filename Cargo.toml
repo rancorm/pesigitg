@@ -48,7 +48,7 @@ toml = "0.8"
 anyhow = "1"
 
 # Arguments
-pico-args = "0.5"
+pico-args = { version = "0.5", features = ["short-space-opt", "combined-flags"] }
 
 [profile.release]
 opt-level = 3
