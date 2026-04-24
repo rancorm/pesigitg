@@ -1,0 +1,407 @@
+// SPDX-License-Identifier: GPL-3.0-or-later OR Commercial
+// Copyright (c) 2026 Jonathan Cormier
+// This file is part of Pesigitg.
+
+//! Raw-syscall AF_XDP socket for the restart-adopt path (phase 2 spike).
+//!
+//! This module bypasses `xsk-rs` / `libbpf` entirely so that, in the
+//! future, an AF_XDP socket FD + memfd-backed UMEM can be passed across
+//! `systemctl restart` via systemd FDSTORE and rehydrated into a usable
+//! socket without re-binding or re-registering UMEM (both single-shot
+//! operations per-kernel-socket).
+//!
+//! For now this only implements the cold-boot path (`bootstrap`). That
+//! exercises every piece of ABI glue the adopt path will need — ring
+//! layout from `XDP_MMAP_OFFSETS`, memfd-backed UMEM, the four ring
+//! `setsockopt`s in the right order, and `bind(AF_XDP)` — so that when
+//! we wire up the real adopt entry point later it's a small delta.
+//!
+//! Operational methods (`poll_recv`, `transmit`, `refill`, `complete`)
+//! are stubs at this stage. They'll land alongside the `WorkerSocket`
+//! enum refactor once the creation path is confirmed on hardware.
+
+#![allow(dead_code)]
+
+use std::ffi::CString;
+use std::io;
+use std::mem;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::ptr::{self, NonNull};
+use std::sync::atomic::AtomicU32;
+
+use anyhow::{Context, Result, bail};
+use libc::{
+    AF_XDP, MAP_FAILED, MAP_POPULATE, MAP_SHARED, MFD_CLOEXEC, PROT_READ, PROT_WRITE, SOCK_RAW,
+    SOL_XDP, XDP_COPY, XDP_MMAP_OFFSETS, XDP_PGOFF_RX_RING, XDP_PGOFF_TX_RING, XDP_RX_RING,
+    XDP_TX_RING, XDP_UMEM_COMPLETION_RING, XDP_UMEM_FILL_RING, XDP_UMEM_REG, XDP_USE_NEED_WAKEUP,
+    XDP_ZEROCOPY, sockaddr, sockaddr_xdp, socklen_t, xdp_desc, xdp_mmap_offsets, xdp_ring_offset,
+    xdp_umem_reg,
+};
+
+// linux/if_xdp.h page offsets for the two UMEM rings. Not yet in libc
+// 0.2 as named consts; literal values match the kernel header.
+const XDP_UMEM_PGOFF_FILL_RING: libc::off_t = 0x1_0000_0000;
+const XDP_UMEM_PGOFF_COMPLETION_RING: libc::off_t = 0x1_8000_0000;
+
+/// One of the four AF_XDP producer/consumer rings mapped into userspace.
+///
+/// `T` is the ring entry type: `u64` for fill/completion (plain UMEM
+/// addresses) and [`xdp_desc`] for RX/TX.
+struct Ring<T> {
+    map_addr: NonNull<libc::c_void>,
+    map_len: usize,
+    producer: *mut AtomicU32,
+    consumer: *mut AtomicU32,
+    descs: *mut T,
+    flags: *mut AtomicU32,
+    size: u32,
+    mask: u32,
+}
+
+impl<T> Drop for Ring<T> {
+    fn drop(&mut self) {
+        // SAFETY: `map_addr`/`map_len` came from a successful `mmap`.
+        unsafe { libc::munmap(self.map_addr.as_ptr(), self.map_len) };
+    }
+}
+
+// Ring pointers reference kernel-shared memory; they're `Send` because
+// we don't hand them out across threads concurrently (each worker owns
+// its own socket) and the kernel synchronises via the producer/consumer
+// indices.
+unsafe impl<T: Send> Send for Ring<T> {}
+
+/// Memfd-backed UMEM region. The FD is retained so it can be handed
+/// across restart via `FDSTORE` in the future; the mapping is dropped
+/// via `munmap` in [`Drop`].
+struct Umem {
+    fd: OwnedFd,
+    addr: NonNull<u8>,
+    len: usize,
+    chunk_size: u32,
+    frame_count: u32,
+}
+
+impl Drop for Umem {
+    fn drop(&mut self) {
+        // SAFETY: `addr`/`len` came from a successful `mmap`.
+        unsafe { libc::munmap(self.addr.as_ptr().cast(), self.len) };
+    }
+}
+
+// Same reasoning as Ring: each worker owns its own Umem.
+unsafe impl Send for Umem {}
+
+/// An AF_XDP socket built from raw syscalls. Named to foreshadow its
+/// future role: the same struct will later be constructed via
+/// [`AdoptedSocket::adopt`] from FDs inherited across restart.
+pub struct AdoptedSocket {
+    fd: OwnedFd,
+    umem: Umem,
+    rx: Ring<xdp_desc>,
+    tx: Ring<xdp_desc>,
+    fill: Ring<u64>,
+    comp: Ring<u64>,
+    ifindex: u32,
+    queue_id: u32,
+}
+
+impl AdoptedSocket {
+    /// Build a fresh AF_XDP socket end-to-end via raw syscalls. This
+    /// does not use libbpf or xsk-rs — on purpose. The sequence mirrors
+    /// what `libbpf`'s `xsk_socket__create` does internally, which is
+    /// also what we'll need to reproduce on the adopt path minus the
+    /// setsockopts that have already been applied to the incoming FD.
+    ///
+    /// `frame_count` must be a power of two. `chunk_size` is the UMEM
+    /// frame size (typically 2048 or 4096).
+    pub fn bootstrap(
+        interface: &str,
+        queue_id: u32,
+        frame_count: u32,
+        chunk_size: u32,
+        zerocopy: bool,
+    ) -> Result<Self> {
+        if !frame_count.is_power_of_two() {
+            bail!("frame_count must be a power of two, got {frame_count}");
+        }
+
+        let fd = socket_af_xdp().context("socket(AF_XDP, SOCK_RAW)")?;
+
+        let umem_len = (frame_count as usize) * (chunk_size as usize);
+        let umem = umem_create(umem_len, frame_count, chunk_size)
+            .context("creating memfd-backed UMEM")?;
+
+        let reg = xdp_umem_reg {
+            addr: umem.addr.as_ptr() as u64,
+            len: umem.len as u64,
+            chunk_size,
+            headroom: 0,
+            flags: 0,
+            tx_metadata_len: 0,
+        };
+        setsockopt(&fd, XDP_UMEM_REG, &reg).context("setsockopt(XDP_UMEM_REG)")?;
+
+        let ring_size = frame_count;
+        setsockopt(&fd, XDP_UMEM_FILL_RING, &ring_size)
+            .context("setsockopt(XDP_UMEM_FILL_RING)")?;
+        setsockopt(&fd, XDP_UMEM_COMPLETION_RING, &ring_size)
+            .context("setsockopt(XDP_UMEM_COMPLETION_RING)")?;
+        setsockopt(&fd, XDP_RX_RING, &ring_size).context("setsockopt(XDP_RX_RING)")?;
+        setsockopt(&fd, XDP_TX_RING, &ring_size).context("setsockopt(XDP_TX_RING)")?;
+
+        let off: xdp_mmap_offsets =
+            getsockopt(&fd, XDP_MMAP_OFFSETS).context("getsockopt(XDP_MMAP_OFFSETS)")?;
+
+        let fill =
+            ring_mmap::<u64>(&fd, XDP_UMEM_PGOFF_FILL_RING, &off.fr, ring_size).context("fill")?;
+        let comp = ring_mmap::<u64>(&fd, XDP_UMEM_PGOFF_COMPLETION_RING, &off.cr, ring_size)
+            .context("comp")?;
+        let rx = ring_mmap::<xdp_desc>(&fd, XDP_PGOFF_RX_RING, &off.rx, ring_size).context("rx")?;
+        let tx = ring_mmap::<xdp_desc>(&fd, XDP_PGOFF_TX_RING, &off.tx, ring_size).context("tx")?;
+
+        let ifindex = if_nametoindex(interface)?;
+        let mut flags: u16 = XDP_USE_NEED_WAKEUP;
+        flags |= if zerocopy { XDP_ZEROCOPY } else { XDP_COPY };
+        let addr = sockaddr_xdp {
+            sxdp_family: AF_XDP as u16,
+            sxdp_flags: flags,
+            sxdp_ifindex: ifindex,
+            sxdp_queue_id: queue_id,
+            sxdp_shared_umem_fd: 0,
+        };
+        bind_af_xdp(&fd, &addr).context("bind(AF_XDP)")?;
+
+        Ok(AdoptedSocket {
+            fd,
+            umem,
+            rx,
+            tx,
+            fill,
+            comp,
+            ifindex,
+            queue_id,
+        })
+    }
+
+    pub fn raw_fd(&self) -> RawFd {
+        self.fd.as_raw_fd()
+    }
+
+    pub fn umem_fd(&self) -> RawFd {
+        self.umem.fd.as_raw_fd()
+    }
+
+    pub fn ifindex(&self) -> u32 {
+        self.ifindex
+    }
+
+    pub fn queue_id(&self) -> u32 {
+        self.queue_id
+    }
+
+    /// TODO(phase-2): drain the RX ring into `descs` and return the
+    /// number of entries written. Will mirror the xsk-rs semantics used
+    /// by [`crate::xsk::XskSocket::poll_recv`] so the worker boundary
+    /// can switch between them via an enum.
+    pub fn poll_recv(&mut self, _descs: &mut [xdp_desc], _timeout_ms: i32) -> usize {
+        todo!("implement after bootstrap path is validated on hardware")
+    }
+
+    /// TODO(phase-2): produce TX descriptors. See `poll_recv`.
+    pub fn transmit(&mut self, _descs: &[xdp_desc]) -> usize {
+        todo!("implement after bootstrap path is validated on hardware")
+    }
+
+    /// TODO(phase-2): return frames to the fill ring.
+    pub fn refill(&mut self, _addrs: &[u64]) -> usize {
+        todo!("implement after bootstrap path is validated on hardware")
+    }
+
+    /// TODO(phase-2): consume from the completion ring.
+    pub fn complete(&mut self, _scratch: &mut [u64]) -> usize {
+        todo!("implement after bootstrap path is validated on hardware")
+    }
+}
+
+// --- syscall helpers ---
+
+fn socket_af_xdp() -> io::Result<OwnedFd> {
+    // SAFETY: calling a libc socket syscall; return value is validated.
+    let fd = unsafe { libc::socket(AF_XDP, SOCK_RAW | libc::SOCK_CLOEXEC, 0) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: fd was just returned from socket() and is owned by us.
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+fn setsockopt<T>(fd: &OwnedFd, name: i32, value: &T) -> io::Result<()> {
+    // SAFETY: `value` is a valid &T, len is sizeof(T).
+    let rc = unsafe {
+        libc::setsockopt(
+            fd.as_raw_fd(),
+            SOL_XDP,
+            name,
+            (value as *const T).cast(),
+            mem::size_of::<T>() as socklen_t,
+        )
+    };
+    if rc < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn getsockopt<T>(fd: &OwnedFd, name: i32) -> io::Result<T> {
+    // SAFETY: zero-init is valid for the POD structs this is used with
+    // (`xdp_mmap_offsets`), and `len` tracks the write-back size.
+    let mut val: T = unsafe { mem::zeroed() };
+    let mut len = mem::size_of::<T>() as socklen_t;
+    let rc = unsafe {
+        libc::getsockopt(
+            fd.as_raw_fd(),
+            SOL_XDP,
+            name,
+            (&mut val as *mut T).cast(),
+            &mut len,
+        )
+    };
+    if rc < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if len as usize != mem::size_of::<T>() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "getsockopt({name}) returned {len} bytes, expected {}",
+                mem::size_of::<T>()
+            ),
+        ));
+    }
+    Ok(val)
+}
+
+fn bind_af_xdp(fd: &OwnedFd, addr: &sockaddr_xdp) -> io::Result<()> {
+    // SAFETY: `addr` is a valid `sockaddr_xdp`, cast to the generic
+    // `sockaddr` type expected by libc::bind.
+    let rc = unsafe {
+        libc::bind(
+            fd.as_raw_fd(),
+            (addr as *const sockaddr_xdp).cast::<sockaddr>(),
+            mem::size_of::<sockaddr_xdp>() as socklen_t,
+        )
+    };
+    if rc < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn if_nametoindex(name: &str) -> Result<u32> {
+    let cname = CString::new(name).context("interface name contains NUL")?;
+    // SAFETY: cname is a valid C string.
+    let idx = unsafe { libc::if_nametoindex(cname.as_ptr()) };
+    if idx == 0 {
+        return Err(io::Error::last_os_error()).with_context(|| format!("if_nametoindex({name})"));
+    }
+    Ok(idx)
+}
+
+fn page_size() -> usize {
+    // SAFETY: sysconf is always safe.
+    let ps = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    assert!(ps > 0, "sysconf(_SC_PAGESIZE) returned {ps}");
+    ps as usize
+}
+
+fn umem_create(len: usize, frame_count: u32, chunk_size: u32) -> Result<Umem> {
+    let name = CString::new("pesigitg-umem").unwrap();
+    // SAFETY: `name` is a valid C string.
+    let raw = unsafe { libc::memfd_create(name.as_ptr(), MFD_CLOEXEC) };
+    if raw < 0 {
+        return Err(io::Error::last_os_error()).context("memfd_create");
+    }
+    // SAFETY: raw was just returned from memfd_create and is ours.
+    let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+
+    // SAFETY: `fd` is a valid fd.
+    let rc = unsafe { libc::ftruncate(fd.as_raw_fd(), len as libc::off_t) };
+    if rc < 0 {
+        return Err(io::Error::last_os_error()).context("ftruncate(UMEM memfd)");
+    }
+
+    // SAFETY: mapping a freshly-sized memfd at fixed length; result checked.
+    let addr = unsafe {
+        libc::mmap(
+            ptr::null_mut(),
+            len,
+            PROT_READ | PROT_WRITE,
+            MAP_SHARED | MAP_POPULATE,
+            fd.as_raw_fd(),
+            0,
+        )
+    };
+    if addr == MAP_FAILED {
+        return Err(io::Error::last_os_error()).context("mmap(UMEM memfd)");
+    }
+    let addr = NonNull::new(addr.cast::<u8>())
+        .expect("mmap returned non-MAP_FAILED but null, which should not happen");
+
+    Ok(Umem {
+        fd,
+        addr,
+        len,
+        chunk_size,
+        frame_count,
+    })
+}
+
+fn ring_mmap<T>(
+    fd: &OwnedFd,
+    pgoff: libc::off_t,
+    off: &xdp_ring_offset,
+    size: u32,
+) -> Result<Ring<T>> {
+    // The mapping must cover the producer word, consumer word, flags
+    // word, and the descriptor array. The kernel guarantees these all
+    // fit within a single page-aligned mapping, but the offsets aren't
+    // ordered — take the max.
+    let desc_end = (off.desc as usize) + (size as usize) * mem::size_of::<T>();
+    let mut map_len = desc_end;
+    map_len = map_len.max((off.producer as usize) + mem::size_of::<u32>());
+    map_len = map_len.max((off.consumer as usize) + mem::size_of::<u32>());
+    map_len = map_len.max((off.flags as usize) + mem::size_of::<u32>());
+    let ps = page_size();
+    map_len = map_len.div_ceil(ps) * ps;
+
+    // SAFETY: mapping a kernel-provided region; result checked.
+    let addr = unsafe {
+        libc::mmap(
+            ptr::null_mut(),
+            map_len,
+            PROT_READ | PROT_WRITE,
+            MAP_SHARED | MAP_POPULATE,
+            fd.as_raw_fd(),
+            pgoff,
+        )
+    };
+    if addr == MAP_FAILED {
+        return Err(io::Error::last_os_error()).context("mmap(ring)");
+    }
+    let map_addr = NonNull::new(addr)
+        .expect("mmap returned non-MAP_FAILED but null, which should not happen");
+    let base = addr.cast::<u8>();
+
+    Ok(Ring {
+        map_addr,
+        map_len,
+        // SAFETY: offsets are within the mapping by construction above.
+        producer: unsafe { base.add(off.producer as usize) }.cast::<AtomicU32>(),
+        consumer: unsafe { base.add(off.consumer as usize) }.cast::<AtomicU32>(),
+        descs: unsafe { base.add(off.desc as usize) }.cast::<T>(),
+        flags: unsafe { base.add(off.flags as usize) }.cast::<AtomicU32>(),
+        size,
+        mask: size - 1,
+    })
+}

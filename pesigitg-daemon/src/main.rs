@@ -17,6 +17,7 @@ mod stats;
 mod status_api;
 mod threading;
 mod utils;
+mod xdp_adopt;
 mod xsk;
 
 use std::sync::atomic::AtomicBool;
