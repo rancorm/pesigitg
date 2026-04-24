@@ -287,10 +287,17 @@ impl AdoptedSocket {
         unsafe { self.rx.consume(descs) }
     }
 
-    /// TODO(phase-2): produce TX descriptors. See `refill` for the
-    /// wakeup pattern to reuse once this lands.
-    pub fn transmit(&mut self, _descs: &[xdp_desc]) -> usize {
-        todo!("implement after bootstrap path is validated on hardware")
+    /// Submit TX descriptors to the kernel via the tx ring. Returns
+    /// the number actually enqueued — the ring may be full. If the
+    /// kernel asserts `XDP_RING_NEED_WAKEUP` on the tx ring, poke it
+    /// via `sendto(MSG_DONTWAIT)`.
+    pub fn transmit(&mut self, descs: &[xdp_desc]) -> usize {
+        // SAFETY: we are the sole producer of the tx ring.
+        let n = unsafe { self.tx.produce(descs) };
+        if n > 0 && self.tx.needs_wakeup() {
+            let _ = wakeup_sendto(&self.fd);
+        }
+        n
     }
 
     /// Hand UMEM frame addresses back to the kernel via the fill ring.
@@ -308,9 +315,12 @@ impl AdoptedSocket {
         n
     }
 
-    /// TODO(phase-2): consume from the completion ring.
-    pub fn complete(&mut self, _scratch: &mut [u64]) -> usize {
-        todo!("implement after bootstrap path is validated on hardware")
+    /// Drain completed TX frame addresses from the completion ring
+    /// into `scratch`. Returns the number of addresses consumed. The
+    /// caller is responsible for handing them back via [`refill`].
+    pub fn complete(&mut self, scratch: &mut [u64]) -> usize {
+        // SAFETY: we are the sole consumer of the comp ring.
+        unsafe { self.comp.consume(scratch) }
     }
 }
 
@@ -386,6 +396,32 @@ fn wakeup_recvfrom(fd: &OwnedFd) -> io::Result<()> {
             libc::MSG_DONTWAIT,
             ptr::null_mut(),
             ptr::null_mut(),
+        )
+    };
+    if rc < 0 {
+        let e = io::Error::last_os_error();
+        match e.raw_os_error() {
+            Some(libc::EAGAIN) | Some(libc::ENOBUFS) | Some(libc::EBUSY) => Ok(()),
+            _ => Err(e),
+        }
+    } else {
+        Ok(())
+    }
+}
+
+/// TX-side counterpart to [`wakeup_recvfrom`]. The kernel treats any
+/// `sendto` on the AF_XDP sockfd as a wakeup; a zero-length one avoids
+/// actually enqueuing anything.
+fn wakeup_sendto(fd: &OwnedFd) -> io::Result<()> {
+    // SAFETY: zero-length buffer, non-blocking flag, null dest addr.
+    let rc = unsafe {
+        libc::sendto(
+            fd.as_raw_fd(),
+            ptr::null(),
+            0,
+            libc::MSG_DONTWAIT,
+            ptr::null(),
+            0,
         )
     };
     if rc < 0 {
