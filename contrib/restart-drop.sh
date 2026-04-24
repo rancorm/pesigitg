@@ -30,8 +30,12 @@
 #   2. At the midpoint the client pauses and prints instructions.
 #   3. On LB host: ./restart-drop.sh lb -i enp2s0f0
 #      Signals SIGUSR2, waits for the daemon to respawn ready, reports
-#      restart duration, exits.
+#      restart duration, then pauses.
 #   4. Back on client, press enter. Traffic resumes. Final report prints.
+#   5. Back on LB, press enter to capture the post-handoff snapshot. The
+#      script prints each phase's counters side-by-side (pre-handoff from
+#      the old daemon, post-handoff from the freshly-restarted one) —
+#      counters reset across SIGUSR2, so no meaningful delta is computed.
 #
 # Baseline diagnostic (no handoff):
 #   On LB host, capture pre-test stats, let client run through, capture
@@ -95,23 +99,22 @@ snapshot_stats() {
     return 0
 }
 
-# Print the delta between two /stats JSON files. Relies on jq if
-# present; falls back to side-by-side if not.
-print_stats_delta() {
-    local pre="$1" post="$2"
+# Print non-zero scalar counters from a /stats JSON file. jq is required
+# for pretty output; without it we fall back to pointing at the raw file.
+# Counters reset across SIGUSR2, so cross-restart subtraction is never
+# meaningful — we print each snapshot's own non-zero values instead.
+print_nonzero_stats() {
+    local snap="$1"
     if command -v jq >/dev/null 2>&1; then
-        jq -n --slurpfile a "$pre" --slurpfile b "$post" '
-            def flat(o): [o | paths(scalars) as $p | {k: ($p|join(".")), v: (getpath($p))}];
-            (flat($a[0]) | from_entries) as $ap
-            | (flat($b[0]) | from_entries) as $bp
-            | ($ap | keys + ($bp | keys) | unique) as $keys
-            | $keys | map({k: ., delta: (($bp[.] // 0) - ($ap[.] // 0))})
-            | map(select(.delta != 0))
-            | sort_by(-.delta)
-            | .[] | "  \(.k): \(.delta)"
-        ' -r
+        jq -r '
+            [paths(scalars) as $p
+               | {key: ($p | map(tostring) | join(".")), value: (getpath($p))}]
+            | map(select((.value | type) == "number" and .value != 0))
+            | sort_by(-.value)
+            | .[] | "  \(.key): \(.value)"
+        ' "$snap"
     else
-        echo "(install jq for a delta view; raw snapshots at $pre and $post)"
+        echo "  (install jq for a parsed view; raw snapshot at $snap)"
     fi
 }
 
@@ -366,12 +369,23 @@ lb_mode() {
     printf '  time-to-ready:   %s ms (after exit)\n' "$respawn_ms"
     printf '  total:           %s ms (SIGUSR2 -> new daemon ready)\n' "$total_ms"
 
+    cat <<EOF
+
+Resume the client now (press enter on its prompt). Once the client has
+printed its final report, press enter here to capture the post-handoff
+snapshot from the new daemon.
+EOF
+    read -r
+
     if snapshot_stats "$socket" "$post_snap"; then
         if [[ -s "$pre_snap" ]]; then
             echo
-            echo "Stats delta (post - pre, non-zero counters only):"
-            print_stats_delta "$pre_snap" "$post_snap"
+            echo "Pre-handoff phase (old daemon cumulative at SIGUSR2):"
+            print_nonzero_stats "$pre_snap"
         fi
+        echo
+        echo "Post-handoff phase (new daemon cumulative since restart):"
+        print_nonzero_stats "$post_snap"
     fi
 }
 
