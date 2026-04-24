@@ -17,6 +17,7 @@ mod stats;
 mod status_api;
 mod threading;
 mod utils;
+mod worker_socket;
 mod xdp_adopt;
 mod xsk;
 

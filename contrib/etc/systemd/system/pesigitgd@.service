@@ -12,6 +12,11 @@ Restart=on-failure
 RestartSec=5
 WatchdogSec=30
 
+# FDSTORE: preserve AF_XDP socket + UMEM memfd FDs across SIGUSR2
+# handoff. Two FDs per RX queue (sockfd, umem memfd); 128 is
+# generous headroom for boxes with many queues.
+FileDescriptorStoreMax=128
+
 # /run/pesigitg/ for the optional JSON status socket (status_socket = ...)
 RuntimeDirectory=pesigitg
 RuntimeDirectoryMode=0755

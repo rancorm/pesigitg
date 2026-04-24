@@ -149,6 +149,20 @@ impl Drop for Umem {
     }
 }
 
+impl Umem {
+    /// Dismantle this UMEM without closing the backing memfd. Performs
+    /// the `munmap` itself (the outer [`Drop`] would also close `fd`,
+    /// which we need to preserve for handoff via FDSTORE).
+    fn into_fd(self) -> OwnedFd {
+        let me = mem::ManuallyDrop::new(self);
+        // SAFETY: `addr`/`len` came from a successful `mmap`; unmap exactly once.
+        unsafe { libc::munmap(me.addr.as_ptr().cast(), me.len) };
+        // SAFETY: reading `fd` out of ManuallyDrop bypasses the outer
+        // Drop (which would close it); we hand ownership to the caller.
+        unsafe { ptr::read(&me.fd) }
+    }
+}
+
 // Same reasoning as Ring: each worker owns its own Umem.
 unsafe impl Send for Umem {}
 
@@ -242,6 +256,66 @@ impl AdoptedSocket {
             ifindex,
             queue_id,
         })
+    }
+
+    /// Rehydrate an AF_XDP socket whose FDs were inherited across a
+    /// systemd-FDSTORE restart. The caller provides the sockfd and the
+    /// UMEM memfd verbatim from `LISTEN_FDS`, plus the `(frame_count,
+    /// chunk_size)` we originally created it with (those aren't
+    /// recoverable from the kernel — they come from config).
+    ///
+    /// This skips `socket`, `XDP_UMEM_REG`, all four ring-size
+    /// setsockopts, and `bind` — all single-shot per-socket operations
+    /// already performed on the incoming FD.
+    pub fn adopt(
+        sockfd: OwnedFd,
+        umem_fd: OwnedFd,
+        ifindex: u32,
+        queue_id: u32,
+        frame_count: u32,
+        chunk_size: u32,
+    ) -> Result<Self> {
+        if !frame_count.is_power_of_two() {
+            bail!("frame_count must be a power of two, got {frame_count}");
+        }
+
+        let umem_len = (frame_count as usize) * (chunk_size as usize);
+        let umem =
+            umem_mmap(umem_fd, umem_len, frame_count, chunk_size).context("mmap inherited UMEM")?;
+
+        let off: xdp_mmap_offsets =
+            getsockopt(&sockfd, XDP_MMAP_OFFSETS).context("getsockopt(XDP_MMAP_OFFSETS)")?;
+
+        let ring_size = frame_count;
+        let fill = ring_mmap::<u64>(&sockfd, XDP_UMEM_PGOFF_FILL_RING, &off.fr, ring_size)
+            .context("fill")?;
+        let comp = ring_mmap::<u64>(&sockfd, XDP_UMEM_PGOFF_COMPLETION_RING, &off.cr, ring_size)
+            .context("comp")?;
+        let rx =
+            ring_mmap::<xdp_desc>(&sockfd, XDP_PGOFF_RX_RING, &off.rx, ring_size).context("rx")?;
+        let tx =
+            ring_mmap::<xdp_desc>(&sockfd, XDP_PGOFF_TX_RING, &off.tx, ring_size).context("tx")?;
+
+        Ok(AdoptedSocket {
+            fd: sockfd,
+            umem,
+            rx,
+            tx,
+            fill,
+            comp,
+            ifindex,
+            queue_id,
+        })
+    }
+
+    /// Dismantle this socket for handoff across restart. Ring mappings
+    /// are unmapped (kernel-side state survives); the sockfd and UMEM
+    /// memfd are returned unclosed for the caller to pass via FDSTORE.
+    pub fn detach(self) -> (OwnedFd, OwnedFd) {
+        let umem_fd = self.umem.into_fd();
+        // `self.fd` moves out here; `self.rx/tx/fill/comp` are dropped
+        // (each runs `munmap` in its `Drop` impl, which is harmless).
+        (self.fd, umem_fd)
     }
 
     pub fn raw_fd(&self) -> RawFd {
@@ -484,7 +558,14 @@ fn umem_create(len: usize, frame_count: u32, chunk_size: u32) -> Result<Umem> {
         return Err(io::Error::last_os_error()).context("ftruncate(UMEM memfd)");
     }
 
-    // SAFETY: mapping a freshly-sized memfd at fixed length; result checked.
+    umem_mmap(fd, len, frame_count, chunk_size)
+}
+
+/// Map an already-sized memfd into this process as a UMEM region.
+/// Shared between the cold-boot path (after `memfd_create` + `ftruncate`)
+/// and the adopt path (where the memfd came in via FDSTORE).
+fn umem_mmap(fd: OwnedFd, len: usize, frame_count: u32, chunk_size: u32) -> Result<Umem> {
+    // SAFETY: mapping a sized memfd at fixed length; result checked.
     let addr = unsafe {
         libc::mmap(
             ptr::null_mut(),
