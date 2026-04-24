@@ -27,15 +27,15 @@ use std::io;
 use std::mem;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::ptr::{self, NonNull};
-use std::sync::atomic::AtomicU32;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use anyhow::{Context, Result, bail};
 use libc::{
     AF_XDP, MAP_FAILED, MAP_POPULATE, MAP_SHARED, MFD_CLOEXEC, PROT_READ, PROT_WRITE, SOCK_RAW,
-    SOL_XDP, XDP_COPY, XDP_MMAP_OFFSETS, XDP_PGOFF_RX_RING, XDP_PGOFF_TX_RING, XDP_RX_RING,
-    XDP_TX_RING, XDP_UMEM_COMPLETION_RING, XDP_UMEM_FILL_RING, XDP_UMEM_REG, XDP_USE_NEED_WAKEUP,
-    XDP_ZEROCOPY, sockaddr, sockaddr_xdp, socklen_t, xdp_desc, xdp_mmap_offsets, xdp_ring_offset,
-    xdp_umem_reg,
+    SOL_XDP, XDP_COPY, XDP_MMAP_OFFSETS, XDP_PGOFF_RX_RING, XDP_PGOFF_TX_RING,
+    XDP_RING_NEED_WAKEUP, XDP_RX_RING, XDP_TX_RING, XDP_UMEM_COMPLETION_RING, XDP_UMEM_FILL_RING,
+    XDP_UMEM_REG, XDP_USE_NEED_WAKEUP, XDP_ZEROCOPY, sockaddr, sockaddr_xdp, socklen_t, xdp_desc,
+    xdp_mmap_offsets, xdp_ring_offset, xdp_umem_reg,
 };
 
 // linux/if_xdp.h page offsets for the two UMEM rings. Not yet in libc
@@ -70,6 +70,66 @@ impl<T> Drop for Ring<T> {
 // its own socket) and the kernel synchronises via the producer/consumer
 // indices.
 unsafe impl<T: Send> Send for Ring<T> {}
+
+impl<T: Copy> Ring<T> {
+    /// Produce `entries` into the ring (userspace-as-producer: fill/tx).
+    /// Returns the number actually enqueued — the ring may be full.
+    ///
+    /// # Safety
+    /// Must be the sole producer. For fill/tx rings the kernel is the
+    /// consumer; for rx/comp the kernel is the producer and this must
+    /// not be called.
+    unsafe fn produce(&self, entries: &[T]) -> usize {
+        if entries.is_empty() {
+            return 0;
+        }
+        // SAFETY: producer is a valid atomic pointer from ring_mmap.
+        let prod = unsafe { (*self.producer).load(Ordering::Relaxed) };
+        let cons = unsafe { (*self.consumer).load(Ordering::Acquire) };
+        let free = self.size.wrapping_sub(prod.wrapping_sub(cons));
+        let n = (free as usize).min(entries.len());
+        for (i, entry) in entries.iter().take(n).enumerate() {
+            let idx = (prod.wrapping_add(i as u32) & self.mask) as usize;
+            // SAFETY: idx is in [0, size), descs points to `size` Ts.
+            unsafe { self.descs.add(idx).write(*entry) };
+        }
+        unsafe {
+            (*self.producer).store(prod.wrapping_add(n as u32), Ordering::Release);
+        }
+        n
+    }
+
+    /// Consume from the ring (userspace-as-consumer: rx/comp).
+    ///
+    /// # Safety
+    /// Must be the sole consumer. For rx/comp rings the kernel is the
+    /// producer; for fill/tx this must not be called.
+    unsafe fn consume(&self, out: &mut [T]) -> usize {
+        if out.is_empty() {
+            return 0;
+        }
+        // SAFETY: see `produce`.
+        let cons = unsafe { (*self.consumer).load(Ordering::Relaxed) };
+        let prod = unsafe { (*self.producer).load(Ordering::Acquire) };
+        let available = prod.wrapping_sub(cons) as usize;
+        let n = available.min(out.len());
+        for (i, slot) in out.iter_mut().take(n).enumerate() {
+            let idx = (cons.wrapping_add(i as u32) & self.mask) as usize;
+            // SAFETY: idx is in [0, size), descs points to `size` Ts.
+            *slot = unsafe { self.descs.add(idx).read() };
+        }
+        unsafe {
+            (*self.consumer).store(cons.wrapping_add(n as u32), Ordering::Release);
+        }
+        n
+    }
+
+    fn needs_wakeup(&self) -> bool {
+        // SAFETY: flags is a valid atomic pointer from ring_mmap.
+        let f = unsafe { (*self.flags).load(Ordering::Relaxed) };
+        f & XDP_RING_NEED_WAKEUP != 0
+    }
+}
 
 /// Memfd-backed UMEM region. The FD is retained so it can be handed
 /// across restart via `FDSTORE` in the future; the mapping is dropped
@@ -200,22 +260,52 @@ impl AdoptedSocket {
         self.queue_id
     }
 
-    /// TODO(phase-2): drain the RX ring into `descs` and return the
-    /// number of entries written. Will mirror the xsk-rs semantics used
-    /// by [`crate::xsk::XskSocket::poll_recv`] so the worker boundary
-    /// can switch between them via an enum.
-    pub fn poll_recv(&mut self, _descs: &mut [xdp_desc], _timeout_ms: i32) -> usize {
-        todo!("implement after bootstrap path is validated on hardware")
+    /// Poll for available RX frames with `timeout_ms` (negative = wait
+    /// indefinitely, 0 = non-blocking), then drain into `descs`.
+    /// Returns the number of descriptors written.
+    ///
+    /// If the fill ring's `XDP_RING_NEED_WAKEUP` is asserted, this
+    /// pokes the kernel via `recvfrom(MSG_DONTWAIT)` before polling so
+    /// drivers that need an explicit wake can pick up newly-produced
+    /// fill entries.
+    pub fn poll_recv(&mut self, descs: &mut [xdp_desc], timeout_ms: i32) -> usize {
+        if self.fill.needs_wakeup() {
+            let _ = wakeup_recvfrom(&self.fd);
+        }
+
+        let mut pfd = libc::pollfd {
+            fd: self.fd.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: pfd is a valid pollfd; single entry.
+        let rc = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
+        if rc <= 0 {
+            return 0;
+        }
+        // SAFETY: we are the sole consumer of the rx ring.
+        unsafe { self.rx.consume(descs) }
     }
 
-    /// TODO(phase-2): produce TX descriptors. See `poll_recv`.
+    /// TODO(phase-2): produce TX descriptors. See `refill` for the
+    /// wakeup pattern to reuse once this lands.
     pub fn transmit(&mut self, _descs: &[xdp_desc]) -> usize {
         todo!("implement after bootstrap path is validated on hardware")
     }
 
-    /// TODO(phase-2): return frames to the fill ring.
-    pub fn refill(&mut self, _addrs: &[u64]) -> usize {
-        todo!("implement after bootstrap path is validated on hardware")
+    /// Hand UMEM frame addresses back to the kernel via the fill ring.
+    /// Returns the number actually enqueued — the fill ring may be
+    /// full, in which case the caller should retry later.
+    ///
+    /// If the kernel asserts `XDP_RING_NEED_WAKEUP` on the fill ring
+    /// after we produce, poke it via `recvfrom(MSG_DONTWAIT)`.
+    pub fn refill(&mut self, addrs: &[u64]) -> usize {
+        // SAFETY: we are the sole producer of the fill ring.
+        let n = unsafe { self.fill.produce(addrs) };
+        if n > 0 && self.fill.needs_wakeup() {
+            let _ = wakeup_recvfrom(&self.fd);
+        }
+        n
     }
 
     /// TODO(phase-2): consume from the completion ring.
@@ -280,6 +370,33 @@ fn getsockopt<T>(fd: &OwnedFd, name: i32) -> io::Result<T> {
         ));
     }
     Ok(val)
+}
+
+/// Poke the kernel to pick up ring work when `XDP_RING_NEED_WAKEUP` is
+/// asserted. The `recvfrom` is zero-length and non-blocking — the
+/// kernel interprets any syscall on the sockfd as a wakeup. `EAGAIN`
+/// is the expected success case (no data), so we swallow it.
+fn wakeup_recvfrom(fd: &OwnedFd) -> io::Result<()> {
+    // SAFETY: zero-length buffer, non-blocking flag, null src addr.
+    let rc = unsafe {
+        libc::recvfrom(
+            fd.as_raw_fd(),
+            ptr::null_mut(),
+            0,
+            libc::MSG_DONTWAIT,
+            ptr::null_mut(),
+            ptr::null_mut(),
+        )
+    };
+    if rc < 0 {
+        let e = io::Error::last_os_error();
+        match e.raw_os_error() {
+            Some(libc::EAGAIN) | Some(libc::ENOBUFS) | Some(libc::EBUSY) => Ok(()),
+            _ => Err(e),
+        }
+    } else {
+        Ok(())
+    }
 }
 
 fn bind_af_xdp(fd: &OwnedFd, addr: &sockaddr_xdp) -> io::Result<()> {
