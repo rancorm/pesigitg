@@ -29,7 +29,9 @@ use anyhow::{Result, anyhow, ensure};
 use log::{debug, error, info, warn};
 use pesigitg_common::{DEFAULT_ROUTE_CONFIG, current_pid, exit, pid_file};
 use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM, SIGUSR1, SIGUSR2};
-use signal_hook::iterator::Signals;
+use signal_hook::iterator::SignalsInfo;
+use signal_hook::iterator::exfiltrator::WithOrigin;
+use signal_hook::low_level::siginfo::Origin;
 
 use args::parse_args;
 use config::route::ConfigTable;
@@ -64,13 +66,14 @@ fn main() -> Result<()> {
         None
     };
 
-    let mut signals = Signals::new([SIGINT, SIGTERM, SIGHUP, SIGUSR1, SIGUSR2])?;
+    let mut signals =
+        SignalsInfo::<WithOrigin>::new(&[SIGINT, SIGTERM, SIGHUP, SIGUSR1, SIGUSR2])?;
     let sig_handle = signals.handle();
-    let (sig_tx, sig_rx) = mpsc::sync_channel(10);
+    let (sig_tx, sig_rx) = mpsc::sync_channel::<Origin>(10);
 
     thread::spawn(move || {
-        for sig in signals.forever() {
-            if sig_tx.send(sig).is_err() {
+        for origin in signals.forever() {
+            if sig_tx.send(origin).is_err() {
                 break;
             }
         }
@@ -239,22 +242,26 @@ fn main() -> Result<()> {
     loop {
         // Wait up to 5 seconds for a signal, then run periodic tasks
         let mut got_signal = match sig_rx.recv_timeout(LOOP_TIMEOUT) {
-            Ok(sig) => Some(sig),
+            Ok(origin) => Some(origin),
             Err(mpsc::RecvTimeoutError::Timeout) => None,
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         };
 
         // Process all pending signals
         loop {
-            if let Some(sig) = got_signal.take() {
-                debug!("signal received: {}", sig);
+            if let Some(origin) = got_signal.take() {
+                let sig = origin.signal;
+                let from = format_sender(&origin);
+                debug!("signal received: {}{}", sig, from);
 
                 match sig {
                     SIGHUP => {
+                        info!("received SIGHUP{}, reloading config", from);
                         reload_config(&args, &route_config);
                         health.reset_backoff();
                     }
                     SIGUSR1 => {
+                        info!("received SIGUSR1{}, dumping stats", from);
                         info!("stats dump: {}", stats.aggregate());
                     }
                     SIGUSR2 => {
@@ -264,7 +271,7 @@ fn main() -> Result<()> {
                         // thursday-toil phase 1.
                         systemd_notify!(sd_notify::NotifyState::Stopping);
 
-                        info!("received SIGUSR2, beginning handoff shutdown");
+                        info!("received SIGUSR2{}, beginning handoff shutdown", from);
 
                         ebpf.lock().expect("lock poisoned").set_handoff();
 
@@ -281,7 +288,7 @@ fn main() -> Result<()> {
                     SIGINT | SIGTERM => {
                         systemd_notify!(sd_notify::NotifyState::Stopping);
 
-                        info!("received signal {}, shutting down", sig);
+                        info!("received signal {}{}, shutting down", sig, from);
 
                         sig_handle.close();
                         if let Some(api) = status_api.as_mut() {
@@ -299,7 +306,7 @@ fn main() -> Result<()> {
 
             // Drain any additional queued signals
             match sig_rx.try_recv() {
-                Ok(sig) => got_signal = Some(sig),
+                Ok(origin) => got_signal = Some(origin),
                 Err(_) => break,
             }
         }
@@ -399,4 +406,16 @@ fn check_and_rebuild(route_config: &RwLock<ConfigTable>, health: &mut HealthChec
     }
 
     rebuild
+}
+
+/// Render the sender-identity suffix for a signal-delivery log line.
+/// With the `extended-siginfo` feature enabled, signal-hook exposes the
+/// sender's pid and uid via `Origin`; formatted as ` from pid N uid M`.
+/// Falls back to empty when the kernel didn't attach siginfo (rare —
+/// only kernel-generated signals like SIGSEGV typically lack a sender).
+fn format_sender(origin: &Origin) -> String {
+    match &origin.process {
+        Some(p) => format!(" from pid {} uid {}", p.pid, p.uid),
+        None => String::new(),
+    }
 }

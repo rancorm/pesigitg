@@ -24,7 +24,7 @@ log = "0.4"
 nix = { version = "0.31", features = ["fs", "process", "sched", "signal"] }
 pico-args = { workspace = true }
 sd-notify = "0.4"
-signal-hook = "0.4"
+signal-hook = { version = "0.4", features = ["extended-siginfo"] }
 syslog = "7"
 libc = "0.2"
 bytesize = "2.3"
