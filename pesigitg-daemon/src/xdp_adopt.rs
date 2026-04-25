@@ -27,7 +27,10 @@ use std::io;
 use std::mem;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::ptr::{self, NonNull};
+use std::slice;
 use std::sync::atomic::{AtomicU32, Ordering};
+
+use crate::frame::FrameView;
 
 use anyhow::{Context, Result, bail};
 use libc::{
@@ -322,6 +325,28 @@ impl AdoptedSocket {
         self.fd.as_raw_fd()
     }
 
+    /// Mutable view of the frame pointed at by `desc`. Returns a
+    /// [`FrameView`] over the chunk's writable bytes (capacity ==
+    /// `chunk_size`) with `desc.len` as the live length field.
+    ///
+    /// # Safety
+    /// `desc` must belong to this socket's UMEM and must not be
+    /// concurrently submitted to any ring while the returned view is
+    /// live.
+    pub unsafe fn frame_mut<'a>(&'a self, desc: &'a mut xdp_desc) -> AdoptedFrame<'a> {
+        let chunk_size = self.umem.chunk_size as usize;
+        let offset = desc.addr as usize;
+        // SAFETY: caller asserts `desc` belongs to this UMEM, so
+        // `offset..offset + chunk_size` lies within the mapping.
+        let buf = unsafe {
+            slice::from_raw_parts_mut(self.umem.addr.as_ptr().add(offset), chunk_size)
+        };
+        AdoptedFrame {
+            buf,
+            len: &mut desc.len,
+        }
+    }
+
     pub fn umem_fd(&self) -> RawFd {
         self.umem.fd.as_raw_fd()
     }
@@ -533,6 +558,36 @@ fn if_nametoindex(name: &str) -> Result<u32> {
         return Err(io::Error::last_os_error()).with_context(|| format!("if_nametoindex({name})"));
     }
     Ok(idx)
+}
+
+/// [`FrameView`] over a raw UMEM chunk. Writable capacity is the full
+/// chunk size; `len` aliases the descriptor's `len` field so writes
+/// via [`FrameView::resize`] flow into the next ring submission.
+pub struct AdoptedFrame<'a> {
+    buf: &'a mut [u8],
+    len: &'a mut u32,
+}
+
+impl FrameView for AdoptedFrame<'_> {
+    fn contents(&self) -> &[u8] {
+        &self.buf[..*self.len as usize]
+    }
+
+    fn contents_mut(&mut self) -> &mut [u8] {
+        &mut self.buf[..*self.len as usize]
+    }
+
+    fn capacity(&mut self) -> usize {
+        self.buf.len()
+    }
+
+    fn resize(&mut self, new_len: usize) -> Option<&mut [u8]> {
+        if new_len > self.buf.len() {
+            return None;
+        }
+        *self.len = new_len as u32;
+        Some(&mut self.buf[..new_len])
+    }
 }
 
 fn page_size() -> usize {

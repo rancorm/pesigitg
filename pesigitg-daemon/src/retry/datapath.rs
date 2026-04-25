@@ -27,14 +27,13 @@
 
 use std::net::IpAddr;
 
-use xsk_rs::umem::frame::DataMut;
-
 use pesigitg_common::{
     ETH_HDR_LEN, ETH_P_IP, ETH_P_IPV6, IPPROTO_UDP, IPV4_MIN_HDR_LEN, IPV6_HDR_LEN, UDP_HDR_LEN,
 };
 
 use crate::config::retry::{RetryConfig, RetryMode};
 use crate::config::route::ConfigTable;
+use crate::frame::FrameView;
 use crate::quic::initial::{self, Initial, ParseError};
 
 use super::packet::{INTEGRITY_TAG_LEN, build_retry};
@@ -81,8 +80,8 @@ pub enum Detail {
 /// through as a parameter so unit tests can pin it. `local_mac` is the
 /// LB's own MAC address — it goes in the source slot of the reflected
 /// response.
-pub fn try_handle(
-    data: &mut DataMut<'_>,
+pub fn try_handle<V: FrameView>(
+    data: &mut V,
     table: &ConfigTable,
     local_mac: &[u8; 6],
     now_ms: u64,
@@ -371,8 +370,8 @@ fn load_over_trigger(retry: &RetryConfig, now_ms: u64) -> bool {
 /// [`Outcome::Skip`] if building the response failed — the caller then
 /// runs the normal pipeline so the packet isn't silently dropped.
 #[allow(clippy::too_many_arguments)]
-fn emit(
-    data: &mut DataMut<'_>,
+fn emit<V: FrameView>(
+    data: &mut V,
     layout: &FrameLayout,
     version: u32,
     odcid: &[u8],
@@ -402,37 +401,27 @@ fn emit(
     let retry_bytes = &retry_buf[..n];
     debug_assert!(retry_bytes.len() >= INTEGRITY_TAG_LEN);
 
-    // Lay out headers in a scratch buffer before committing. This keeps
-    // the cursor write one contiguous span and avoids partially
-    // rewriting the UMEM frame on a late error. Max header = 14 + 40
-    // (IPv6) + 8 = 62 bytes.
+    // Lay out headers in a scratch buffer before committing. Max
+    // header = 14 + 40 (IPv6) + 8 = 62 bytes.
     let mut hdr_buf = [0u8; 64];
     let hdr_len = build_reflected_headers(&mut hdr_buf, layout, local_mac, retry_bytes.len());
 
     let total_len = hdr_len + retry_bytes.len();
-    if total_len > frame_capacity(data) {
-        return Outcome::Skip;
-    }
 
-    // Commit: cursor writes the new header + payload and updates the
-    // frame descriptor's length.
-    {
-        let mut cursor = data.cursor();
-        cursor.set_pos(0);
-        use std::io::Write;
-        if cursor.write_all(&hdr_buf[..hdr_len]).is_err() {
-            return Outcome::Skip;
-        }
-        if cursor.write_all(retry_bytes).is_err() {
-            return Outcome::Skip;
-        }
-    }
+    // Commit: resize the frame to the new total and copy header +
+    // payload into place. `resize` returns `None` if `total_len`
+    // exceeds the chunk capacity.
+    let frame = match data.resize(total_len) {
+        Some(buf) => buf,
+        None => return Outcome::Skip,
+    };
+    frame[..hdr_len].copy_from_slice(&hdr_buf[..hdr_len]);
+    frame[hdr_len..total_len].copy_from_slice(retry_bytes);
 
     // Post-write: fill in the IPv4 header checksum (requires the IP
     // total length field already set above). For IPv6 the UDP checksum
     // is mandatory and covers the pseudo-header — do it after the
     // payload is in place.
-    let frame = data.contents_mut();
     if layout.is_ipv4 {
         write_ipv4_checksum(frame, layout.ip_offset, layout.ip_hdr_len);
     } else {
@@ -440,15 +429,6 @@ fn emit(
     }
 
     Outcome::Emitted
-}
-
-/// Total bytes available in the underlying UMEM buffer for this frame.
-///
-/// `DataMut` only exposes `contents()` up to the *current* length; use
-/// the cursor's `buf_len()` (which counts the whole segment) as the
-/// capacity check so we reject oversize rewrites before we touch bytes.
-fn frame_capacity(data: &mut DataMut<'_>) -> usize {
-    data.cursor().buf_len()
 }
 
 fn build_reflected_headers(

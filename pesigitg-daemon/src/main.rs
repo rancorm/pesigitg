@@ -7,6 +7,7 @@ mod cid;
 mod config;
 mod conntable;
 mod ebpf;
+mod frame;
 mod health;
 mod neigh;
 mod packet;

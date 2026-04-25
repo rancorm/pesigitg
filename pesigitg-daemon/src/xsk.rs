@@ -16,6 +16,41 @@ use xsk_rs::config::{BindFlags, LibbpfFlags, QueueSize, SocketConfig, UmemConfig
 use xsk_rs::umem::frame::DataMut;
 use xsk_rs::{CompQueue, FillQueue, FrameDesc, RxQueue, Socket, TxQueue, Umem};
 
+use crate::frame::FrameView;
+
+/// [`FrameView`] wrapper around xsk-rs's [`DataMut`]. `contents` /
+/// `contents_mut` delegate; `capacity` reads the chunk size via the
+/// cursor's `buf_len`; `resize` moves the cursor's position, which
+/// xsk-rs aliases with the descriptor's length field.
+pub struct FreshFrame<'a>(DataMut<'a>);
+
+impl FrameView for FreshFrame<'_> {
+    fn contents(&self) -> &[u8] {
+        self.0.contents()
+    }
+
+    fn contents_mut(&mut self) -> &mut [u8] {
+        self.0.contents_mut()
+    }
+
+    fn capacity(&mut self) -> usize {
+        // The Cursor is the only public path to the underlying buf
+        // length; it holds no state beyond the two refs it borrows.
+        self.0.cursor().buf_len()
+    }
+
+    fn resize(&mut self, new_len: usize) -> Option<&mut [u8]> {
+        if new_len > self.capacity() {
+            return None;
+        }
+        // Cursor::set_pos clamps to buf_len and writes directly into
+        // the descriptor's length field (DataMut and Cursor share the
+        // same `&mut usize` for the length).
+        self.0.cursor().set_pos(new_len);
+        Some(self.0.contents_mut())
+    }
+}
+
 const NUM_FRAMES: u32 = 4096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,16 +147,13 @@ impl XskSocket {
         unsafe { self.rx_q.poll_and_consume(descs, timeout_ms) }.unwrap_or(0)
     }
 
-    /// Get mutable access to a frame's packet data. The returned
-    /// [`DataMut`] derefs to `&mut [u8]` for in-place rewrites, and
-    /// also exposes `.cursor()` for callers (like the Retry path) that
-    /// need to grow the packet beyond its original length.
+    /// Get a [`FrameView`] over the packet bytes pointed at by `desc`.
     ///
     /// # Safety
     /// The caller must ensure `desc` belongs to this socket's UMEM and
     /// is not simultaneously submitted to any queue.
-    pub unsafe fn frame_mut<'a>(&'a self, desc: &'a mut FrameDesc) -> DataMut<'a> {
-        unsafe { self.umem.data_mut(desc) }
+    pub unsafe fn frame_mut<'a>(&'a self, desc: &'a mut FrameDesc) -> FreshFrame<'a> {
+        FreshFrame(unsafe { self.umem.data_mut(desc) })
     }
 
     /// Submit frames for transmission out the interface.

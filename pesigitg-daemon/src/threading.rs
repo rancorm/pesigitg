@@ -15,15 +15,16 @@ use libc::{AF_INET, SOCK_DGRAM, c_char, ioctl, socket};
 use log::{debug, error, info, warn};
 use nix::sched::{CpuSet, sched_setaffinity};
 use nix::unistd::Pid;
-use xsk_rs::FrameDesc;
 
 use crate::config::route::ConfigTable;
 use crate::conntable::ConnectionTable;
 use crate::ebpf::EbpfHandle;
+use crate::frame::FrameView;
 use crate::packet::{self, Verdict};
 use crate::retry;
 use crate::stats::{BatchStats, StatsTable, WorkerStats};
 use crate::utils::num_cores;
+use crate::worker_socket::AfXdpSocket;
 use crate::xsk::XskSocket;
 
 const ETHTOOL_GCHANNELS: u32 = 0x0000003c;
@@ -31,6 +32,18 @@ const SIOCETHTOOL: libc::c_ulong = 0x8946;
 
 const BATCH_SIZE: usize = 64;
 const POLL_TIMEOUT_MS: i32 = 100;
+
+/// Per-frame dispatch decision produced inside the FrameView scope.
+/// The borrow on `*desc` ends with the `FrameView`, so the worker
+/// reads `*desc` (and copies it into the batch vecs) only after this
+/// value has been returned.
+enum Action {
+    /// Retry datapath emitted a Retry response in place — push the
+    /// descriptor straight onto the TX ring.
+    Emitted,
+    /// Normal pipeline ran; act on the resulting verdict.
+    Verdict(Verdict),
+}
 
 #[repr(C)]
 struct EthtoolChannels {
@@ -277,11 +290,9 @@ impl WorkerPool {
     }
 }
 
-/// Per-queue worker loop.
-///
-/// This is the hot path — each invocation runs on a dedicated, pinned
-/// core with an AF_XDP socket bound to `queue_id`, receiving packets
-/// redirected by the XDP program.
+/// Cold-boot worker entrypoint. Creates a fresh xsk-rs-backed
+/// AF_XDP socket, registers it in the XSKS map, and runs the generic
+/// hot loop.
 fn worker_loop(
     interface: &str,
     queue_id: u32,
@@ -291,7 +302,7 @@ fn worker_loop(
     shutdown: &AtomicBool,
     stats: &WorkerStats,
 ) {
-    let (mut xsk, xdp_mode) = match XskSocket::new(interface, queue_id) {
+    let (xsk, xdp_mode) = match XskSocket::new(interface, queue_id) {
         Ok(s) => s,
         Err(e) => {
             error!(
@@ -316,12 +327,26 @@ fn worker_loop(
         queue_id, xdp_mode
     );
 
-    let mut rx_descs = vec![FrameDesc::default(); BATCH_SIZE];
-    let mut comp_descs = vec![FrameDesc::default(); BATCH_SIZE];
+    worker_loop_generic(xsk, queue_id, local_mac, config, shutdown, stats);
+}
+
+/// Per-queue hot loop, generic over the AF_XDP socket flavour. Runs
+/// on a dedicated, pinned core, receiving packets redirected by the
+/// XDP program and forwarding / replying via the same socket.
+fn worker_loop_generic<S: AfXdpSocket>(
+    mut xsk: S,
+    queue_id: u32,
+    local_mac: &[u8; 6],
+    config: &Arc<RwLock<ConfigTable>>,
+    shutdown: &AtomicBool,
+    stats: &WorkerStats,
+) {
+    let mut rx_descs = vec![S::zero_frame(); BATCH_SIZE];
+    let mut comp_descs = vec![S::zero_frame(); BATCH_SIZE];
     let mut conn = ConnectionTable::new();
-    let mut pending_fill: Vec<FrameDesc> = Vec::new();
-    let mut tx_batch: Vec<FrameDesc> = Vec::with_capacity(BATCH_SIZE);
-    let mut recycle_batch: Vec<FrameDesc> = Vec::with_capacity(BATCH_SIZE);
+    let mut pending_fill: Vec<S::Frame> = Vec::new();
+    let mut tx_batch: Vec<S::Frame> = Vec::with_capacity(BATCH_SIZE);
+    let mut recycle_batch: Vec<S::Frame> = Vec::with_capacity(BATCH_SIZE);
 
     let worker_start = Instant::now();
     let mut first_packet_logged = false;
@@ -374,8 +399,11 @@ fn worker_loop(
         let mut batch_stats = BatchStats::new();
 
         for desc in rx_descs[..n].iter_mut() {
-            let verdict = {
-                let mut data = unsafe { xsk.frame_mut(desc) };
+            // Compute the dispatch decision in an inner scope so the
+            // FrameView's borrow on `*desc` is released before we
+            // copy the descriptor into the batch vecs below.
+            let action: Action = {
+                let mut data = unsafe { xsk.frame_view(desc) };
 
                 // Retry fast path: if the classifier emits a Retry
                 // packet in place of the Initial, ship it straight to
@@ -386,14 +414,24 @@ fn worker_loop(
                     retry::datapath::try_handle(&mut data, &config, local_mac, now_ms);
                 batch_stats.record_retry(retry_outcome, retry_detail);
                 match retry_outcome {
-                    retry::datapath::Outcome::Emitted => {
-                        tx_batch.push(*desc);
-                        continue;
+                    retry::datapath::Outcome::Emitted => Action::Emitted,
+                    retry::datapath::Outcome::Forward | retry::datapath::Outcome::Skip => {
+                        Action::Verdict(packet::process_packet(
+                            data.contents_mut(),
+                            &config,
+                            &mut conn,
+                            local_mac,
+                            now,
+                        ))
                     }
-                    retry::datapath::Outcome::Forward | retry::datapath::Outcome::Skip => {}
                 }
-
-                packet::process_packet(&mut data, &config, &mut conn, local_mac, now)
+            };
+            let verdict = match action {
+                Action::Emitted => {
+                    tx_batch.push(*desc);
+                    continue;
+                }
+                Action::Verdict(v) => v,
             };
             match verdict {
                 Verdict::CidForward(config_id) => {
