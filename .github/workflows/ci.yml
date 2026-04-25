@@ -54,7 +54,13 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y libelf-dev
       # build.rs falls back to a dummy eBPF object when PESIGITG_EBPF_OBJ
       # is unset, so tests build without bpf-linker.
-      - run: cargo test --workspace --all-targets
+      #
+      # Exclude the fuzz crate: its `[[bin]]`s `#[path]`-include daemon
+      # modules, so under `--all-targets` cargo rebuilds and re-runs the
+      # daemon's unit tests inside each fuzz binary, then drops into
+      # libFuzzer's input loop until the job times out. The fuzz-smoke
+      # matrix already covers these targets via `cargo xtask fuzz`.
+      - run: cargo test --workspace --exclude pesigitg-daemon-fuzz --all-targets
 
   deny:
     name: cargo deny
