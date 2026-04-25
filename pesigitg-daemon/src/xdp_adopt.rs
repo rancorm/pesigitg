@@ -248,7 +248,7 @@ impl AdoptedSocket {
         let rx = ring_mmap::<xdp_desc>(&fd, XDP_PGOFF_RX_RING, &off.rx, ring_size).context("rx")?;
         let tx = ring_mmap::<xdp_desc>(&fd, XDP_PGOFF_TX_RING, &off.tx, ring_size).context("tx")?;
 
-        let ifindex = if_nametoindex(interface)?;
+        let ifindex = crate::utils::if_nametoindex(interface)?;
         let mut flags: u16 = XDP_USE_NEED_WAKEUP;
         flags |= if zerocopy { XDP_ZEROCOPY } else { XDP_COPY };
         let addr = sockaddr_xdp {
@@ -559,16 +559,6 @@ fn bind_af_xdp(fd: &OwnedFd, addr: &sockaddr_xdp) -> io::Result<()> {
         return Err(io::Error::last_os_error());
     }
     Ok(())
-}
-
-pub(crate) fn if_nametoindex(name: &str) -> Result<u32> {
-    let cname = CString::new(name).context("interface name contains NUL")?;
-    // SAFETY: cname is a valid C string.
-    let idx = unsafe { libc::if_nametoindex(cname.as_ptr()) };
-    if idx == 0 {
-        return Err(io::Error::last_os_error()).with_context(|| format!("if_nametoindex({name})"));
-    }
-    Ok(idx)
 }
 
 /// [`FrameView`] over a raw UMEM chunk. Writable capacity is the full

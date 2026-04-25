@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later OR Commercial
 // Copyright (c) 2026 Jonathan Cormier
 // This file is part of Pesigitg.
+use anyhow::Context;
 use log::debug;
 
 /// Fire-and-forget wrapper around `sd_notify::notify`.
@@ -79,6 +80,19 @@ pub fn interface_mac(interface: &str) -> std::io::Result<[u8; 6]> {
     }
 
     Ok(mac)
+}
+
+pub(crate) fn if_nametoindex(name: &str) -> anyhow::Result<u32> {
+    use std::ffi::CString;
+
+    let cname = CString::new(name).context("interface name contains NUL")?;
+    // SAFETY: cname is a valid C string.
+    let idx = unsafe { libc::if_nametoindex(cname.as_ptr()) };
+    if idx == 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("if_nametoindex({name})"));
+    }
+    Ok(idx)
 }
 
 pub fn is_aes_available() -> bool {

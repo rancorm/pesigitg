@@ -27,7 +27,7 @@ use crate::retry;
 use crate::stats::{BatchStats, StatsTable, WorkerStats};
 use crate::utils::num_cores;
 use crate::worker_socket::AfXdpSocket;
-use crate::xdp_adopt::{self, AdoptedSocket, DEFAULT_CHUNK_SIZE, DEFAULT_FRAME_COUNT};
+use crate::xdp_adopt::{AdoptedSocket, DEFAULT_CHUNK_SIZE, DEFAULT_FRAME_COUNT};
 use crate::xsk::XskSocket;
 
 const ETHTOOL_GCHANNELS: u32 = 0x0000003c;
@@ -434,7 +434,7 @@ fn worker_loop_adopt(
     stats: &WorkerStats,
     fd_tx: mpsc::Sender<(u32, OwnedFd, OwnedFd)>,
 ) {
-    let ifindex = match xdp_adopt::if_nametoindex(interface) {
+    let ifindex = match crate::utils::if_nametoindex(interface) {
         Ok(i) => i,
         Err(e) => {
             error!("worker q{}: if_nametoindex({}) failed: {:#}", queue_id, interface, e);
