@@ -22,8 +22,10 @@ use std::fs;
 use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
+use std::process;
 use std::str::FromStr;
-use std::time::Duration;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use pico_args::Arguments;
 use serde_json::Value;
@@ -407,6 +409,39 @@ fn expect_optional_target(args: &[String]) -> Result<Option<&str>, TargetError> 
     Ok(args.first().map(String::as_str))
 }
 
+/// Pull a `<short> <value>` / `<long> <value>` / `<long>=<value>` flag
+/// out of `args` and return (value, remaining positional args). The
+/// last occurrence wins. We hand-roll this rather than threading
+/// pico-args into every command, because each command takes a
+/// `&[String]` and only one or two of them want flags.
+fn extract_flag(
+    args: &[String],
+    short: &str,
+    long: &str,
+) -> Result<(Option<String>, Vec<String>), TargetError> {
+    let mut value: Option<String> = None;
+    let mut rest: Vec<String> = Vec::with_capacity(args.len());
+    let long_eq = format!("{}=", long);
+    let mut iter = args.iter();
+
+    while let Some(a) = iter.next() {
+        if a == short || a == long {
+            match iter.next() {
+                Some(v) => value = Some(v.clone()),
+                None => {
+                    return Err(TargetError::ExtraArgs(format!("{} requires a value", a)));
+                }
+            }
+        } else if let Some(v) = a.strip_prefix(&long_eq) {
+            value = Some(v.to_string());
+        } else {
+            rest.push(a.clone());
+        }
+    }
+
+    Ok((value, rest))
+}
+
 // ----- Status API client -----
 
 /// Open the per-instance status socket, send `GET <path>\n`, parse the
@@ -700,6 +735,224 @@ fn cmd_endpoint(args: &[String]) -> Result<(), TargetError> {
     Ok(())
 }
 
+fn cmd_cleanup(args: &[String]) -> Result<(), TargetError> {
+    expect_no_args(args)?;
+
+    let instances = discover_instances();
+    let mut removed = 0usize;
+    let mut errors = 0usize;
+
+    for inst in instances {
+        let stale = inst.pidfile.is_some() && inst.cmdline.is_none();
+
+        if !stale {
+            continue;
+        }
+
+        // Safe to unwrap: stale implies pidfile.is_some().
+        let path = inst.pidfile.unwrap();
+
+        match fs::remove_file(&path) {
+            Ok(()) => {
+                println!("removed stale pidfile: {}", path.display());
+                removed += 1;
+            }
+            Err(e) => {
+                eprintln!("failed to remove {}: {}", path.display(), e);
+                errors += 1;
+            }
+        }
+    }
+
+    if removed == 0 && errors == 0 {
+        println!("no stale pidfiles");
+    }
+    if errors > 0 {
+        // Surface a non-zero exit so callers (cron, scripts) notice.
+        return Err(TargetError::Io(io::Error::other(format!(
+            "{} pidfile(s) could not be removed",
+            errors
+        ))));
+    }
+
+    Ok(())
+}
+
+fn cmd_pin_info(args: &[String]) -> Result<(), TargetError> {
+    let target_arg = expect_optional_target(args)?;
+
+    // Pin-info only needs an interface name; the daemon doesn't have to
+    // be running for pins to exist (handoff shutdown leaves them in
+    // place). Accept a literal interface arg and only fall back to
+    // discovery when the caller didn't supply one.
+    let iface = match target_arg {
+        Some(s) => match s.parse::<Target>()? {
+            Target::Interface(i) => i,
+            Target::Pid(_) => {
+                return Err(TargetError::ExtraArgs(
+                    "pin-info expects an interface name, not a pid".into(),
+                ));
+            }
+        },
+        None => resolve(None)?.interface,
+    };
+
+    let dir_path = format!("/sys/fs/bpf/pesigitg/{}", iface);
+
+    println!("{}", dir_path);
+
+    let entries = match fs::read_dir(&dir_path) {
+        Ok(it) => it,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            println!("  (no pin directory; daemon may not have run yet on {})", iface);
+
+            return Ok(());
+        }
+        Err(e) => return Err(TargetError::Io(e)),
+    };
+
+    let mut names: Vec<String> = entries
+        .flatten()
+        .filter_map(|e| e.file_name().into_string().ok())
+        .collect();
+
+    names.sort();
+
+    if names.is_empty() {
+        println!("  (empty)");
+    } else {
+        for n in names {
+            println!("  {}", n);
+        }
+    }
+
+    Ok(())
+}
+
+/// Per-tick snapshot of the counters watch cares about. Carries its
+/// observation timestamp so rate computation uses real elapsed time
+/// rather than the requested interval (sleep + RTT vary).
+struct StatsSample {
+    at: Instant,
+    rx: u64,
+    fwd: u64,
+    cid: u64,
+    fb: u64,
+    unrt: u64,
+    retry_iss: u64,
+}
+
+impl StatsSample {
+    fn from_value(v: &Value, at: Instant) -> Self {
+        let g = |k: &str| v.get(k).and_then(|n| n.as_u64()).unwrap_or(0);
+        let retry_iss = v
+            .get("retry")
+            .and_then(|r| r.get("issued"))
+            .and_then(|n| n.as_u64())
+            .unwrap_or(0);
+
+        Self {
+            at,
+            rx: g("rx_packets"),
+            fwd: g("forwarded"),
+            cid: g("cid_routed"),
+            fb: g("fallback_routed"),
+            unrt: g("cid_unroutable"),
+            retry_iss,
+        }
+    }
+}
+
+fn rate(curr: u64, prev: u64, dt_secs: f64) -> String {
+    if curr < prev {
+        // Counter went backwards — daemon restarted between ticks.
+        return "*".to_string();
+    }
+    let r = (curr - prev) as f64 / dt_secs;
+    if r >= 10_000.0 {
+        format!("{:.0}", r)
+    } else if r >= 100.0 {
+        format!("{:.1}", r)
+    } else {
+        format!("{:.2}", r)
+    }
+}
+
+fn watch_header() -> String {
+    format!(
+        "{:<8}  {:>10}  {:>10}  {:>10}  {:>12}  {:>10}  {:>12}",
+        "elapsed", "rx/s", "fwd/s", "cid/s", "fallback/s", "unrt/s", "retry_iss/s"
+    )
+}
+
+fn cmd_watch(args: &[String]) -> Result<(), TargetError> {
+    let (interval_str, rest) = extract_flag(args, "-n", "--interval")?;
+    let interval_secs: u64 = match interval_str.as_deref() {
+        None => 1,
+        Some(s) => s.parse().map_err(|_| {
+            TargetError::ExtraArgs(format!("--interval expects an integer, got '{}'", s))
+        })?,
+    };
+
+    if interval_secs == 0 {
+        return Err(TargetError::ExtraArgs(
+            "--interval must be at least 1 second".into(),
+        ));
+    }
+
+    let target = expect_optional_target(&rest)?.map(String::from);
+    let interval = Duration::from_secs(interval_secs);
+
+    let header = watch_header();
+
+    println!("{}", header);
+
+    let start = Instant::now();
+    let mut prev: Option<StatsSample> = None;
+    let mut row: usize = 0;
+
+    loop {
+        let (_, v) = query_endpoint(target.as_deref(), "/stats")?;
+        let now = Instant::now();
+        let sample = StatsSample::from_value(&v, now);
+        let elapsed = format!("{}s", start.elapsed().as_secs());
+
+        match &prev {
+            None => {
+                println!(
+                    "{:<8}  {:>10}  {:>10}  {:>10}  {:>12}  {:>10}  {:>12}",
+                    elapsed, "-", "-", "-", "-", "-", "-"
+                );
+            }
+            Some(p) => {
+                let dt = sample.at.duration_since(p.at).as_secs_f64().max(1e-9);
+
+                println!(
+                    "{:<8}  {:>10}  {:>10}  {:>10}  {:>12}  {:>10}  {:>12}",
+                    elapsed,
+                    rate(sample.rx, p.rx, dt),
+                    rate(sample.fwd, p.fwd, dt),
+                    rate(sample.cid, p.cid, dt),
+                    rate(sample.fb, p.fb, dt),
+                    rate(sample.unrt, p.unrt, dt),
+                    rate(sample.retry_iss, p.retry_iss, dt),
+                );
+            }
+        }
+
+        prev = Some(sample);
+        row += 1;
+
+        // Repaint the header every 20 rows so a long-running watch
+        // remains readable after scrollback.
+        if row.is_multiple_of(20) {
+            println!("{}", header);
+        }
+
+        thread::sleep(interval);
+    }
+}
+
 fn cmd_help(args: &[String]) -> Result<(), TargetError> {
     expect_no_args(args)?;
 
@@ -795,6 +1048,24 @@ static CMDS: &[Cmd] = &[
         run: cmd_endpoint,
     },
     Cmd {
+        name: "watch",
+        aliases: &[],
+        summary: "poll /stats periodically and print rate deltas: watch [target] [-n SECS]",
+        run: cmd_watch,
+    },
+    Cmd {
+        name: "pin-info",
+        aliases: &[],
+        summary: "list bpffs pins under /sys/fs/bpf/pesigitg/<iface>/",
+        run: cmd_pin_info,
+    },
+    Cmd {
+        name: "cleanup",
+        aliases: &[],
+        summary: "remove stale pidfiles for daemons that are no longer running",
+        run: cmd_cleanup,
+    },
+    Cmd {
         name: "hup",
         aliases: &["reload"],
         summary: "send SIGHUP (reload daemon + route config, reset health backoff)",
@@ -874,29 +1145,48 @@ fn convert(args: Vec<OsString>) -> Vec<String> {
         .collect()
 }
 
-fn main() -> Result<(), String> {
+fn run() -> Result<(), String> {
     let mut pargs = Arguments::from_env();
 
-    if pargs.contains(["-h", "--help"]) {
-        print_usage();
+    // Pull the command first so `pesigitg-ctl status --help` routes to
+    // per-command help instead of being eaten by the top-level scan.
+    let cmd_name = pargs.subcommand().map_err(|e| e.to_string())?;
+
+    let Some(cmd_name) = cmd_name else {
+        if pargs.contains(["-h", "--help"]) {
+            print_usage();
+        } else if pargs.contains(["-V", "--version"]) {
+            println!("{}", env!("CARGO_PKG_VERSION"));
+        } else {
+            return Err("missing command (try `pesigitg-ctl help`)".into());
+        }
 
         return Ok(());
-    }
-    if pargs.contains(["-V", "--version"]) {
-        println!("{}", env!("CARGO_PKG_VERSION"));
-
-        return Ok(());
-    }
-
-    let cmd_name: String = pargs
-        .free_from_str()
-        .map_err(|_| "missing command (try `pesigitg-ctl help`)".to_string())?;
+    };
 
     let cmd = find_cmd(&cmd_name)?;
     let raw = pargs.finish();
     let args = convert(raw);
 
+    if args.iter().any(|a| a == "-h" || a == "--help") {
+        println!("{}: {}", cmd.name, cmd.summary);
+
+        if !cmd.aliases.is_empty() {
+            println!("  aliases: {}", cmd.aliases.join(", "));
+        }
+
+        return Ok(());
+    }
+
     (cmd.run)(&args).map_err(|e| e.to_string())
+}
+
+fn main() {
+    if let Err(e) = run() {
+        eprintln!("error: {}", e);
+
+        process::exit(1);
+    }
 }
 
 #[cfg(test)]
@@ -1076,5 +1366,75 @@ mod tests {
         assert_eq!(format_duration(60), "1m0s");
         assert_eq!(format_duration(3600), "1h0m");
         assert_eq!(format_duration(86_400), "1d0h");
+    }
+
+    #[test]
+    fn extract_flag_short_space() {
+        let args = vec!["-n".into(), "5".into(), "eth0".into()];
+        let (v, rest) = extract_flag(&args, "-n", "--interval").unwrap();
+        assert_eq!(v.as_deref(), Some("5"));
+        assert_eq!(rest, vec!["eth0".to_string()]);
+    }
+
+    #[test]
+    fn extract_flag_long_space() {
+        let args = vec!["--interval".into(), "10".into()];
+        let (v, rest) = extract_flag(&args, "-n", "--interval").unwrap();
+        assert_eq!(v.as_deref(), Some("10"));
+        assert!(rest.is_empty());
+    }
+
+    #[test]
+    fn extract_flag_long_equals() {
+        let args = vec!["--interval=2".into(), "eth0".into()];
+        let (v, rest) = extract_flag(&args, "-n", "--interval").unwrap();
+        assert_eq!(v.as_deref(), Some("2"));
+        assert_eq!(rest, vec!["eth0".to_string()]);
+    }
+
+    #[test]
+    fn extract_flag_absent_leaves_args() {
+        let args = vec!["eth0".into()];
+        let (v, rest) = extract_flag(&args, "-n", "--interval").unwrap();
+        assert!(v.is_none());
+        assert_eq!(rest, vec!["eth0".to_string()]);
+    }
+
+    #[test]
+    fn extract_flag_dangling_value() {
+        let args = vec!["-n".into()];
+        assert!(matches!(
+            extract_flag(&args, "-n", "--interval"),
+            Err(TargetError::ExtraArgs(_))
+        ));
+    }
+
+    #[test]
+    fn extract_flag_last_occurrence_wins() {
+        let args = vec!["-n".into(), "1".into(), "--interval=5".into()];
+        let (v, rest) = extract_flag(&args, "-n", "--interval").unwrap();
+        assert_eq!(v.as_deref(), Some("5"));
+        assert!(rest.is_empty());
+    }
+
+    #[test]
+    fn rate_zero_delta_is_zero() {
+        assert_eq!(rate(100, 100, 1.0), "0.00");
+    }
+
+    #[test]
+    fn rate_counter_reset_marker() {
+        // Daemon restart: counter went backwards.
+        assert_eq!(rate(5, 1000, 1.0), "*");
+    }
+
+    #[test]
+    fn rate_scales_format_to_magnitude() {
+        // < 100 keeps two decimals.
+        assert_eq!(rate(110, 100, 1.0), "10.00");
+        // [100, 10_000) keeps one decimal.
+        assert_eq!(rate(1100, 100, 1.0), "1000.0");
+        // >= 10_000 rounds to integer.
+        assert_eq!(rate(20_100, 100, 1.0), "20000");
     }
 }
