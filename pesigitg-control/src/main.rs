@@ -703,6 +703,187 @@ fn cmd_info(args: &[String]) -> Result<(), TargetError> {
     Ok(())
 }
 
+/// `whoami <cid-hex> [target]` — given a QUIC Connection ID, fetch the
+/// daemon's live route table and report which backend the flow would
+/// land on. Plaintext schemes are decoded fully (server_id is in the
+/// clear); encrypted schemes (`single_pass`, `four_pass`) report
+/// scheme/lengths and defer full decode to a future `--route-config`
+/// path that has access to the encryption key.
+fn cmd_whoami(args: &[String]) -> Result<(), TargetError> {
+    if args.is_empty() {
+        return Err(TargetError::ExtraArgs(
+            "whoami requires a CID hex string (e.g. '00010203...')".into(),
+        ));
+    }
+    if args.len() > 2 {
+        return Err(TargetError::ExtraArgs(format!(
+            "expected '<cid-hex> [target]', got: {}",
+            args.join(" ")
+        )));
+    }
+
+    let cid = parse_cid_hex(&args[0])?;
+    let target = args.get(1).map(String::as_str);
+
+    let (resolved, v) = query_endpoint(target, "/config")?;
+
+    let configs = v
+        .get("route")
+        .and_then(|r| r.get("configs"))
+        .and_then(|c| c.as_array())
+        .ok_or_else(|| {
+            TargetError::BadResponse("/config response missing route.configs".into())
+        })?;
+
+    println!("target:    {} (pid {})", resolved.interface, resolved.pid);
+
+    for line in analyze_whoami(&cid, configs) {
+        println!("{}", line);
+    }
+
+    Ok(())
+}
+
+fn parse_cid_hex(s: &str) -> Result<Vec<u8>, TargetError> {
+    let bytes = pesigitg_common::hex::decode(s)
+        .map_err(|e| TargetError::ExtraArgs(format!("invalid CID hex: {}", e)))?;
+
+    if bytes.is_empty() {
+        return Err(TargetError::ExtraArgs("CID must be non-empty".into()));
+    }
+
+    Ok(bytes)
+}
+
+/// Pure analyzer: given a CID and the `route.configs` array from
+/// `/config`, return the lines to print after the target header. Kept
+/// out of `cmd_whoami` so the rendering can be exercised under test
+/// without standing up a fake status socket.
+fn analyze_whoami(cid: &[u8], configs: &[Value]) -> Vec<String> {
+    let mut out = Vec::new();
+
+    out.push(format!(
+        "cid:       {}",
+        pesigitg_common::hex::encode(cid)
+    ));
+
+    // First octet's top three bits encode the rotation/config_id
+    // (draft-ietf-quic-load-balancers-21 §3). 7 is reserved for
+    // unroutable / pre-handshake CIDs.
+    let config_id = cid[0] >> 5;
+
+    if config_id == 7 {
+        out.push("verdict:   config_id 7 is reserved (unroutable)".into());
+
+        return out;
+    }
+
+    out.push(format!("config_id: {}", config_id));
+
+    let cfg = configs
+        .iter()
+        .find(|c| c.get("config_id").and_then(|n| n.as_u64()) == Some(config_id as u64));
+
+    let Some(cfg) = cfg else {
+        out.push(format!(
+            "verdict:   no route config with config_id={} on this daemon",
+            config_id
+        ));
+
+        return out;
+    };
+
+    let scheme = cfg.get("encryption").and_then(|s| s.as_str()).unwrap_or("?");
+    let sid_len = cfg
+        .get("server_id_length")
+        .and_then(|n| n.as_u64())
+        .unwrap_or(0) as usize;
+    let nonce_len = cfg
+        .get("nonce_length")
+        .and_then(|n| n.as_u64())
+        .unwrap_or(0) as usize;
+    let payload_len = sid_len + nonce_len;
+
+    out.push(format!("scheme:    {}", scheme));
+    out.push(format!("sid_len:   {} bytes", sid_len));
+    out.push(format!("nonce_len: {} bytes", nonce_len));
+
+    if cid.len() < 1 + payload_len {
+        out.push(format!(
+            "verdict:   truncated (CID is {} byte(s); payload needs {})",
+            cid.len(),
+            1 + payload_len
+        ));
+
+        return out;
+    }
+
+    if scheme != "plaintext" {
+        out.push(format!(
+            "verdict:   encrypted ({}) — online decode requires the key,",
+            scheme
+        ));
+        out.push(
+            "           which /config does not expose. Offline decode via".into(),
+        );
+        out.push(
+            "           --route-config is on the saturday-gin backlog.".into(),
+        );
+
+        return out;
+    }
+
+    // Plaintext: server_id is the first sid_len bytes after the first
+    // octet. /config exposes server `id` as a hex string, so compare
+    // directly in hex form.
+    let server_id_hex = pesigitg_common::hex::encode(&cid[1..1 + sid_len]);
+
+    out.push(format!("server_id: {}", server_id_hex));
+
+    let servers = match cfg.get("servers").and_then(|s| s.as_array()) {
+        Some(s) => s,
+        None => {
+            out.push("verdict:   route config missing 'servers' array".into());
+
+            return out;
+        }
+    };
+
+    let matched = servers
+        .iter()
+        .find(|s| s.get("id").and_then(|i| i.as_str()) == Some(server_id_hex.as_str()));
+
+    match matched {
+        Some(s) => {
+            let addr = s.get("address").and_then(|a| a.as_str()).unwrap_or("?");
+            let mac = s
+                .get("mac")
+                .and_then(|m| m.as_str())
+                .map(String::from)
+                .unwrap_or_else(|| "(unset)".into());
+            let healthy = s.get("healthy").and_then(|b| b.as_bool()).unwrap_or(false);
+            let draining = s.get("draining").and_then(|b| b.as_bool()).unwrap_or(false);
+
+            let mut state: Vec<&str> = Vec::new();
+            state.push(if healthy { "healthy" } else { "UNHEALTHY" });
+            if draining {
+                state.push("draining");
+            }
+
+            out.push(format!("verdict:   routes to {} ({})", addr, mac));
+            out.push(format!("state:     {}", state.join(", ")));
+        }
+        None => {
+            out.push(format!(
+                "verdict:   server_id has no entry in config_id={} (would count as cid_unroutable)",
+                config_id
+            ));
+        }
+    }
+
+    out
+}
+
 /// `endpoint <path> [target]` — escape hatch for any future status
 /// endpoint without a dedicated subcommand. Path must start with `/`.
 fn cmd_endpoint(args: &[String]) -> Result<(), TargetError> {
@@ -1046,6 +1227,12 @@ static CMDS: &[Cmd] = &[
         aliases: &[],
         summary: "fetch an arbitrary status endpoint: endpoint <path> [target]",
         run: cmd_endpoint,
+    },
+    Cmd {
+        name: "whoami",
+        aliases: &[],
+        summary: "decode a QUIC CID via the live route table: whoami <cid-hex> [target]",
+        run: cmd_whoami,
     },
     Cmd {
         name: "watch",
@@ -1436,5 +1623,196 @@ mod tests {
         assert_eq!(rate(1100, 100, 1.0), "1000.0");
         // >= 10_000 rounds to integer.
         assert_eq!(rate(20_100, 100, 1.0), "20000");
+    }
+
+    // ----- whoami analyzer -----
+
+    use serde_json::json;
+
+    fn plaintext_cfg(config_id: u8, sid_len: u8, nonce_len: u8, servers: Value) -> Value {
+        json!({
+            "config_id": config_id,
+            "encryption": "plaintext",
+            "server_id_length": sid_len,
+            "nonce_length": nonce_len,
+            "servers": servers,
+        })
+    }
+
+    fn server(id_hex: &str, addr: &str, mac: &str, healthy: bool, draining: bool) -> Value {
+        json!({
+            "id": id_hex,
+            "address": addr,
+            "mac": mac,
+            "healthy": healthy,
+            "draining": draining,
+        })
+    }
+
+    fn find_line<'a>(lines: &'a [String], prefix: &str) -> &'a str {
+        lines
+            .iter()
+            .find(|l| l.starts_with(prefix))
+            .unwrap_or_else(|| panic!("no line starting with '{}': {:#?}", prefix, lines))
+    }
+
+    #[test]
+    fn whoami_reserved_config_id() {
+        // First octet 0xe0 → top three bits = 7 (reserved).
+        let cid = vec![0xe0, 0x00, 0x01];
+        let out = analyze_whoami(&cid, &[]);
+        assert!(find_line(&out, "verdict:").contains("reserved"));
+    }
+
+    #[test]
+    fn whoami_unknown_config_id() {
+        // 0x40 → config_id = 2; configs only define 0.
+        let cid = vec![0x40, 0x00, 0x01];
+        let configs = vec![plaintext_cfg(0, 3, 13, json!([]))];
+        let out = analyze_whoami(&cid, &configs);
+        assert!(find_line(&out, "verdict:").contains("no route config with config_id=2"));
+    }
+
+    #[test]
+    fn whoami_truncated_cid() {
+        // Plaintext config requires sid_len=3 + nonce_len=13 = 16 byte payload.
+        let cid = vec![0x00, 0x01, 0x02];
+        let configs = vec![plaintext_cfg(0, 3, 13, json!([]))];
+        let out = analyze_whoami(&cid, &configs);
+        let v = find_line(&out, "verdict:");
+        assert!(v.contains("truncated"));
+        assert!(v.contains("17"), "expected payload-required count in: {}", v);
+    }
+
+    #[test]
+    fn whoami_plaintext_routes_to_known_server() {
+        // server_id = 0x000001, full payload follows.
+        let mut cid = vec![0x00];
+        cid.extend_from_slice(&[0x00, 0x00, 0x01]);
+        cid.extend_from_slice(&[0x00; 13]);
+        let configs = vec![plaintext_cfg(
+            0,
+            3,
+            13,
+            json!([
+                server("000001", "10.0.1.10:443", "aa:bb:cc:dd:ee:01", true, false),
+                server("000002", "10.0.1.11:443", "aa:bb:cc:dd:ee:02", true, false),
+            ]),
+        )];
+        let out = analyze_whoami(&cid, &configs);
+        assert_eq!(find_line(&out, "server_id:"), "server_id: 000001");
+        let v = find_line(&out, "verdict:");
+        assert!(v.contains("routes to 10.0.1.10:443"));
+        assert!(v.contains("aa:bb:cc:dd:ee:01"));
+        assert_eq!(find_line(&out, "state:"), "state:     healthy");
+    }
+
+    #[test]
+    fn whoami_plaintext_draining_server_flagged() {
+        let mut cid = vec![0x00];
+        cid.extend_from_slice(&[0x00, 0x00, 0x01]);
+        cid.extend_from_slice(&[0x00; 13]);
+        let configs = vec![plaintext_cfg(
+            0,
+            3,
+            13,
+            json!([server(
+                "000001",
+                "10.0.1.10:443",
+                "aa:bb:cc:dd:ee:01",
+                true,
+                true
+            )]),
+        )];
+        let out = analyze_whoami(&cid, &configs);
+        assert!(find_line(&out, "state:").contains("draining"));
+    }
+
+    #[test]
+    fn whoami_plaintext_unhealthy_server_flagged() {
+        let mut cid = vec![0x00];
+        cid.extend_from_slice(&[0x00, 0x00, 0x01]);
+        cid.extend_from_slice(&[0x00; 13]);
+        let configs = vec![plaintext_cfg(
+            0,
+            3,
+            13,
+            json!([server(
+                "000001",
+                "10.0.1.10:443",
+                "aa:bb:cc:dd:ee:01",
+                false,
+                false
+            )]),
+        )];
+        let out = analyze_whoami(&cid, &configs);
+        assert!(find_line(&out, "state:").contains("UNHEALTHY"));
+    }
+
+    #[test]
+    fn whoami_plaintext_unknown_server_flagged() {
+        let mut cid = vec![0x00];
+        cid.extend_from_slice(&[0xff, 0xff, 0xff]);
+        cid.extend_from_slice(&[0x00; 13]);
+        let configs = vec![plaintext_cfg(
+            0,
+            3,
+            13,
+            json!([server(
+                "000001",
+                "10.0.1.10:443",
+                "aa:bb:cc:dd:ee:01",
+                true,
+                false
+            )]),
+        )];
+        let out = analyze_whoami(&cid, &configs);
+        let v = find_line(&out, "verdict:");
+        assert!(v.contains("no entry"));
+        assert!(v.contains("cid_unroutable"));
+    }
+
+    #[test]
+    fn whoami_encrypted_scheme_defers_to_offline() {
+        // single_pass with 16-byte payload (sid 3 + nonce 13).
+        let mut cid = vec![0x00];
+        cid.extend_from_slice(&[0xaa; 16]);
+        let configs = vec![json!({
+            "config_id": 0,
+            "encryption": "single_pass",
+            "server_id_length": 3,
+            "nonce_length": 13,
+            "servers": [server("000001", "10.0.1.10:443", "aa:bb:cc:dd:ee:01", true, false)],
+        })];
+        let out = analyze_whoami(&cid, &configs);
+        let v = find_line(&out, "verdict:");
+        assert!(v.contains("encrypted (single_pass)"));
+        assert!(out.iter().any(|l| l.contains("--route-config")));
+    }
+
+    #[test]
+    fn parse_cid_hex_accepts_typical() {
+        let v = parse_cid_hex("0001020304").unwrap();
+        assert_eq!(v, vec![0x00, 0x01, 0x02, 0x03, 0x04]);
+    }
+
+    #[test]
+    fn parse_cid_hex_rejects_empty() {
+        assert!(matches!(
+            parse_cid_hex(""),
+            Err(TargetError::ExtraArgs(_))
+        ));
+    }
+
+    #[test]
+    fn parse_cid_hex_rejects_odd_length() {
+        let err = parse_cid_hex("abc").unwrap_err();
+        assert!(matches!(err, TargetError::ExtraArgs(_)));
+    }
+
+    #[test]
+    fn parse_cid_hex_rejects_non_hex() {
+        let err = parse_cid_hex("ab0g").unwrap_err();
+        assert!(matches!(err, TargetError::ExtraArgs(_)));
     }
 }

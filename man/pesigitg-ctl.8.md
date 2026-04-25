@@ -72,6 +72,21 @@ require *status_socket* to be configured on the target daemon (see
     **/stats**). Path must start with **/**. Future daemon endpoints can
     be probed without a ctl update.
 
+**whoami** *cid-hex* [*target*]
+:   Decode a QUIC Connection ID against the daemon's live route table
+    and report which backend the flow would land on. Extracts the
+    *config_id* from the CID's first three bits, looks up the matching
+    route entry from **GET /config**, and renders *config_id*, scheme,
+    server-id length, nonce length, and the resolved server (address,
+    MAC, healthy/draining state). For *plaintext* schemes the server-id
+    is decoded directly. For *single_pass* and *four_pass* the verdict
+    reports the scheme but stops short of full decode: **/config**
+    deliberately does not expose encryption keys, and the offline-mode
+    flag for reading them from a route TOML directly is not yet wired
+    up. CIDs whose first octet encodes the reserved *config_id* 7
+    (e.g. pre-handshake / Initials with random CIDs) are flagged as
+    such.
+
 **watch** [*target*] [**-n** *SECS* | **--interval** *SECS*]
 :   Poll **/stats** at a fixed interval and print rate deltas: rx/s,
     fwd/s, cid/s, fallback/s, unrt/s, retry_iss/s. Default interval is
@@ -196,6 +211,11 @@ combine with *Restart=always* on the unit:
 Probe a status endpoint that does not yet have a dedicated subcommand:
 
     pesigitg-ctl endpoint /health eth0
+
+Decode a Connection ID against the live route table to see which backend
+it would route to:
+
+    pesigitg-ctl whoami 0000010102030405060708090a0b0c0d eth0
 
 Sweep stale pidfiles after an unclean shutdown:
 
