@@ -150,6 +150,12 @@ attempts to adopt them and falls back to cold boot if adoption fails
 (removing the stale pins first). To force a cold start manually, remove
 the pin root (see **FILES**) before invocation.
 
+The companion script **contrib/restart-drop.sh** drives a QUIC client
+across a SIGUSR2 handoff and reports per-phase failure counts; pass
+*--max-post-fail N* to make it return a non-zero exit code when the
+post-handoff drop window exceeds the threshold, turning it into an
+unattended acceptance test for handoff regressions.
+
 # TUNING
 
 Each AF_XDP worker owns one NIC RX queue and is pinned to one logical

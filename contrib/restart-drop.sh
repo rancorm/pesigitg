@@ -5,6 +5,7 @@
 # Runs in one of three roles:
 #
 #   restart-drop.sh client [-t TARGET] [-n COUNT] [-c PATH] [-l PATH] [-v]
+#                          [--max-post-fail N] [--max-overall-fail N]
 #     -t, --target HOST:P   LB endpoint (default: 127.0.0.1:443)
 #     -n, --count N         Total connections to attempt (default: 200)
 #     -c, --client PATH     quic-echo-client binary
@@ -12,6 +13,12 @@
 #     -l, --log PATH        Per-attempt log (TSV)
 #                           (default: /tmp/restart-drop-client.log)
 #     -v, --verbose         Print per-connection outcome
+#     --max-post-fail N     Fail (exit 3) if more than N of the first 5
+#                           post-handoff connections fail. Phase-2 acceptance
+#                           gate: cold-boot expects ~5; phase 1 a few; phase 2
+#                           "near-zero", typical threshold N=0 or 1.
+#     --max-overall-fail N  Fail (exit 3) if more than N total connections
+#                           fail across the whole run.
 #
 #   restart-drop.sh lb [-i INTF] [-s SOCKET] [-o PREFIX]
 #     -i, --interface INTF  Interface name (default: eth0)
@@ -51,9 +58,10 @@
 # time out waiting for readiness.
 #
 # Exit codes:
-#   0 — completed
+#   0 — completed (and any assertions passed, when set)
 #   1 — daemon not ready or did not respawn in time (lb role)
 #   2 — bad arguments / missing prerequisites
+#   3 — assertion failed (--max-post-fail or --max-overall-fail exceeded)
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2026 Jonathan Cormier
@@ -126,17 +134,29 @@ client_mode() {
     local client="$ROOT/target/release/quic-echo-client"
     local log="/tmp/restart-drop-client.log"
     local verbose=0
+    # Empty string means "no assertion"; non-empty must parse as integer.
+    local max_post_fail=""
+    local max_overall_fail=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            -t|--target)  target="$2"; shift 2 ;;
-            -n|--count)   count="$2"; shift 2 ;;
-            -c|--client)  client="$2"; shift 2 ;;
-            -l|--log)     log="$2"; shift 2 ;;
-            -v|--verbose) verbose=1; shift ;;
-            -h|--help)    usage; exit 0 ;;
+            -t|--target)            target="$2"; shift 2 ;;
+            -n|--count)             count="$2"; shift 2 ;;
+            -c|--client)            client="$2"; shift 2 ;;
+            -l|--log)               log="$2"; shift 2 ;;
+            -v|--verbose)           verbose=1; shift ;;
+            --max-post-fail)        max_post_fail="$2"; shift 2 ;;
+            --max-overall-fail)     max_overall_fail="$2"; shift 2 ;;
+            -h|--help)              usage; exit 0 ;;
             *) echo "Unknown option: $1" >&2; exit 2 ;;
         esac
+    done
+
+    for v in max_post_fail max_overall_fail; do
+        if [[ -n "${!v}" && ! "${!v}" =~ ^[0-9]+$ ]]; then
+            echo "Error: --${v//_/-} expects a non-negative integer, got '${!v}'" >&2
+            exit 2
+        fi
     done
 
     for tool in timeout awk; do
@@ -276,6 +296,29 @@ EOF
 
     echo
     echo "Per-attempt log: $log"
+
+    # Assertions — when set, gate the exit code on observed failure counts.
+    # Phase 2 expectation: post_window_fail near zero (handoff preserves the
+    # AF_XDP rebind window so packets in flight aren't dropped).
+    local assertion_failed=0
+    if [[ -n "$max_post_fail" ]]; then
+        echo
+        if (( post_window_fail > max_post_fail )); then
+            echo "ASSERT FAIL: post-handoff window failures $post_window_fail exceeds threshold $max_post_fail"
+            assertion_failed=1
+        else
+            echo "ASSERT PASS: post-handoff window failures $post_window_fail <= threshold $max_post_fail"
+        fi
+    fi
+    if [[ -n "$max_overall_fail" ]]; then
+        if (( fail > max_overall_fail )); then
+            echo "ASSERT FAIL: overall failures $fail exceeds threshold $max_overall_fail"
+            assertion_failed=1
+        else
+            echo "ASSERT PASS: overall failures $fail <= threshold $max_overall_fail"
+        fi
+    fi
+    (( assertion_failed )) && exit 3
 }
 
 # ---------- lb role ----------
