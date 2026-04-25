@@ -1,0 +1,126 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 Jonathan Cormier
+# This file is part of Pesigitg.
+#
+# Continuous integration matrix. Five parallel jobs, each gates merge:
+#
+#   lint        cargo fmt --check + cargo clippy -D warnings (stable)
+#   test        cargo test --workspace --all-targets         (stable)
+#   deny        cargo deny check against deny.toml           (stable)
+#   build       cargo xtask build (eBPF + daemon) + man pages
+#                 — stable userspace + pinned nightly for eBPF + bpf-linker + pandoc
+#   fuzz-smoke  cargo xtask fuzz <target> --smoke for each fuzz target (nightly)
+#
+# pesigitg-ebpf is excluded from the workspace and pins its own nightly via
+# pesigitg-ebpf/rust-toolchain.toml. The build job extracts that channel
+# string and installs it explicitly so this workflow stays the single source
+# of truth for the matrix while the toolchain pin stays in the eBPF crate.
+
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint:
+    name: fmt + clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo xtask lint
+
+  test:
+    name: cargo test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # build.rs falls back to a dummy eBPF object when PESIGITG_EBPF_OBJ
+      # is unset, so tests build without bpf-linker.
+      - run: cargo test --workspace --all-targets
+
+  deny:
+    name: cargo deny
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@cargo-deny
+      - run: cargo deny check
+
+  build:
+    name: xtask build (eBPF + daemon + man)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read pinned eBPF nightly
+        id: ebpf-toolchain
+        run: |
+          channel=$(grep '^channel' pesigitg-ebpf/rust-toolchain.toml | cut -d'"' -f2)
+          echo "channel=${channel}" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install pinned eBPF nightly
+        run: |
+          rustup toolchain install ${{ steps.ebpf-toolchain.outputs.channel }} \
+            --component rust-src
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Cache both the workspace target/ and the eBPF crate's separate
+          # target dir (it's outside the workspace).
+          workspaces: |
+            .
+            pesigitg-ebpf
+
+      - name: Install bpf-linker
+        uses: taiki-e/install-action@v2
+        with:
+          tool: bpf-linker
+
+      - name: Install pandoc
+        run: sudo apt-get update && sudo apt-get install -y pandoc
+
+      - run: cargo xtask build
+      - run: cargo xtask build-man
+
+  fuzz-smoke:
+    name: fuzz smoke (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - initial_parse
+          - config_parse
+          - packet_parse
+          - cid_extract
+          - cid_decrypt
+    steps:
+      - uses: actions/checkout@v4
+      # `xtask fuzz` hard-codes RUSTUP_TOOLCHAIN=nightly (the current
+      # nightly, not the eBPF-pinned one) because the fuzz harness needs
+      # `-Zsanitizer=address` and the libFuzzer build flags. Match that
+      # here.
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: fuzz-${{ matrix.target }}
+      - run: cargo xtask fuzz ${{ matrix.target }} --smoke
