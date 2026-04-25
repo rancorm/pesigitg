@@ -437,7 +437,10 @@ fn worker_loop_adopt(
     let ifindex = match crate::utils::if_nametoindex(interface) {
         Ok(i) => i,
         Err(e) => {
-            error!("worker q{}: if_nametoindex({}) failed: {:#}", queue_id, interface, e);
+            error!(
+                "worker q{}: if_nametoindex({}) failed: {:#}",
+                queue_id, interface, e
+            );
             return;
         }
     };

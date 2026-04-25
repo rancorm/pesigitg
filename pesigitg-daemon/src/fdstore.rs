@@ -79,8 +79,8 @@ impl InheritedFds {
 /// `LISTEN_FDS` is unset (cold boot — no handoff). Errors only on
 /// truly broken state (`LISTEN_PID` mismatch, malformed env).
 pub fn inherit_from_systemd() -> Result<InheritedFds> {
-    let entries = sd_notify::listen_fds_with_names(true)
-        .context("listen_fds_with_names from systemd")?;
+    let entries =
+        sd_notify::listen_fds_with_names(true).context("listen_fds_with_names from systemd")?;
 
     let mut socks: HashMap<u32, OwnedFd> = HashMap::new();
     let mut umems: HashMap<u32, OwnedFd> = HashMap::new();
@@ -145,8 +145,7 @@ pub fn export_to_systemd(fds: Vec<(u32, OwnedFd, OwnedFd)>) -> Result<usize> {
 
     let mut exported = 0;
     for (qid, sock, umem) in fds {
-        send_one(qid, &sock, &umem)
-            .with_context(|| format!("FDSTORE export for queue {qid}"))?;
+        send_one(qid, &sock, &umem).with_context(|| format!("FDSTORE export for queue {qid}"))?;
         exported += 1;
         // Explicit drop is implicit at end of iteration; comment
         // for the reader: the fds close here, but systemd already

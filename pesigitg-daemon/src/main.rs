@@ -70,8 +70,7 @@ fn main() -> Result<()> {
         None
     };
 
-    let mut signals =
-        SignalsInfo::<WithOrigin>::new(&[SIGINT, SIGTERM, SIGHUP, SIGUSR1, SIGUSR2])?;
+    let mut signals = SignalsInfo::<WithOrigin>::new(&[SIGINT, SIGTERM, SIGHUP, SIGUSR1, SIGUSR2])?;
     let sig_handle = signals.handle();
     let (sig_tx, sig_rx) = mpsc::sync_channel::<Origin>(10);
 

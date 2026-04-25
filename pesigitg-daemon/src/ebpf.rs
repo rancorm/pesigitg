@@ -22,10 +22,10 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow, bail};
+use aya::EbpfLoader;
 use aya::maps::{HashMap, Map, MapData, XskMap};
 use aya::programs::links::{FdLink, PinnedLink};
 use aya::programs::{Xdp, XdpFlags};
-use aya::EbpfLoader;
 use log::{debug, info, warn};
 
 /// Force 8-byte alignment for the embedded eBPF ELF object.
@@ -63,8 +63,8 @@ impl EbpfHandle {
     /// The socket must be bound to the same queue — packets arriving on
     /// a different queue will be dropped by the kernel.
     pub fn register_xsk(&mut self, queue_id: u32, socket_fd: impl AsRawFd) -> Result<()> {
-        let mut xsk_map: XskMap<_> = XskMap::try_from(&mut self.xsks)
-            .context("failed to wrap XSKS map as XskMap")?;
+        let mut xsk_map: XskMap<_> =
+            XskMap::try_from(&mut self.xsks).context("failed to wrap XSKS map as XskMap")?;
 
         xsk_map
             .set(queue_id, socket_fd, 0)
@@ -85,7 +85,10 @@ impl EbpfHandle {
 impl Drop for EbpfHandle {
     fn drop(&mut self) {
         if self.handoff {
-            debug!("handoff shutdown: leaving pins at {}", self.pin_root.display());
+            debug!(
+                "handoff shutdown: leaving pins at {}",
+                self.pin_root.display()
+            );
             return;
         }
 
@@ -182,7 +185,10 @@ fn cold_boot_ebpf(
         .context("failed to attach XDP program to interface")?;
 
     info!("XDP program attached to '{}'", interface);
-    debug!("XDP program load+attach took {:.2?}", attach_start.elapsed());
+    debug!(
+        "XDP program load+attach took {:.2?}",
+        attach_start.elapsed()
+    );
 
     // Pin the link so the program stays attached across daemon exit
     // (until a cold shutdown explicitly unpins).
@@ -229,10 +235,10 @@ fn adopt_ebpf(pin_root: &Path, ports: &[u16]) -> Result<EbpfHandle> {
     let pinned = PinnedLink::from_pin(&link_pin_path)
         .with_context(|| format!("failed to open link pin at {}", link_pin_path.display()))?;
 
-    let xsks_data = MapData::from_pin(pin_root.join(XSKS_MAP_NAME))
-        .context("failed to open XSKS map pin")?;
-    let ports_data = MapData::from_pin(pin_root.join(PORTS_MAP_NAME))
-        .context("failed to open PORTS map pin")?;
+    let xsks_data =
+        MapData::from_pin(pin_root.join(XSKS_MAP_NAME)).context("failed to open XSKS map pin")?;
+    let ports_data =
+        MapData::from_pin(pin_root.join(PORTS_MAP_NAME)).context("failed to open PORTS map pin")?;
 
     let mut handle = EbpfHandle {
         xsks: Map::XskMap(xsks_data),
@@ -252,15 +258,12 @@ fn adopt_ebpf(pin_root: &Path, ports: &[u16]) -> Result<EbpfHandle> {
 /// remove stale. Invariant for cold-boot (map is empty) and adopt (map
 /// may carry entries from a previous generation).
 fn reconcile_ports(ports_map: &mut Map, configured: &[u16]) -> Result<()> {
-    let mut port_map: HashMap<_, u16, u8> = HashMap::try_from(ports_map)
-        .context("failed to wrap PORTS map as HashMap")?;
+    let mut port_map: HashMap<_, u16, u8> =
+        HashMap::try_from(ports_map).context("failed to wrap PORTS map as HashMap")?;
 
     let configured_set: HashSet<u16> = configured.iter().copied().collect();
 
-    let live: HashSet<u16> = port_map
-        .keys()
-        .filter_map(|k| k.ok())
-        .collect();
+    let live: HashSet<u16> = port_map.keys().filter_map(|k| k.ok()).collect();
 
     for port in live.difference(&configured_set) {
         port_map

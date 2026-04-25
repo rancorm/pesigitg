@@ -217,8 +217,8 @@ impl AdoptedSocket {
         let fd = socket_af_xdp().context("socket(AF_XDP, SOCK_RAW)")?;
 
         let umem_len = (frame_count as usize) * (chunk_size as usize);
-        let umem = umem_create(umem_len, frame_count, chunk_size)
-            .context("creating memfd-backed UMEM")?;
+        let umem =
+            umem_create(umem_len, frame_count, chunk_size).context("creating memfd-backed UMEM")?;
 
         let reg = xdp_umem_reg {
             addr: umem.addr.as_ptr() as u64,
@@ -349,9 +349,8 @@ impl AdoptedSocket {
         let offset = desc.addr as usize;
         // SAFETY: caller asserts `desc` belongs to this UMEM, so
         // `offset..offset + chunk_size` lies within the mapping.
-        let buf = unsafe {
-            slice::from_raw_parts_mut(self.umem.addr.as_ptr().add(offset), chunk_size)
-        };
+        let buf =
+            unsafe { slice::from_raw_parts_mut(self.umem.addr.as_ptr().add(offset), chunk_size) };
         AdoptedFrame {
             buf,
             len: &mut desc.len,
@@ -679,8 +678,8 @@ fn ring_mmap<T>(
     if addr == MAP_FAILED {
         return Err(io::Error::last_os_error()).context("mmap(ring)");
     }
-    let map_addr = NonNull::new(addr)
-        .expect("mmap returned non-MAP_FAILED but null, which should not happen");
+    let map_addr =
+        NonNull::new(addr).expect("mmap returned non-MAP_FAILED but null, which should not happen");
     let base = addr.cast::<u8>();
 
     Ok(Ring {
