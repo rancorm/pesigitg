@@ -2,9 +2,10 @@
 
 > *Pesigitg* /be·se·gitk/ (Mi'kmaq) — "a fork in a river"
 
-## What
+## What is it?
 
-A high-performance QUIC-aware load balancer written in Rust, using eBPF and AF_XDP for kernel-bypass packet forwarding.
+A high-performance QUIC-aware load balancer written in Rust, using eBPF and AF_XDP
+for kernel-bypass packet forwarding.
 
 ### Ideation
 

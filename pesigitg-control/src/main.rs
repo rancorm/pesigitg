@@ -19,11 +19,14 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fmt::{self, Display};
 use std::fs;
-use std::io;
+use std::io::{self, Read, Write};
+use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::time::Duration;
 
 use pico_args::Arguments;
+use serde_json::Value;
 
 use pesigitg_common::{PID_DIR, PROC_NAME};
 
@@ -32,11 +35,15 @@ const PIDFILE_PREFIX: &str = "pesigitgd-";
 const PIDFILE_SUFFIX: &str = ".pid";
 const SOCKET_PREFIX: &str = "status-";
 const SOCKET_SUFFIX: &str = ".sock";
+const SOCKET_TIMEOUT: Duration = Duration::from_secs(5);
 
 type CmdFn = fn(&[String]) -> Result<(), TargetError>;
 
+#[derive(Debug)]
 struct Cmd {
     name: &'static str,
+    aliases: &'static [&'static str],
+    summary: &'static str,
     run: CmdFn,
 }
 
@@ -54,6 +61,9 @@ enum TargetError {
     NotAPesigitgdProcess(u32),
     NoStatusSocket(String),
     Io(io::Error),
+    ExtraArgs(String),
+    BadResponse(String),
+    RemoteError(String),
 }
 
 impl Display for TargetError {
@@ -77,6 +87,9 @@ impl Display for TargetError {
                 )
             }
             TargetError::Io(e) => write!(f, "i/o error: {}", e),
+            TargetError::ExtraArgs(s) => write!(f, "{}", s),
+            TargetError::BadResponse(s) => write!(f, "bad response from daemon: {}", s),
+            TargetError::RemoteError(s) => write!(f, "daemon error: {}", s),
         }
     }
 }
@@ -372,7 +385,113 @@ fn to_resolved(i: &Instance) -> Option<ResolvedTarget> {
     })
 }
 
-fn cmd_list(_args: &[String]) -> Result<(), TargetError> {
+// ----- Argument helpers -----
+
+fn expect_no_args(args: &[String]) -> Result<(), TargetError> {
+    if !args.is_empty() {
+        return Err(TargetError::ExtraArgs(format!(
+            "unexpected argument(s): {}",
+            args.join(" ")
+        )));
+    }
+    Ok(())
+}
+
+fn expect_optional_target(args: &[String]) -> Result<Option<&str>, TargetError> {
+    if args.len() > 1 {
+        return Err(TargetError::ExtraArgs(format!(
+            "expected at most one target, got: {}",
+            args.join(" ")
+        )));
+    }
+    Ok(args.first().map(String::as_str))
+}
+
+// ----- Status API client -----
+
+/// Open the per-instance status socket, send `GET <path>\n`, parse the
+/// JSON reply. Surfaces `{"error": "..."}` shapes as `RemoteError`.
+fn query_endpoint(
+    target: Option<&str>,
+    path: &str,
+) -> Result<(ResolvedTarget, Value), TargetError> {
+    let resolved = resolve(target)?;
+    let socket = resolved
+        .status_socket
+        .as_ref()
+        .ok_or_else(|| TargetError::NoStatusSocket(resolved.interface.clone()))?;
+
+    let mut stream = UnixStream::connect(socket)?;
+
+    stream.set_read_timeout(Some(SOCKET_TIMEOUT))?;
+    stream.set_write_timeout(Some(SOCKET_TIMEOUT))?;
+    writeln!(stream, "GET {}", path)?;
+
+    let mut buf = String::new();
+    stream.read_to_string(&mut buf)?;
+
+    let trimmed = buf.trim();
+    let value: Value = serde_json::from_str(trimmed)
+        .map_err(|e| TargetError::BadResponse(format!("{}: {:?}", e, trimmed)))?;
+
+    if let Some(msg) = value.get("error").and_then(|v| v.as_str()) {
+        return Err(TargetError::RemoteError(msg.to_string()));
+    }
+
+    Ok((resolved, value))
+}
+
+fn print_pretty(v: &Value) {
+    match serde_json::to_string_pretty(v) {
+        Ok(s) => println!("{}", s),
+        Err(_) => println!("{}", v),
+    }
+}
+
+fn print_health_summary(target: &ResolvedTarget, v: &Value) {
+    let status = v.get("status").and_then(|s| s.as_str()).unwrap_or("?");
+    let uptime = v.get("uptime_secs").and_then(|n| n.as_u64());
+    let alive = v.get("workers_alive").and_then(|n| n.as_u64());
+    let expected = v.get("workers_expected").and_then(|n| n.as_u64());
+
+    let mut parts = vec![status.to_string()];
+
+    if let Some(u) = uptime {
+        parts.push(format!("uptime {}", format_duration(u)));
+    }
+    if let (Some(a), Some(e)) = (alive, expected) {
+        parts.push(format!("workers {}/{}", a, e));
+    }
+
+    println!(
+        "{} (pid {}): {}",
+        target.interface,
+        target.pid,
+        parts.join(", ")
+    );
+}
+
+fn format_duration(secs: u64) -> String {
+    if secs < 60 {
+        return format!("{}s", secs);
+    }
+    let (m, s) = (secs / 60, secs % 60);
+    if m < 60 {
+        return format!("{}m{}s", m, s);
+    }
+    let (h, m) = (m / 60, m % 60);
+    if h < 24 {
+        return format!("{}h{}m", h, m);
+    }
+    let (d, h) = (h / 24, h % 24);
+    format!("{}d{}h", d, h)
+}
+
+// ----- Commands -----
+
+fn cmd_list(args: &[String]) -> Result<(), TargetError> {
+    expect_no_args(args)?;
+
     let instances = discover_instances();
     let (named, unnamed): (Vec<_>, Vec<_>) =
         instances.into_iter().partition(|i| i.interface.is_some());
@@ -448,13 +567,17 @@ fn cmd_list(_args: &[String]) -> Result<(), TargetError> {
     Ok(())
 }
 
-fn cmd_version(_args: &[String]) -> Result<(), TargetError> {
+fn cmd_version(args: &[String]) -> Result<(), TargetError> {
+    expect_no_args(args)?;
+
     println!("{}", env!("CARGO_PKG_VERSION"));
 
     Ok(())
 }
 
-fn cmd_paths(_args: &[String]) -> Result<(), TargetError> {
+fn cmd_paths(args: &[String]) -> Result<(), TargetError> {
+    expect_no_args(args)?;
+
     println!("pidfile dir:    {}", PID_DIR);
     println!("runtime dir:    {}", RUN_DIR);
     println!("bpffs pin root: /sys/fs/bpf/pesigitg/<interface>/");
@@ -462,8 +585,8 @@ fn cmd_paths(_args: &[String]) -> Result<(), TargetError> {
     Ok(())
 }
 
-fn cmd_hub(args: &[String]) -> Result<(), TargetError> {
-    let target = resolve(args.first().map(String::as_str))?;
+fn cmd_hup(args: &[String]) -> Result<(), TargetError> {
+    let target = resolve(expect_optional_target(args)?)?;
 
     send_signal(target.pid, libc::SIGHUP)?;
 
@@ -472,18 +595,147 @@ fn cmd_hub(args: &[String]) -> Result<(), TargetError> {
     Ok(())
 }
 
-fn cmd_status(args: &[String]) -> Result<(), TargetError> {
-    let target = resolve(args.first().map(String::as_str))?;
-    let socket = target
-        .status_socket
-        .as_ref()
-        .ok_or_else(|| TargetError::NoStatusSocket(target.interface.clone()))?;
+fn cmd_stop(args: &[String]) -> Result<(), TargetError> {
+    let target = resolve(expect_optional_target(args)?)?;
 
-    // TODO: actually query /stats, /config, /health over the socket.
+    send_signal(target.pid, libc::SIGTERM)?;
 
-    println!("socket: {}", socket.display());
+    println!("sent SIGTERM to {} (pid {})", target.interface, target.pid);
 
     Ok(())
+}
+
+fn cmd_dump_stats(args: &[String]) -> Result<(), TargetError> {
+    let target = resolve(expect_optional_target(args)?)?;
+
+    send_signal(target.pid, libc::SIGUSR1)?;
+
+    println!("sent SIGUSR1 to {} (pid {})", target.interface, target.pid);
+
+    Ok(())
+}
+
+fn cmd_restart(args: &[String]) -> Result<(), TargetError> {
+    let target = resolve(expect_optional_target(args)?)?;
+
+    send_signal(target.pid, libc::SIGUSR2)?;
+
+    println!(
+        "sent SIGUSR2 to {} (pid {}); daemon will hand off to a fresh instance",
+        target.interface, target.pid
+    );
+
+    Ok(())
+}
+
+fn cmd_status(args: &[String]) -> Result<(), TargetError> {
+    let (resolved, value) = query_endpoint(expect_optional_target(args)?, "/health")?;
+
+    print_health_summary(&resolved, &value);
+
+    Ok(())
+}
+
+fn cmd_health(args: &[String]) -> Result<(), TargetError> {
+    let (_, v) = query_endpoint(expect_optional_target(args)?, "/health")?;
+
+    print_pretty(&v);
+
+    Ok(())
+}
+
+fn cmd_stats(args: &[String]) -> Result<(), TargetError> {
+    let (_, v) = query_endpoint(expect_optional_target(args)?, "/stats")?;
+
+    print_pretty(&v);
+
+    Ok(())
+}
+
+fn cmd_config(args: &[String]) -> Result<(), TargetError> {
+    let (_, v) = query_endpoint(expect_optional_target(args)?, "/config")?;
+
+    print_pretty(&v);
+
+    Ok(())
+}
+
+fn cmd_info(args: &[String]) -> Result<(), TargetError> {
+    let (_, v) = query_endpoint(expect_optional_target(args)?, "/version")?;
+
+    print_pretty(&v);
+
+    Ok(())
+}
+
+/// `endpoint <path> [target]` — escape hatch for any future status
+/// endpoint without a dedicated subcommand. Path must start with `/`.
+fn cmd_endpoint(args: &[String]) -> Result<(), TargetError> {
+    if args.is_empty() {
+        return Err(TargetError::ExtraArgs(
+            "endpoint requires a path argument (e.g. /stats)".into(),
+        ));
+    }
+    if args.len() > 2 {
+        return Err(TargetError::ExtraArgs(format!(
+            "expected '<path> [target]', got: {}",
+            args.join(" ")
+        )));
+    }
+
+    let path = &args[0];
+
+    if !path.starts_with('/') {
+        return Err(TargetError::ExtraArgs(format!(
+            "endpoint path must start with '/', got '{}'",
+            path
+        )));
+    }
+
+    let target = args.get(1).map(String::as_str);
+    let (_, v) = query_endpoint(target, path)?;
+
+    print_pretty(&v);
+
+    Ok(())
+}
+
+fn cmd_help(args: &[String]) -> Result<(), TargetError> {
+    expect_no_args(args)?;
+
+    print_usage();
+
+    Ok(())
+}
+
+fn print_usage() {
+    println!("pesigitg-ctl — control utility for pesigitgd instances");
+    println!();
+    println!("Usage: pesigitg-ctl <command> [args]");
+    println!("       pesigitg-ctl -h | --help");
+    println!("       pesigitg-ctl -V | --version");
+    println!();
+    println!("Commands:");
+
+    let width = CMDS.iter().map(|c| c.name.len()).max().unwrap_or(0);
+
+    for c in CMDS {
+        println!("  {:<w$}  {}", c.name, c.summary, w = width);
+
+        if !c.aliases.is_empty() {
+            println!(
+                "  {:<w$}  (aliases: {})",
+                "",
+                c.aliases.join(", "),
+                w = width
+            );
+        }
+    }
+
+    println!();
+    println!("A unique prefix is accepted (e.g. 'co' → config, 'res' → restart).");
+    println!("Targets are an interface name (e.g. eth0) or a pid. With exactly");
+    println!("one running instance, the target may be omitted.");
 }
 
 fn send_signal(pid: u32, sig: libc::c_int) -> Result<(), TargetError> {
@@ -502,25 +754,119 @@ fn send_signal(pid: u32, sig: libc::c_int) -> Result<(), TargetError> {
 static CMDS: &[Cmd] = &[
     Cmd {
         name: "list",
+        aliases: &[],
+        summary: "list discovered pesigitgd instances",
         run: cmd_list,
     },
     Cmd {
+        name: "status",
+        aliases: &[],
+        summary: "one-line health summary for a target",
+        run: cmd_status,
+    },
+    Cmd {
+        name: "health",
+        aliases: &[],
+        summary: "fetch /health JSON",
+        run: cmd_health,
+    },
+    Cmd {
+        name: "stats",
+        aliases: &[],
+        summary: "fetch /stats JSON",
+        run: cmd_stats,
+    },
+    Cmd {
+        name: "config",
+        aliases: &[],
+        summary: "fetch /config JSON (live daemon args + route table)",
+        run: cmd_config,
+    },
+    Cmd {
+        name: "info",
+        aliases: &[],
+        summary: "fetch /version JSON from the daemon (build identifiers)",
+        run: cmd_info,
+    },
+    Cmd {
+        name: "endpoint",
+        aliases: &[],
+        summary: "fetch an arbitrary status endpoint: endpoint <path> [target]",
+        run: cmd_endpoint,
+    },
+    Cmd {
+        name: "hup",
+        aliases: &["reload"],
+        summary: "send SIGHUP (reload daemon + route config, reset health backoff)",
+        run: cmd_hup,
+    },
+    Cmd {
+        name: "stop",
+        aliases: &[],
+        summary: "send SIGTERM (graceful shutdown)",
+        run: cmd_stop,
+    },
+    Cmd {
+        name: "dump-stats",
+        aliases: &["usr1"],
+        summary: "send SIGUSR1 (log a stats snapshot)",
+        run: cmd_dump_stats,
+    },
+    Cmd {
+        name: "restart",
+        aliases: &["usr2", "handoff"],
+        summary: "send SIGUSR2 (zero-drop handoff to a fresh process)",
+        run: cmd_restart,
+    },
+    Cmd {
         name: "version",
+        aliases: &[],
+        summary: "print this control utility's version",
         run: cmd_version,
     },
     Cmd {
         name: "paths",
+        aliases: &[],
+        summary: "show pidfile, runtime, and bpffs pin paths",
         run: cmd_paths,
     },
     Cmd {
-        name: "hub",
-        run: cmd_hub,
-    },
-    Cmd {
-        name: "status",
-        run: cmd_status,
+        name: "help",
+        aliases: &[],
+        summary: "show this help",
+        run: cmd_help,
     },
 ];
+
+/// Resolve a command name. Exact matches (including aliases) win; if
+/// none, fall back to a unique prefix on the primary name. Ambiguous
+/// prefixes are an error so we never silently pick `status` over
+/// `stats` based on table order.
+fn find_cmd(name: &str) -> Result<&'static Cmd, String> {
+    for c in CMDS {
+        if c.name == name || c.aliases.contains(&name) {
+            return Ok(c);
+        }
+    }
+
+    let matches: Vec<&'static Cmd> = CMDS.iter().filter(|c| c.name.starts_with(name)).collect();
+
+    match matches.len() {
+        1 => Ok(matches[0]),
+        0 => Err(format!(
+            "unknown command: {} (try `pesigitg-ctl help`)",
+            name
+        )),
+        _ => {
+            let names: Vec<&str> = matches.iter().map(|c| c.name).collect();
+            Err(format!(
+                "ambiguous command '{}' (matches: {})",
+                name,
+                names.join(", ")
+            ))
+        }
+    }
+}
 
 fn convert(args: Vec<OsString>) -> Vec<String> {
     args.into_iter()
@@ -531,15 +877,22 @@ fn convert(args: Vec<OsString>) -> Vec<String> {
 fn main() -> Result<(), String> {
     let mut pargs = Arguments::from_env();
 
+    if pargs.contains(["-h", "--help"]) {
+        print_usage();
+
+        return Ok(());
+    }
+    if pargs.contains(["-V", "--version"]) {
+        println!("{}", env!("CARGO_PKG_VERSION"));
+
+        return Ok(());
+    }
+
     let cmd_name: String = pargs
         .free_from_str()
-        .map_err(|_| "missing command".to_string())?;
+        .map_err(|_| "missing command (try `pesigitg-ctl help`)".to_string())?;
 
-    let cmd = CMDS
-        .iter()
-        .find(|c| c.name.starts_with(&cmd_name))
-        .ok_or_else(|| format!("unknown command: {}", cmd_name))?;
-
+    let cmd = find_cmd(&cmd_name)?;
     let raw = pargs.finish();
     let args = convert(raw);
 
@@ -647,5 +1000,81 @@ mod tests {
             Target::Interface("eth0".to_string())
         );
         assert_eq!(" 42 ".parse::<Target>().unwrap(), Target::Pid(42));
+    }
+
+    #[test]
+    fn find_cmd_exact_match_wins_over_prefix() {
+        // `stats` is an exact match even though `status` shares its
+        // first four letters; alias/exact resolution must run first.
+        let c = find_cmd("stats").unwrap();
+        assert_eq!(c.name, "stats");
+    }
+
+    #[test]
+    fn find_cmd_alias_resolves_to_primary() {
+        assert_eq!(find_cmd("reload").unwrap().name, "hup");
+        assert_eq!(find_cmd("usr1").unwrap().name, "dump-stats");
+        assert_eq!(find_cmd("usr2").unwrap().name, "restart");
+        assert_eq!(find_cmd("handoff").unwrap().name, "restart");
+    }
+
+    #[test]
+    fn find_cmd_unique_prefix() {
+        assert_eq!(find_cmd("hu").unwrap().name, "hup");
+        assert_eq!(find_cmd("co").unwrap().name, "config");
+        assert_eq!(find_cmd("res").unwrap().name, "restart");
+    }
+
+    #[test]
+    fn find_cmd_ambiguous_prefix_rejected() {
+        // `s` matches status, stats, stop — must error rather than pick
+        // whichever sits first in the table.
+        let err = find_cmd("s").unwrap_err();
+        assert!(err.contains("ambiguous"), "got: {}", err);
+    }
+
+    #[test]
+    fn find_cmd_unknown() {
+        let err = find_cmd("nope").unwrap_err();
+        assert!(err.contains("unknown"), "got: {}", err);
+    }
+
+    #[test]
+    fn expect_no_args_accepts_empty() {
+        assert!(expect_no_args(&[]).is_ok());
+    }
+
+    #[test]
+    fn expect_no_args_rejects_extras() {
+        let args = vec!["x".to_string()];
+        assert!(matches!(
+            expect_no_args(&args),
+            Err(TargetError::ExtraArgs(_))
+        ));
+    }
+
+    #[test]
+    fn expect_optional_target_zero_or_one() {
+        assert_eq!(expect_optional_target(&[]).unwrap(), None);
+        let one = vec!["eth0".to_string()];
+        assert_eq!(expect_optional_target(&one).unwrap(), Some("eth0"));
+    }
+
+    #[test]
+    fn expect_optional_target_rejects_two() {
+        let two = vec!["eth0".to_string(), "extra".to_string()];
+        assert!(matches!(
+            expect_optional_target(&two),
+            Err(TargetError::ExtraArgs(_))
+        ));
+    }
+
+    #[test]
+    fn format_duration_units() {
+        assert_eq!(format_duration(0), "0s");
+        assert_eq!(format_duration(59), "59s");
+        assert_eq!(format_duration(60), "1m0s");
+        assert_eq!(format_duration(3600), "1h0m");
+        assert_eq!(format_duration(86_400), "1d0h");
     }
 }

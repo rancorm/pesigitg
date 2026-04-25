@@ -15,3 +15,4 @@ pesigitg-common = { workspace = true, features = ["std"] }
 
 pico-args = { workspace = true }
 libc = "0.2"
+serde_json = "1"

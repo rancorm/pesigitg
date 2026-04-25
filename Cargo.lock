@@ -1039,6 +1039,7 @@ dependencies = [
  "libc",
  "pesigitg-common",
  "pico-args",
+ "serde_json",
 ]
 
 [[package]]

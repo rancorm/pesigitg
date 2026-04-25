@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# hub.sh [Send HUP signal to per-interface daemon process]
+# hup.sh [Send HUP signal to per-interface daemon process]
 #
 set -euo pipefail
 
