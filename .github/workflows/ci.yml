@@ -37,6 +37,9 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      # libbpf-sys (transitive via xsk-rs) builds vendored libbpf, which
+      # needs libelf headers. ubuntu-latest doesn't ship libelf-dev.
+      - run: sudo apt-get update && sudo apt-get install -y libelf-dev
       - run: cargo xtask lint
 
   test:
@@ -47,6 +50,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # See lint job for libelf-dev rationale.
+      - run: sudo apt-get update && sudo apt-get install -y libelf-dev
       # build.rs falls back to a dummy eBPF object when PESIGITG_EBPF_OBJ
       # is unset, so tests build without bpf-linker.
       - run: cargo test --workspace --all-targets
@@ -94,8 +99,8 @@ jobs:
         with:
           tool: bpf-linker
 
-      - name: Install pandoc
-        run: sudo apt-get update && sudo apt-get install -y pandoc
+      - name: Install pandoc and libelf-dev
+        run: sudo apt-get update && sudo apt-get install -y pandoc libelf-dev
 
       - run: cargo xtask build
       - run: cargo xtask build-man
@@ -123,4 +128,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: fuzz-${{ matrix.target }}
+      # See lint job for libelf-dev rationale.
+      - run: sudo apt-get update && sudo apt-get install -y libelf-dev
       - run: cargo xtask fuzz ${{ matrix.target }} --smoke
