@@ -60,17 +60,12 @@ enum FdKind {
 /// FDs inherited from systemd's per-service FD store, paired by
 /// queue id. Sockfd and UMEM memfd come together; orphans of either
 /// kind are discarded with a warning.
+#[derive(Default)]
 pub struct InheritedFds {
     pub by_queue: HashMap<u32, (OwnedFd, OwnedFd)>,
 }
 
 impl InheritedFds {
-    pub fn empty() -> Self {
-        Self {
-            by_queue: HashMap::new(),
-        }
-    }
-
     pub fn is_empty(&self) -> bool {
         self.by_queue.is_empty()
     }

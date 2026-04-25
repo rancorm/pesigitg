@@ -14,7 +14,7 @@
 //! variant produces. Both implement [`crate::frame::FrameView`] so
 //! the retry datapath can stay generic.
 
-use std::os::fd::{OwnedFd, RawFd};
+use std::os::fd::OwnedFd;
 
 use libc::xdp_desc;
 use xsk_rs::FrameDesc;
@@ -39,9 +39,6 @@ pub trait AfXdpSocket {
     /// `Default` impl; `xdp_desc` does not, so this is a trait
     /// method rather than a `Default` bound.
     fn zero_frame() -> Self::Frame;
-
-    /// FD for `XSKS` map registration.
-    fn raw_fd(&self) -> RawFd;
 
     /// Drain the RX ring into `descs`. Returns the count written.
     fn poll_recv(&mut self, descs: &mut [Self::Frame], timeout_ms: i32) -> usize;
@@ -85,10 +82,6 @@ impl AfXdpSocket for XskSocket {
         FrameDesc::default()
     }
 
-    fn raw_fd(&self) -> RawFd {
-        XskSocket::raw_fd(self)
-    }
-
     fn poll_recv(&mut self, descs: &mut [Self::Frame], timeout_ms: i32) -> usize {
         XskSocket::poll_recv(self, descs, timeout_ms)
     }
@@ -129,10 +122,6 @@ impl AfXdpSocket for AdoptedSocket {
             len: 0,
             options: 0,
         }
-    }
-
-    fn raw_fd(&self) -> RawFd {
-        AdoptedSocket::raw_fd(self)
     }
 
     fn poll_recv(&mut self, descs: &mut [Self::Frame], timeout_ms: i32) -> usize {
