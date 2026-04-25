@@ -4,9 +4,10 @@
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
-use std::os::fd::BorrowedFd;
+use std::os::fd::{BorrowedFd, OwnedFd};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -19,12 +20,14 @@ use nix::unistd::Pid;
 use crate::config::route::ConfigTable;
 use crate::conntable::ConnectionTable;
 use crate::ebpf::EbpfHandle;
+use crate::fdstore::InheritedFds;
 use crate::frame::FrameView;
 use crate::packet::{self, Verdict};
 use crate::retry;
 use crate::stats::{BatchStats, StatsTable, WorkerStats};
 use crate::utils::num_cores;
 use crate::worker_socket::AfXdpSocket;
+use crate::xdp_adopt::{self, AdoptedSocket, DEFAULT_CHUNK_SIZE, DEFAULT_FRAME_COUNT};
 use crate::xsk::XskSocket;
 
 const ETHTOOL_GCHANNELS: u32 = 0x0000003c;
@@ -183,6 +186,11 @@ pub struct WorkerPool {
     workers: Vec<Worker>,
     shutdown: Arc<AtomicBool>,
     health: Arc<WorkerHealth>,
+    /// Receives `(queue_id, sockfd, umem_fd)` triples from workers
+    /// whose AF_XDP socket flavour can survive a SIGUSR2 handoff
+    /// (see [`AfXdpSocket::detach_for_fdstore`]). Drained on
+    /// `shutdown_for_handoff`; discarded by `shutdown`.
+    fd_rx: mpsc::Receiver<(u32, OwnedFd, OwnedFd)>,
 }
 
 impl WorkerPool {
@@ -190,6 +198,13 @@ impl WorkerPool {
     ///
     /// Each thread is pinned to its assigned CPU core and processes
     /// packets from the corresponding NIC queue via AF_XDP.
+    ///
+    /// `inherited` carries `(sockfd, umem_fd)` pairs handed in from
+    /// systemd's FDSTORE across a SIGUSR2 handoff. For each queue
+    /// whose id appears in `inherited`, the worker rehydrates the
+    /// socket via [`AdoptedSocket::adopt`] instead of cold-creating
+    /// it; queues without a matching entry follow the cold-boot path.
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn(
         threads: Vec<ThreadConfig>,
         interface: &str,
@@ -198,8 +213,10 @@ impl WorkerPool {
         ebpf: Arc<Mutex<EbpfHandle>>,
         shutdown: Arc<AtomicBool>,
         stats: Arc<StatsTable>,
+        mut inherited: InheritedFds,
     ) -> Self {
         let mut workers = Vec::with_capacity(threads.len());
+        let (fd_tx, fd_rx) = mpsc::channel::<(u32, OwnedFd, OwnedFd)>();
 
         for (worker_idx, tc) in threads.into_iter().enumerate() {
             let shutdown = Arc::clone(&shutdown);
@@ -208,6 +225,8 @@ impl WorkerPool {
             let stats = Arc::clone(&stats);
             let interface = interface.to_owned();
             let queue_id = tc.queue_id;
+            let inherited_pair = inherited.by_queue.remove(&queue_id);
+            let fd_tx = fd_tx.clone();
 
             let handle = thread::Builder::new()
                 .name(format!("xdp-q{}", tc.queue_id))
@@ -222,15 +241,30 @@ impl WorkerPool {
 
                     info!("worker q{}: started on core {}", tc.queue_id, tc.core_id);
 
-                    worker_loop(
-                        &interface,
-                        tc.queue_id,
-                        &local_mac,
-                        &config,
-                        &ebpf,
-                        &shutdown,
-                        stats.slot(worker_idx),
-                    );
+                    match inherited_pair {
+                        Some((sockfd, umem_fd)) => worker_loop_adopt(
+                            &interface,
+                            tc.queue_id,
+                            sockfd,
+                            umem_fd,
+                            &local_mac,
+                            &config,
+                            &ebpf,
+                            &shutdown,
+                            stats.slot(worker_idx),
+                            fd_tx,
+                        ),
+                        None => worker_loop(
+                            &interface,
+                            tc.queue_id,
+                            &local_mac,
+                            &config,
+                            &ebpf,
+                            &shutdown,
+                            stats.slot(worker_idx),
+                            fd_tx,
+                        ),
+                    }
 
                     info!("worker q{}: exiting", tc.queue_id);
                 })
@@ -238,6 +272,20 @@ impl WorkerPool {
 
             workers.push(Worker { queue_id, handle });
         }
+
+        // Any inherited FD that didn't match a queue plan gets dropped
+        // here, closing the FD. This is the "kept stale FDs in
+        // FDSTORE" recovery path: nothing references them anymore.
+        for (qid, _) in inherited.by_queue.drain() {
+            warn!(
+                "FDSTORE held inherited FDs for queue {} but no worker is planned for it; dropping",
+                qid
+            );
+        }
+
+        // Drop the original tx so the channel closes once every
+        // worker thread (and thus every cloned tx) has exited.
+        drop(fd_tx);
 
         let health = Arc::new(WorkerHealth {
             expected: workers.len(),
@@ -248,6 +296,7 @@ impl WorkerPool {
             workers,
             shutdown,
             health,
+            fd_rx,
         }
     }
 
@@ -281,18 +330,50 @@ impl WorkerPool {
     }
 
     /// Signal all workers to stop and wait for them to finish.
+    /// Cold path: any FDs workers offered via the FDSTORE channel
+    /// are discarded (and closed on drop).
     pub fn shutdown(&mut self) {
         self.shutdown.store(true, Ordering::Relaxed);
 
         for w in self.workers.drain(..) {
             let _ = w.handle.join();
         }
+
+        // Drain so the FDs are closed deterministically rather than
+        // sitting in the channel until the pool itself drops.
+        while self.fd_rx.try_recv().is_ok() {}
+    }
+
+    /// Handoff variant of [`shutdown`]: stops workers and returns
+    /// every `(queue_id, sockfd, umem_fd)` triple they detached for
+    /// FDSTORE export. Workers whose socket flavour is not
+    /// memfd-backed (xsk-rs cold-boot) contribute nothing.
+    ///
+    /// Caller is expected to feed the result straight into
+    /// [`crate::fdstore::export_to_systemd`]. The OwnedFds are kept
+    /// open across the return — they only close when the caller
+    /// drops them after the FDSTORE handoff completes.
+    pub fn shutdown_for_handoff(&mut self) -> Vec<(u32, OwnedFd, OwnedFd)> {
+        self.shutdown.store(true, Ordering::Relaxed);
+
+        for w in self.workers.drain(..) {
+            let _ = w.handle.join();
+        }
+
+        // All worker threads have joined → every cloned fd_tx is
+        // dropped → channel closed. try_iter drains everything still
+        // in the queue without blocking.
+        self.fd_rx.try_iter().collect()
     }
 }
 
 /// Cold-boot worker entrypoint. Creates a fresh xsk-rs-backed
 /// AF_XDP socket, registers it in the XSKS map, and runs the generic
-/// hot loop.
+/// hot loop. On clean exit, offers detached FDs to the FDSTORE
+/// channel — `XskSocket::detach_for_fdstore` returns `None` (its
+/// UMEM is `MAP_ANONYMOUS` with no backing FD), so this is a no-op
+/// today; kept for symmetry with `worker_loop_adopt`.
+#[allow(clippy::too_many_arguments)]
 fn worker_loop(
     interface: &str,
     queue_id: u32,
@@ -301,6 +382,7 @@ fn worker_loop(
     ebpf: &Arc<Mutex<EbpfHandle>>,
     shutdown: &AtomicBool,
     stats: &WorkerStats,
+    fd_tx: mpsc::Sender<(u32, OwnedFd, OwnedFd)>,
 ) {
     let (xsk, xdp_mode) = match XskSocket::new(interface, queue_id) {
         Ok(s) => s,
@@ -327,12 +409,80 @@ fn worker_loop(
         queue_id, xdp_mode
     );
 
-    worker_loop_generic(xsk, queue_id, local_mac, config, shutdown, stats);
+    let xsk = worker_loop_generic(xsk, queue_id, local_mac, config, shutdown, stats);
+    if let Some((sock, umem)) = xsk.detach_for_fdstore() {
+        let _ = fd_tx.send((queue_id, sock, umem));
+    }
+}
+
+/// Warm-restart worker entrypoint. Rehydrates an [`AdoptedSocket`]
+/// from the systemd-FDSTORE-inherited `(sockfd, umem_fd)` pair,
+/// re-registers it in the XSKS map (the slot still references the
+/// dead previous-pid FD, so the new daemon must overwrite it), and
+/// runs the same hot loop the cold path uses. On clean exit, offers
+/// the detached FDs to the FDSTORE channel for re-export.
+#[allow(clippy::too_many_arguments)]
+fn worker_loop_adopt(
+    interface: &str,
+    queue_id: u32,
+    sockfd: OwnedFd,
+    umem_fd: OwnedFd,
+    local_mac: &[u8; 6],
+    config: &Arc<RwLock<ConfigTable>>,
+    ebpf: &Arc<Mutex<EbpfHandle>>,
+    shutdown: &AtomicBool,
+    stats: &WorkerStats,
+    fd_tx: mpsc::Sender<(u32, OwnedFd, OwnedFd)>,
+) {
+    let ifindex = match xdp_adopt::if_nametoindex(interface) {
+        Ok(i) => i,
+        Err(e) => {
+            error!("worker q{}: if_nametoindex({}) failed: {:#}", queue_id, interface, e);
+            return;
+        }
+    };
+
+    let xsk = match AdoptedSocket::adopt(
+        sockfd,
+        umem_fd,
+        ifindex,
+        queue_id,
+        DEFAULT_FRAME_COUNT,
+        DEFAULT_CHUNK_SIZE,
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            error!(
+                "worker q{}: failed to adopt AF_XDP socket from FDSTORE: {:#}",
+                queue_id, e
+            );
+            return;
+        }
+    };
+
+    let fd = unsafe { BorrowedFd::borrow_raw(xsk.raw_fd()) };
+    if let Err(e) = ebpf.lock().unwrap().register_xsk(queue_id, fd) {
+        error!(
+            "worker q{}: failed to register adopted socket in XSKS map: {}",
+            queue_id, e
+        );
+        return;
+    }
+
+    info!("worker q{}: AF_XDP socket adopted from FDSTORE", queue_id);
+
+    let xsk = worker_loop_generic(xsk, queue_id, local_mac, config, shutdown, stats);
+    if let Some((sock, umem)) = xsk.detach_for_fdstore() {
+        let _ = fd_tx.send((queue_id, sock, umem));
+    }
 }
 
 /// Per-queue hot loop, generic over the AF_XDP socket flavour. Runs
 /// on a dedicated, pinned core, receiving packets redirected by the
 /// XDP program and forwarding / replying via the same socket.
+///
+/// Returns the socket on clean exit so the caller can call
+/// [`AfXdpSocket::detach_for_fdstore`] for handoff.
 fn worker_loop_generic<S: AfXdpSocket>(
     mut xsk: S,
     queue_id: u32,
@@ -340,7 +490,7 @@ fn worker_loop_generic<S: AfXdpSocket>(
     config: &Arc<RwLock<ConfigTable>>,
     shutdown: &AtomicBool,
     stats: &WorkerStats,
-) {
+) -> S {
     let mut rx_descs = vec![S::zero_frame(); BATCH_SIZE];
     let mut comp_descs = vec![S::zero_frame(); BATCH_SIZE];
     let mut conn = ConnectionTable::new();
@@ -478,6 +628,8 @@ fn worker_loop_generic<S: AfXdpSocket>(
 
         stats.record_pending_fill(pending_fill.len() as u64);
     }
+
+    xsk
 }
 
 fn select_cores(interface: &str, queue_count: u32) -> Vec<usize> {
@@ -959,10 +1111,12 @@ mod tests {
             expected: workers.len(),
             alive: AtomicUsize::new(workers.len()),
         });
+        let (_fd_tx, fd_rx) = mpsc::channel::<(u32, OwnedFd, OwnedFd)>();
         WorkerPool {
             workers,
             shutdown,
             health,
+            fd_rx,
         }
     }
 

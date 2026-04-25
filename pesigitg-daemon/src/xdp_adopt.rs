@@ -46,6 +46,17 @@ use libc::{
 const XDP_UMEM_PGOFF_FILL_RING: libc::off_t = 0x1_0000_0000;
 const XDP_UMEM_PGOFF_COMPLETION_RING: libc::off_t = 0x1_8000_0000;
 
+/// Default UMEM frame count used by [`AdoptedSocket::bootstrap`] and
+/// expected by [`AdoptedSocket::adopt`]. Matches `xsk.rs::NUM_FRAMES`
+/// so a cold-boot xsk-rs UMEM and an `AdoptedSocket` UMEM are
+/// dimensionally interchangeable.
+pub const DEFAULT_FRAME_COUNT: u32 = 4096;
+
+/// Default UMEM chunk size (bytes per frame slot). 2048 matches
+/// xsk-rs's default frame size and fits an MTU-1500 frame plus
+/// headroom.
+pub const DEFAULT_CHUNK_SIZE: u32 = 2048;
+
 /// One of the four AF_XDP producer/consumer rings mapped into userspace.
 ///
 /// `T` is the ring entry type: `u64` for fill/completion (plain UMEM
@@ -550,7 +561,7 @@ fn bind_af_xdp(fd: &OwnedFd, addr: &sockaddr_xdp) -> io::Result<()> {
     Ok(())
 }
 
-fn if_nametoindex(name: &str) -> Result<u32> {
+pub(crate) fn if_nametoindex(name: &str) -> Result<u32> {
     let cname = CString::new(name).context("interface name contains NUL")?;
     // SAFETY: cname is a valid C string.
     let idx = unsafe { libc::if_nametoindex(cname.as_ptr()) };

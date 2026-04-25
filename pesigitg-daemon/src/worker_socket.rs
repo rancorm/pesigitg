@@ -14,7 +14,7 @@
 //! variant produces. Both implement [`crate::frame::FrameView`] so
 //! the retry datapath can stay generic.
 
-use std::os::fd::RawFd;
+use std::os::fd::{OwnedFd, RawFd};
 
 use libc::xdp_desc;
 use xsk_rs::FrameDesc;
@@ -65,6 +65,16 @@ pub trait AfXdpSocket {
     /// refilled)`; orphans sit in `scratch[refilled..consumed]` and
     /// must be retried by the caller.
     fn complete(&mut self, scratch: &mut [Self::Frame]) -> (usize, usize);
+
+    /// Optionally consume the socket and return its sockfd + UMEM
+    /// memfd for FDSTORE export across a SIGUSR2 handoff.
+    ///
+    /// `None` for variants whose UMEM is not memfd-backed (e.g.
+    /// xsk-rs's `MAP_ANONYMOUS` UMEM, which has no FD that can be
+    /// passed to a successor process). The caller treats `None` as
+    /// "this queue won't survive the handoff" — phase 1's bpffs
+    /// pinning still applies.
+    fn detach_for_fdstore(self) -> Option<(OwnedFd, OwnedFd)>;
 }
 
 impl AfXdpSocket for XskSocket {
@@ -98,6 +108,14 @@ impl AfXdpSocket for XskSocket {
 
     fn complete(&mut self, scratch: &mut [Self::Frame]) -> (usize, usize) {
         XskSocket::complete(self, scratch)
+    }
+
+    fn detach_for_fdstore(self) -> Option<(OwnedFd, OwnedFd)> {
+        // xsk-rs's UMEM is MAP_ANONYMOUS — there's no backing FD to
+        // hand to systemd. Phase 1's bpffs pinning still survives
+        // the restart; this queue just goes through cold-create on
+        // the next start.
+        None
     }
 }
 
@@ -156,5 +174,9 @@ impl AfXdpSocket for AdoptedSocket {
             0
         };
         (consumed, refilled)
+    }
+
+    fn detach_for_fdstore(self) -> Option<(OwnedFd, OwnedFd)> {
+        Some(AdoptedSocket::detach(self))
     }
 }

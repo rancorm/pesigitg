@@ -7,6 +7,7 @@ mod cid;
 mod config;
 mod conntable;
 mod ebpf;
+mod fdstore;
 mod frame;
 mod health;
 mod neigh;
@@ -169,6 +170,19 @@ fn main() -> Result<()> {
 
     let ebpf = Arc::new(Mutex::new(ebpf));
 
+    // Read FDs handed in by systemd's per-service FDSTORE. On a cold
+    // boot this is empty; on a SIGUSR2 handoff restart it carries one
+    // (sockfd, umem_fd) pair per queue from the outgoing daemon, which
+    // workers rehydrate via AdoptedSocket::adopt to skip socket+UMEM
+    // creation and bind.
+    let inherited = fdstore::inherit_from_systemd()?;
+    if !inherited.is_empty() {
+        info!(
+            "FDSTORE handoff: rehydrating {} AF_XDP queue(s) from previous instance",
+            inherited.len()
+        );
+    }
+
     // Plan and spawn AF_XDP worker threads, one per NIC queue.
     // Workers create their own AF_XDP sockets and register them with
     // the eBPF XSKS map.
@@ -198,6 +212,7 @@ fn main() -> Result<()> {
         Arc::clone(&ebpf),
         Arc::clone(&shutdown),
         Arc::clone(&stats),
+        inherited,
     );
     debug!("worker pool spawned: T+{:.2?}", epoch.elapsed());
 
@@ -269,9 +284,11 @@ fn main() -> Result<()> {
                     }
                     SIGUSR2 => {
                         // Handoff shutdown: leave XDP program and map pins in
-                        // place so the next daemon invocation adopts them,
-                        // eliminating the XDP-reload drop window. See
-                        // thursday-toil phase 1.
+                        // place so the next daemon invocation adopts them
+                        // (phase 1), and hand AF_XDP socket + UMEM FDs to
+                        // systemd's FDSTORE so the next invocation can
+                        // rehydrate the live sockets without a kernel-side
+                        // close + rebind window (phase 2).
                         systemd_notify!(sd_notify::NotifyState::Stopping);
 
                         info!("received SIGUSR2{}, beginning handoff shutdown", from);
@@ -282,9 +299,26 @@ fn main() -> Result<()> {
                         if let Some(api) = status_api.as_mut() {
                             api.shutdown();
                         }
-                        workers.shutdown();
+                        let detached = workers.shutdown_for_handoff();
 
-                        info!("all workers stopped; pins preserved for handoff");
+                        info!(
+                            "all workers stopped; {} AF_XDP queue(s) detached for FDSTORE",
+                            detached.len()
+                        );
+
+                        match fdstore::export_to_systemd(detached) {
+                            Ok(0) => {
+                                info!("FDSTORE export skipped (not running under systemd)");
+                            }
+                            Ok(n) => {
+                                info!("FDSTORE export complete: {} queue(s) handed to systemd", n);
+                            }
+                            Err(e) => {
+                                error!("FDSTORE export failed: {:#}", e);
+                            }
+                        }
+
+                        info!("handoff complete; pins preserved for next invocation");
 
                         return Ok(());
                     }
