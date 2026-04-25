@@ -335,7 +335,7 @@ fn resolve(target_arg: Option<&str>) -> Result<ResolvedTarget, TargetError> {
                     .into_iter()
                     .find(|i| i.interface.as_deref() == Some(iface.as_str()))
                     .and_then(|i| to_resolved(&i))
-                    .ok_or_else(|| TargetError::NotFound(iface)),
+                    .ok_or(TargetError::NotFound(iface)),
                 Target::Pid(pid) => {
                     if !is_pesigitgd_proc(pid) {
                         return Err(TargetError::NotAPesigitgdProcess(pid));
@@ -585,7 +585,7 @@ mod tests {
 
     #[test]
     fn iface_from_cmdline_short_space() {
-        let cmd = b"pesigitgd\0-i\0eth0\0-p\0443\0";
+        let cmd = b"pesigitgd\0-i\0eth0\0-p\x00443\0";
         assert_eq!(iface_from_cmdline(cmd), Some("eth0".to_string()));
     }
 

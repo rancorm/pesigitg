@@ -97,10 +97,10 @@ impl Drop for EbpfHandle {
         // removing the pin file is what actually detaches.
         for name in [LINK_PIN_NAME, XSKS_MAP_NAME, PORTS_MAP_NAME] {
             let path = self.pin_root.join(name);
-            if let Err(e) = std::fs::remove_file(&path) {
-                if e.kind() != std::io::ErrorKind::NotFound {
-                    warn!("failed to unpin {}: {}", path.display(), e);
-                }
+            if let Err(e) = std::fs::remove_file(&path)
+                && e.kind() != std::io::ErrorKind::NotFound
+            {
+                warn!("failed to unpin {}: {}", path.display(), e);
             }
         }
         // Best-effort rmdir — leaves the parent directory untouched.
@@ -287,10 +287,10 @@ fn reconcile_ports(ports_map: &mut Map, configured: &[u16]) -> Result<()> {
 fn clear_stale_pins(pin_root: &Path) {
     for name in [LINK_PIN_NAME, XSKS_MAP_NAME, PORTS_MAP_NAME] {
         let path = pin_root.join(name);
-        if let Err(e) = std::fs::remove_file(&path) {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                warn!("failed to clear stale pin {}: {}", path.display(), e);
-            }
+        if let Err(e) = std::fs::remove_file(&path)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            warn!("failed to clear stale pin {}: {}", path.display(), e);
         }
     }
 }
