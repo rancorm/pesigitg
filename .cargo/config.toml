@@ -1,5 +1,10 @@
-[build]
-rustflags = ["-C", "target-cpu=native"]
+# Note: a previous `[build] rustflags = ["-C", "target-cpu=native"]`
+# was removed because it applied to proc-macro `.so` builds too,
+# which rustc then dlopens during compilation. On heterogeneous CI
+# runner hardware that triggered SIGILL inside libserde_derive /
+# libtokio_macros. Set `RUSTFLAGS="-C target-cpu=native"` (or a
+# per-user `~/.cargo/config.toml`) if you want the optimization for
+# local release builds.
 
 [alias]
 xtask = "run --package xtask --"
