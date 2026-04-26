@@ -1038,6 +1038,7 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "pesigitg-common",
+ "pesigitg-routing",
  "pico-args",
  "serde_json",
 ]
@@ -1058,6 +1059,7 @@ dependencies = [
  "log",
  "nix",
  "pesigitg-common",
+ "pesigitg-routing",
  "pico-args",
  "quinn",
  "rand 0.10.1",
@@ -1082,9 +1084,20 @@ dependencies = [
  "hmac",
  "libfuzzer-sys",
  "pesigitg-common",
+ "pesigitg-routing",
  "rustc-hash",
  "serde",
  "sha2",
+ "toml",
+]
+
+[[package]]
+name = "pesigitg-routing"
+version = "0.1.0"
+dependencies = [
+ "aes",
+ "pesigitg-common",
+ "serde",
  "toml",
 ]
 

@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 pesigitg-common = { workspace = true, features = ["std"] }
+pesigitg-routing = { workspace = true }
 
 aya = "0.13"
 aes = { workspace = true }

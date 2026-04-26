@@ -31,6 +31,7 @@ use pico_args::Arguments;
 use serde_json::Value;
 
 use pesigitg_common::{PID_DIR, PROC_NAME};
+use pesigitg_routing::route::{Encryption, RouteConfig};
 
 const RUN_DIR: &str = "/run/pesigitg";
 const PIDFILE_PREFIX: &str = "pesigitgd-";
@@ -703,13 +704,15 @@ fn cmd_info(args: &[String]) -> Result<(), TargetError> {
     Ok(())
 }
 
-/// `whoami <cid-hex> [target]` — given a QUIC Connection ID, fetch the
-/// daemon's live route table and report which backend the flow would
-/// land on. Plaintext schemes are decoded fully (server_id is in the
-/// clear); encrypted schemes (`single_pass`, `four_pass`) report
-/// scheme/lengths and defer full decode to a future `--route-config`
-/// path that has access to the encryption key.
+/// `whoami <cid-hex> [target] [--route-config <path>]` — given a QUIC
+/// Connection ID, decode it against either the daemon's live route
+/// table (online, default) or a route TOML file (offline,
+/// `--route-config`). The offline path can decode encrypted schemes
+/// because it has direct access to the keys; the online path
+/// deliberately can't, since `/config` redacts them.
 fn cmd_whoami(args: &[String]) -> Result<(), TargetError> {
+    let (route_config_path, args) = extract_flag(args, "-r", "--route-config")?;
+
     if args.is_empty() {
         return Err(TargetError::ExtraArgs(
             "whoami requires a CID hex string (e.g. '00010203...')".into(),
@@ -723,17 +726,35 @@ fn cmd_whoami(args: &[String]) -> Result<(), TargetError> {
     }
 
     let cid = parse_cid_hex(&args[0])?;
-    let target = args.get(1).map(String::as_str);
 
+    if let Some(path) = route_config_path {
+        if args.len() > 1 {
+            return Err(TargetError::ExtraArgs(
+                "--route-config skips the daemon, so a target argument cannot be combined with it"
+                    .into(),
+            ));
+        }
+
+        let configs = pesigitg_routing::route::parse_routes_file(&path)
+            .map_err(|e| TargetError::ExtraArgs(format!("--route-config '{}': {}", path, e)))?;
+
+        println!("source:    {}", path);
+
+        for line in analyze_whoami_offline(&cid, &configs) {
+            println!("{}", line);
+        }
+
+        return Ok(());
+    }
+
+    let target = args.get(1).map(String::as_str);
     let (resolved, v) = query_endpoint(target, "/config")?;
 
     let configs = v
         .get("route")
         .and_then(|r| r.get("configs"))
         .and_then(|c| c.as_array())
-        .ok_or_else(|| {
-            TargetError::BadResponse("/config response missing route.configs".into())
-        })?;
+        .ok_or_else(|| TargetError::BadResponse("/config response missing route.configs".into()))?;
 
     println!("target:    {} (pid {})", resolved.interface, resolved.pid);
 
@@ -762,10 +783,7 @@ fn parse_cid_hex(s: &str) -> Result<Vec<u8>, TargetError> {
 fn analyze_whoami(cid: &[u8], configs: &[Value]) -> Vec<String> {
     let mut out = Vec::new();
 
-    out.push(format!(
-        "cid:       {}",
-        pesigitg_common::hex::encode(cid)
-    ));
+    out.push(format!("cid:       {}", pesigitg_common::hex::encode(cid)));
 
     // First octet's top three bits encode the rotation/config_id
     // (draft-ietf-quic-load-balancers-21 §3). 7 is reserved for
@@ -793,7 +811,10 @@ fn analyze_whoami(cid: &[u8], configs: &[Value]) -> Vec<String> {
         return out;
     };
 
-    let scheme = cfg.get("encryption").and_then(|s| s.as_str()).unwrap_or("?");
+    let scheme = cfg
+        .get("encryption")
+        .and_then(|s| s.as_str())
+        .unwrap_or("?");
     let sid_len = cfg
         .get("server_id_length")
         .and_then(|n| n.as_u64())
@@ -823,12 +844,8 @@ fn analyze_whoami(cid: &[u8], configs: &[Value]) -> Vec<String> {
             "verdict:   encrypted ({}) — online decode requires the key,",
             scheme
         ));
-        out.push(
-            "           which /config does not expose. Offline decode via".into(),
-        );
-        out.push(
-            "           --route-config is on the saturday-gin backlog.".into(),
-        );
+        out.push("           which /config does not expose. Re-run with".into());
+        out.push("           --route-config <path> for a full decode.".into());
 
         return out;
     }
@@ -872,6 +889,98 @@ fn analyze_whoami(cid: &[u8], configs: &[Value]) -> Vec<String> {
 
             out.push(format!("verdict:   routes to {} ({})", addr, mac));
             out.push(format!("state:     {}", state.join(", ")));
+        }
+        None => {
+            out.push(format!(
+                "verdict:   server_id has no entry in config_id={} (would count as cid_unroutable)",
+                config_id
+            ));
+        }
+    }
+
+    out
+}
+
+/// Pure analyzer for offline whoami: decode `cid` against parsed
+/// [`RouteConfig`] entries (typically from
+/// [`pesigitg_routing::route::parse_routes_file`]). Unlike
+/// [`analyze_whoami`], this path has direct access to the encryption
+/// keys, so `single_pass` and `four_pass` CIDs are decoded the same
+/// way the datapath would.
+fn analyze_whoami_offline(cid: &[u8], configs: &[RouteConfig]) -> Vec<String> {
+    let mut out = Vec::new();
+
+    out.push(format!("cid:       {}", pesigitg_common::hex::encode(cid)));
+
+    let config_id = cid[0] >> 5;
+
+    if config_id == 7 {
+        out.push("verdict:   config_id 7 is reserved (unroutable)".into());
+
+        return out;
+    }
+
+    out.push(format!("config_id: {}", config_id));
+
+    let cfg = match configs.iter().find(|c| c.config_id == config_id) {
+        Some(c) => c,
+        None => {
+            out.push(format!(
+                "verdict:   no route config with config_id={} in this file",
+                config_id
+            ));
+
+            return out;
+        }
+    };
+
+    let scheme = match cfg.encryption {
+        Encryption::Plaintext => "plaintext",
+        Encryption::SinglePass { .. } => "single_pass",
+        Encryption::FourPass { .. } => "four_pass",
+    };
+
+    out.push(format!("scheme:    {}", scheme));
+    out.push(format!("sid_len:   {} bytes", cfg.server_id_length));
+    out.push(format!("nonce_len: {} bytes", cfg.nonce_length));
+
+    let payload_len = cfg.cid_payload_length() as usize;
+    if cid.len() < 1 + payload_len {
+        out.push(format!(
+            "verdict:   truncated (CID is {} byte(s); payload needs {})",
+            cid.len(),
+            1 + payload_len
+        ));
+
+        return out;
+    }
+
+    match pesigitg_routing::cid::resolve_server_idx(cid, cfg) {
+        Some(idx) => {
+            let server = &cfg.servers[idx];
+            let id_hex = pesigitg_common::hex::encode(&server.id);
+
+            out.push(format!("server_id: {}", id_hex));
+
+            let mac_str = match server.mac {
+                Some(m) => format!(
+                    "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                    m[0], m[1], m[2], m[3], m[4], m[5]
+                ),
+                None => "(unset)".into(),
+            };
+
+            out.push(format!(
+                "verdict:   routes to {} ({})",
+                server.address, mac_str
+            ));
+
+            // healthy is a runtime probe result that doesn't apply
+            // offline; only the declared draining flag is meaningful
+            // when reading the TOML.
+            if server.draining {
+                out.push("state:     draining".into());
+            }
         }
         None => {
             out.push(format!(
@@ -985,7 +1094,10 @@ fn cmd_pin_info(args: &[String]) -> Result<(), TargetError> {
     let entries = match fs::read_dir(&dir_path) {
         Ok(it) => it,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            println!("  (no pin directory; daemon may not have run yet on {})", iface);
+            println!(
+                "  (no pin directory; daemon may not have run yet on {})",
+                iface
+            );
 
             return Ok(());
         }
@@ -1231,7 +1343,7 @@ static CMDS: &[Cmd] = &[
     Cmd {
         name: "whoami",
         aliases: &[],
-        summary: "decode a QUIC CID via the live route table: whoami <cid-hex> [target]",
+        summary: "decode a QUIC CID: whoami <cid-hex> [target] [--route-config <path>]",
         run: cmd_whoami,
     },
     Cmd {
@@ -1681,7 +1793,11 @@ mod tests {
         let out = analyze_whoami(&cid, &configs);
         let v = find_line(&out, "verdict:");
         assert!(v.contains("truncated"));
-        assert!(v.contains("17"), "expected payload-required count in: {}", v);
+        assert!(
+            v.contains("17"),
+            "expected payload-required count in: {}",
+            v
+        );
     }
 
     #[test]
@@ -1790,6 +1906,130 @@ mod tests {
         assert!(out.iter().any(|l| l.contains("--route-config")));
     }
 
+    // ----- offline whoami analyzer -----
+
+    fn parse_offline(toml: &str) -> Vec<RouteConfig> {
+        pesigitg_routing::route::parse_routes(toml).unwrap()
+    }
+
+    const PLAINTEXT_TOML: &str = r#"
+[[configs]]
+config_id = 0
+server_id_length = 3
+nonce_length = 13
+
+[[configs.servers]]
+id = "000001"
+address = "10.0.1.10"
+mac = "aa:bb:cc:dd:ee:01"
+
+[[configs.servers]]
+id = "000002"
+address = "10.0.1.11"
+mac = "aa:bb:cc:dd:ee:02"
+"#;
+
+    #[test]
+    fn offline_plaintext_routes_to_known_server() {
+        let configs = parse_offline(PLAINTEXT_TOML);
+        let mut cid = vec![0x00];
+        cid.extend_from_slice(&[0x00, 0x00, 0x01]);
+        cid.extend_from_slice(&[0x00; 13]);
+
+        let out = analyze_whoami_offline(&cid, &configs);
+        assert_eq!(find_line(&out, "scheme:"), "scheme:    plaintext");
+        assert_eq!(find_line(&out, "server_id:"), "server_id: 000001");
+        let v = find_line(&out, "verdict:");
+        assert!(v.contains("routes to 10.0.1.10"));
+        assert!(v.contains("aa:bb:cc:dd:ee:01"));
+    }
+
+    #[test]
+    fn offline_reserved_config_id() {
+        let cid = vec![0xe0, 0x00, 0x01];
+        let out = analyze_whoami_offline(&cid, &[]);
+        assert!(find_line(&out, "verdict:").contains("reserved"));
+    }
+
+    #[test]
+    fn offline_unknown_config_id() {
+        let configs = parse_offline(PLAINTEXT_TOML);
+        let cid = vec![0x40, 0x00, 0x01];
+        let out = analyze_whoami_offline(&cid, &configs);
+        assert!(find_line(&out, "verdict:").contains("config_id=2"));
+    }
+
+    #[test]
+    fn offline_truncated_cid() {
+        let configs = parse_offline(PLAINTEXT_TOML);
+        let cid = vec![0x00, 0x01, 0x02];
+        let out = analyze_whoami_offline(&cid, &configs);
+        let v = find_line(&out, "verdict:");
+        assert!(v.contains("truncated"));
+    }
+
+    #[test]
+    fn offline_unknown_server_flagged() {
+        let configs = parse_offline(PLAINTEXT_TOML);
+        let mut cid = vec![0x00];
+        cid.extend_from_slice(&[0xff, 0xff, 0xff]);
+        cid.extend_from_slice(&[0x00; 13]);
+
+        let out = analyze_whoami_offline(&cid, &configs);
+        let v = find_line(&out, "verdict:");
+        assert!(v.contains("no entry"));
+        assert!(v.contains("cid_unroutable"));
+    }
+
+    #[test]
+    fn offline_draining_flag_surfaced() {
+        let toml = r#"
+[[configs]]
+config_id = 0
+server_id_length = 3
+nonce_length = 13
+
+[[configs.servers]]
+id = "000001"
+address = "10.0.1.10"
+mac = "aa:bb:cc:dd:ee:01"
+draining = true
+"#;
+        let configs = parse_offline(toml);
+        let mut cid = vec![0x00];
+        cid.extend_from_slice(&[0x00, 0x00, 0x01]);
+        cid.extend_from_slice(&[0x00; 13]);
+
+        let out = analyze_whoami_offline(&cid, &configs);
+        assert_eq!(find_line(&out, "state:"), "state:     draining");
+    }
+
+    #[test]
+    fn offline_encrypted_scheme_label() {
+        // No need to round-trip a real ciphertext here — the routing
+        // crate covers `resolve_server_idx` for single_pass/four_pass.
+        // We just verify the analyzer reports the correct scheme name.
+        let toml = r#"
+[[configs]]
+config_id = 0
+server_id_length = 3
+nonce_length = 13
+key = "000102030405060708090a0b0c0d0e0f"
+
+[[configs.servers]]
+id = "000001"
+address = "10.0.1.10"
+"#;
+        let configs = parse_offline(toml);
+        let mut cid = vec![0x00];
+        cid.extend_from_slice(&[0xaa; 16]);
+        let out = analyze_whoami_offline(&cid, &configs);
+        assert_eq!(find_line(&out, "scheme:"), "scheme:    single_pass");
+        // The garbage payload almost certainly won't decrypt to a known
+        // server_id; verdict should be a graceful unroutable, not panic.
+        assert!(find_line(&out, "verdict:").contains("no entry"));
+    }
+
     #[test]
     fn parse_cid_hex_accepts_typical() {
         let v = parse_cid_hex("0001020304").unwrap();
@@ -1798,10 +2038,7 @@ mod tests {
 
     #[test]
     fn parse_cid_hex_rejects_empty() {
-        assert!(matches!(
-            parse_cid_hex(""),
-            Err(TargetError::ExtraArgs(_))
-        ));
+        assert!(matches!(parse_cid_hex(""), Err(TargetError::ExtraArgs(_))));
     }
 
     #[test]

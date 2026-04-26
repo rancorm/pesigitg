@@ -5,6 +5,7 @@ members = [
 	"pesigitg-daemon/fuzz",
 	"pesigitg-common",
 	"pesigitg-control",
+	"pesigitg-routing",
 	"xtask",
 	"contrib/quic-lb-cid",
 	"contrib/quic-echo",
@@ -24,6 +25,7 @@ repository = "https://github.com/rancorm/pesigitg"
 # `cargo deny check bans` accepts the entry (crates.io rejects pure
 # path deps) and to enable a future publish without churn.
 pesigitg-common = { path = "pesigitg-common", version = "0.1.0" }
+pesigitg-routing = { path = "pesigitg-routing", version = "0.1.0" }
 quic-lb-cid = { path = "contrib/quic-lb-cid", version = "0.1.0" }
 
 # Crypto

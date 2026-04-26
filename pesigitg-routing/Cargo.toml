@@ -1,0 +1,14 @@
+[package]
+name = "pesigitg-routing"
+description = "Shared QUIC-LB routing types and Connection ID decode for pesigitg."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+pesigitg-common = { workspace = true, features = ["std"] }
+
+aes = { workspace = true }
+serde = { workspace = true }
+toml = { workspace = true }

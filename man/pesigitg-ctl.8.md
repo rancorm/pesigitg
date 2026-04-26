@@ -72,20 +72,28 @@ require *status_socket* to be configured on the target daemon (see
     **/stats**). Path must start with **/**. Future daemon endpoints can
     be probed without a ctl update.
 
-**whoami** *cid-hex* [*target*]
-:   Decode a QUIC Connection ID against the daemon's live route table
-    and report which backend the flow would land on. Extracts the
-    *config_id* from the CID's first three bits, looks up the matching
-    route entry from **GET /config**, and renders *config_id*, scheme,
+**whoami** *cid-hex* [*target*] [**-r** *PATH* | **--route-config** *PATH*]
+:   Decode a QUIC Connection ID and report which backend the flow would
+    land on. Extracts the *config_id* from the CID's first three bits,
+    looks up the matching route entry, and renders *config_id*, scheme,
     server-id length, nonce length, and the resolved server (address,
-    MAC, healthy/draining state). For *plaintext* schemes the server-id
-    is decoded directly. For *single_pass* and *four_pass* the verdict
-    reports the scheme but stops short of full decode: **/config**
-    deliberately does not expose encryption keys, and the offline-mode
-    flag for reading them from a route TOML directly is not yet wired
-    up. CIDs whose first octet encodes the reserved *config_id* 7
-    (e.g. pre-handshake / Initials with random CIDs) are flagged as
-    such.
+    MAC, declared state). CIDs whose first octet encodes the reserved
+    *config_id* 7 (e.g. pre-handshake / Initials with random CIDs) are
+    flagged as such.
+
+    Two modes:
+
+    - **Online (default).** Fetches **GET /config** from the target
+      daemon's status socket. *plaintext* schemes are decoded fully;
+      *single_pass* and *four_pass* CIDs only get a scheme/length
+      report because **/config** redacts the encryption key. The
+      verdict points at **--route-config** for full decode.
+    - **Offline (--route-config).** Parses the supplied route TOML
+      directly and decodes against it — including encrypted schemes,
+      since the file holds the keys. Skips daemon discovery entirely;
+      a *target* argument is rejected when this flag is supplied.
+      Health state isn't available offline, so only the declared
+      *draining* flag is surfaced.
 
 **watch** [*target*] [**-n** *SECS* | **--interval** *SECS*]
 :   Poll **/stats** at a fixed interval and print rate deltas: rx/s,
@@ -216,6 +224,12 @@ Decode a Connection ID against the live route table to see which backend
 it would route to:
 
     pesigitg-ctl whoami 0000010102030405060708090a0b0c0d eth0
+
+Decode a Connection ID offline against a route TOML — full decode for
+encrypted schemes since the file holds the keys:
+
+    pesigitg-ctl whoami 00241c811384fbcf91de00ff31d3c928af \
+        --route-config /etc/pesigitg/lb.toml
 
 Sweep stale pidfiles after an unclean shutdown:
 
