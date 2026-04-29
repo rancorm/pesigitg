@@ -993,6 +993,260 @@ fn analyze_whoami_offline(cid: &[u8], configs: &[RouteConfig]) -> Vec<String> {
     out
 }
 
+/// `backend-config <server-id-hex> [target] [--route-config <path>]
+/// [--no-key] [--config-id <N>]` — emit per-backend QUIC-LB
+/// provisioning JSON for one server_id.
+///
+/// A backend admin runs this against `lb.toml` to extract exactly the
+/// values their QUIC stack needs to mint CIDs the LB will later
+/// decrypt: `config_id`, `server_id`, lengths, AES key, and encryption
+/// mode. Multiple matches mean the server appears in multiple configs
+/// (mid-rollover); both must be provisioned. The output is always a
+/// well-formed JSON document, even with zero matches — the consumer
+/// checks `matches | length`.
+///
+/// The offline path (`--route-config`) sees the raw key. The online
+/// path queries `/config`, which redacts keys server-side; encrypted
+/// configs come back as `key: null, key_redacted: true`.
+fn cmd_backend_config(args: &[String]) -> Result<(), TargetError> {
+    let (route_config_path, args) = extract_flag(args, "-r", "--route-config")?;
+    // Empty short flag never matches a real arg.
+    let (config_id_filter_str, args) = extract_flag(&args, "", "--config-id")?;
+
+    let mut no_key = false;
+    let mut positional: Vec<String> = Vec::new();
+
+    for a in args {
+        if a == "--no-key" {
+            no_key = true;
+        } else {
+            positional.push(a);
+        }
+    }
+
+    if positional.is_empty() {
+        return Err(TargetError::ExtraArgs(
+            "backend-config requires a server-id hex string (e.g. '000001')".into(),
+        ));
+    }
+    if positional.len() > 2 {
+        return Err(TargetError::ExtraArgs(format!(
+            "expected '<server-id-hex> [target]', got: {}",
+            positional.join(" ")
+        )));
+    }
+
+    let server_id_hex = positional[0].trim().to_lowercase();
+
+    // Validate hex shape now so a typo doesn't silently match nothing.
+    pesigitg_common::hex::decode(&server_id_hex)
+        .map_err(|e| TargetError::ExtraArgs(format!("invalid server-id hex: {}", e)))?;
+
+    let config_id_filter = match config_id_filter_str.as_deref() {
+        None => None,
+        Some(s) => {
+            let n: u8 = s.parse().map_err(|_| {
+                TargetError::ExtraArgs(format!("--config-id expects an integer 0-6, got '{}'", s))
+            })?;
+            if n > 6 {
+                return Err(TargetError::ExtraArgs(format!(
+                    "--config-id must be 0-6, got {}",
+                    n
+                )));
+            }
+            Some(n)
+        }
+    };
+
+    let (source, matches) = if let Some(path) = route_config_path {
+        if positional.len() > 1 {
+            return Err(TargetError::ExtraArgs(
+                "--route-config skips the daemon, so a target argument cannot be combined with it"
+                    .into(),
+            ));
+        }
+
+        let configs = pesigitg_routing::route::parse_routes_file(&path)
+            .map_err(|e| TargetError::ExtraArgs(format!("--route-config '{}': {}", path, e)))?;
+        let matches =
+            analyze_backend_config_offline(&server_id_hex, &configs, no_key, config_id_filter);
+        let source = serde_json::json!({
+            "kind": "file",
+            "path": path,
+        });
+
+        (source, matches)
+    } else {
+        let target = positional.get(1).map(String::as_str);
+        let (resolved, v) = query_endpoint(target, "/config")?;
+        let configs = v
+            .get("route")
+            .and_then(|r| r.get("configs"))
+            .and_then(|c| c.as_array())
+            .ok_or_else(|| {
+                TargetError::BadResponse("/config response missing route.configs".into())
+            })?;
+        let matches = analyze_backend_config_online(&server_id_hex, configs, config_id_filter);
+        let source = serde_json::json!({
+            "kind": "daemon",
+            "interface": resolved.interface,
+            "pid": resolved.pid,
+        });
+
+        (source, matches)
+    };
+
+    let doc = serde_json::json!({
+        "schema_version": 1,
+        "source": source,
+        "matches": matches,
+    });
+
+    print_pretty(&doc);
+
+    Ok(())
+}
+
+/// Pure analyzer: walk offline-parsed [`RouteConfig`] entries and
+/// return one JSON object per `config_id` that contains the server.
+/// Mid-rollover the same server_id appears in two configs — emit
+/// both so the backend can provision them in parallel.
+fn analyze_backend_config_offline(
+    server_id_hex: &str,
+    configs: &[RouteConfig],
+    redact_key: bool,
+    config_id_filter: Option<u8>,
+) -> Vec<Value> {
+    let mut out = Vec::new();
+
+    for cfg in configs {
+        if let Some(filter) = config_id_filter
+            && cfg.config_id != filter
+        {
+            continue;
+        }
+
+        let Some(server) = cfg
+            .servers
+            .iter()
+            .find(|s| pesigitg_common::hex::encode(&s.id) == server_id_hex)
+        else {
+            continue;
+        };
+
+        let (encryption_str, key_value, key_redacted) = match &cfg.encryption {
+            Encryption::Plaintext => ("plaintext", Value::Null, false),
+            Encryption::SinglePass { key, .. } => (
+                "single_pass",
+                if redact_key {
+                    Value::Null
+                } else {
+                    Value::String(pesigitg_common::hex::encode(key))
+                },
+                redact_key,
+            ),
+            Encryption::FourPass { key, .. } => (
+                "four_pass",
+                if redact_key {
+                    Value::Null
+                } else {
+                    Value::String(pesigitg_common::hex::encode(key))
+                },
+                redact_key,
+            ),
+        };
+
+        out.push(serde_json::json!({
+            "config_id": cfg.config_id,
+            "server_id": pesigitg_common::hex::encode(&server.id),
+            "server_id_length": cfg.server_id_length,
+            "nonce_length": cfg.nonce_length,
+            "first_octet_encodes_cid_length": cfg.first_octet_encodes_cid_length,
+            "encryption": encryption_str,
+            "key": key_value,
+            "key_redacted": key_redacted,
+            "draining": server.draining,
+            "address": server.address.to_string(),
+            "cid_total_length": cfg.cid_length(),
+        }));
+    }
+
+    out
+}
+
+/// Pure analyzer: walk the `route.configs` JSON array returned by
+/// `/config`. Online `/config` always redacts keys, so encrypted
+/// configs come back as `key: null, key_redacted: true`.
+fn analyze_backend_config_online(
+    server_id_hex: &str,
+    configs: &[Value],
+    config_id_filter: Option<u8>,
+) -> Vec<Value> {
+    let mut out = Vec::new();
+
+    for cfg in configs {
+        let config_id = cfg.get("config_id").and_then(|n| n.as_u64()).unwrap_or(0) as u8;
+
+        if let Some(filter) = config_id_filter
+            && config_id != filter
+        {
+            continue;
+        }
+
+        let Some(servers) = cfg.get("servers").and_then(|s| s.as_array()) else {
+            continue;
+        };
+        let Some(server) = servers
+            .iter()
+            .find(|s| s.get("id").and_then(|i| i.as_str()) == Some(server_id_hex))
+        else {
+            continue;
+        };
+
+        let encryption = cfg
+            .get("encryption")
+            .and_then(|s| s.as_str())
+            .unwrap_or("?");
+        let sid_len = cfg
+            .get("server_id_length")
+            .and_then(|n| n.as_u64())
+            .unwrap_or(0) as u8;
+        let nonce_len = cfg
+            .get("nonce_length")
+            .and_then(|n| n.as_u64())
+            .unwrap_or(0) as u8;
+        let first_octet_encodes_cid_length = cfg
+            .get("first_octet_encodes_cid_length")
+            .and_then(|b| b.as_bool())
+            .unwrap_or(false);
+        let address = server.get("address").and_then(|a| a.as_str()).unwrap_or("");
+        let draining = server
+            .get("draining")
+            .and_then(|b| b.as_bool())
+            .unwrap_or(false);
+
+        // `/config` strips keys server-side, so anything other than
+        // plaintext is reported as redacted regardless of caller flags.
+        let key_redacted = encryption != "plaintext";
+
+        out.push(serde_json::json!({
+            "config_id": config_id,
+            "server_id": server_id_hex,
+            "server_id_length": sid_len,
+            "nonce_length": nonce_len,
+            "first_octet_encodes_cid_length": first_octet_encodes_cid_length,
+            "encryption": encryption,
+            "key": Value::Null,
+            "key_redacted": key_redacted,
+            "draining": draining,
+            "address": address,
+            "cid_total_length": (1 + sid_len + nonce_len) as u16,
+        }));
+    }
+
+    out
+}
+
 /// `endpoint <path> [target]` — escape hatch for any future status
 /// endpoint without a dedicated subcommand. Path must start with `/`.
 fn cmd_endpoint(args: &[String]) -> Result<(), TargetError> {
@@ -1345,6 +1599,12 @@ static CMDS: &[Cmd] = &[
         aliases: &[],
         summary: "decode a QUIC CID: whoami <cid-hex> [target] [--route-config <path>]",
         run: cmd_whoami,
+    },
+    Cmd {
+        name: "backend-config",
+        aliases: &[],
+        summary: "emit per-backend QUIC-LB provisioning JSON: backend-config <server-id-hex> [target] [-r <path>] [--no-key] [--config-id N]",
+        run: cmd_backend_config,
     },
     Cmd {
         name: "watch",
@@ -2028,6 +2288,196 @@ address = "10.0.1.10"
         // The garbage payload almost certainly won't decrypt to a known
         // server_id; verdict should be a graceful unroutable, not panic.
         assert!(find_line(&out, "verdict:").contains("no entry"));
+    }
+
+    // ----- backend-config analyzer -----
+
+    const ROLLOVER_TOML: &str = r#"
+[[configs]]
+config_id = 0
+first_octet_encodes_cid_length = true
+server_id_length = 3
+nonce_length = 13
+key = "597a84b3093ebb17567bcb7e06721d68"
+
+[[configs.servers]]
+id = "000001"
+address = "10.0.1.10"
+
+[[configs.servers]]
+id = "000002"
+address = "10.0.1.11"
+draining = true
+
+[[configs]]
+config_id = 1
+first_octet_encodes_cid_length = true
+server_id_length = 3
+nonce_length = 13
+key = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6"
+
+[[configs.servers]]
+id = "000001"
+address = "10.0.1.10"
+"#;
+
+    const FOUR_PASS_TOML: &str = r#"
+[[configs]]
+config_id = 2
+server_id_length = 3
+nonce_length = 4
+key = "000102030405060708090a0b0c0d0e0f"
+
+[[configs.servers]]
+id = "abc123"
+address = "2001:db8::1"
+"#;
+
+    const PLAINTEXT_BACKEND_TOML: &str = r#"
+[[configs]]
+config_id = 0
+server_id_length = 2
+nonce_length = 5
+
+[[configs.servers]]
+id = "0001"
+address = "10.0.1.10"
+"#;
+
+    #[test]
+    fn backend_config_offline_single_pass_emits_all_fields() {
+        let configs = parse_offline(ROLLOVER_TOML);
+        let m = analyze_backend_config_offline("000002", &configs, false, None);
+        assert_eq!(m.len(), 1);
+        let entry = &m[0];
+        assert_eq!(entry["config_id"], 0);
+        assert_eq!(entry["server_id"], "000002");
+        assert_eq!(entry["server_id_length"], 3);
+        assert_eq!(entry["nonce_length"], 13);
+        assert_eq!(entry["first_octet_encodes_cid_length"], true);
+        assert_eq!(entry["encryption"], "single_pass");
+        assert_eq!(entry["key"], "597a84b3093ebb17567bcb7e06721d68");
+        assert_eq!(entry["key_redacted"], false);
+        assert_eq!(entry["draining"], true);
+        assert_eq!(entry["address"], "10.0.1.11");
+        assert_eq!(entry["cid_total_length"], 17);
+    }
+
+    #[test]
+    fn backend_config_offline_rollover_returns_both_configs() {
+        // server_id 000001 is in both config_id 0 and config_id 1.
+        let configs = parse_offline(ROLLOVER_TOML);
+        let m = analyze_backend_config_offline("000001", &configs, false, None);
+        assert_eq!(m.len(), 2);
+        assert_eq!(m[0]["config_id"], 0);
+        assert_eq!(m[1]["config_id"], 1);
+        // Different keys per config — the whole point of rollover.
+        assert_ne!(m[0]["key"], m[1]["key"]);
+    }
+
+    #[test]
+    fn backend_config_offline_no_key_redacts_only_encrypted() {
+        let configs = parse_offline(ROLLOVER_TOML);
+        let m = analyze_backend_config_offline("000001", &configs, true, None);
+        assert_eq!(m.len(), 2);
+        for entry in &m {
+            assert_eq!(entry["encryption"], "single_pass");
+            assert!(entry["key"].is_null());
+            assert_eq!(entry["key_redacted"], true);
+        }
+    }
+
+    #[test]
+    fn backend_config_offline_plaintext_keeps_key_null_unredacted() {
+        // No key exists at all — `key: null` but `key_redacted: false`
+        // distinguishes "no key in config" from "key was hidden".
+        let configs = parse_offline(PLAINTEXT_BACKEND_TOML);
+        let m = analyze_backend_config_offline("0001", &configs, false, None);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0]["encryption"], "plaintext");
+        assert!(m[0]["key"].is_null());
+        assert_eq!(m[0]["key_redacted"], false);
+    }
+
+    #[test]
+    fn backend_config_offline_four_pass_label() {
+        let configs = parse_offline(FOUR_PASS_TOML);
+        let m = analyze_backend_config_offline("abc123", &configs, false, None);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0]["encryption"], "four_pass");
+        // 1 + 3 + 4 = 8 byte CID.
+        assert_eq!(m[0]["cid_total_length"], 8);
+    }
+
+    #[test]
+    fn backend_config_offline_config_id_filter() {
+        let configs = parse_offline(ROLLOVER_TOML);
+        let m = analyze_backend_config_offline("000001", &configs, false, Some(1));
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0]["config_id"], 1);
+    }
+
+    #[test]
+    fn backend_config_offline_no_match_returns_empty() {
+        let configs = parse_offline(ROLLOVER_TOML);
+        let m = analyze_backend_config_offline("ffffff", &configs, false, None);
+        assert!(m.is_empty());
+    }
+
+    #[test]
+    fn backend_config_online_redacts_keys_for_encrypted_configs() {
+        // Mirror the shape `/config` actually emits: scheme name, no key.
+        let configs = vec![json!({
+            "config_id": 0,
+            "encryption": "single_pass",
+            "server_id_length": 3,
+            "nonce_length": 13,
+            "first_octet_encodes_cid_length": true,
+            "servers": [
+                {"id": "000001", "address": "10.0.1.10", "mac": "aa:bb:cc:dd:ee:01", "healthy": true, "draining": false},
+            ],
+        })];
+        let m = analyze_backend_config_online("000001", &configs, None);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0]["encryption"], "single_pass");
+        assert!(m[0]["key"].is_null());
+        assert_eq!(m[0]["key_redacted"], true);
+        assert_eq!(m[0]["cid_total_length"], 17);
+        assert_eq!(m[0]["address"], "10.0.1.10");
+    }
+
+    #[test]
+    fn backend_config_online_plaintext_unredacted() {
+        let configs = vec![json!({
+            "config_id": 0,
+            "encryption": "plaintext",
+            "server_id_length": 2,
+            "nonce_length": 5,
+            "first_octet_encodes_cid_length": false,
+            "servers": [
+                {"id": "0001", "address": "10.0.1.10", "mac": null, "healthy": true, "draining": false},
+            ],
+        })];
+        let m = analyze_backend_config_online("0001", &configs, None);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0]["encryption"], "plaintext");
+        assert_eq!(m[0]["key_redacted"], false);
+    }
+
+    #[test]
+    fn backend_config_online_no_match_returns_empty() {
+        let configs = vec![json!({
+            "config_id": 0,
+            "encryption": "plaintext",
+            "server_id_length": 3,
+            "nonce_length": 13,
+            "first_octet_encodes_cid_length": true,
+            "servers": [
+                {"id": "000001", "address": "10.0.1.10", "mac": null, "healthy": true, "draining": false},
+            ],
+        })];
+        let m = analyze_backend_config_online("ffffff", &configs, None);
+        assert!(m.is_empty());
     }
 
     #[test]

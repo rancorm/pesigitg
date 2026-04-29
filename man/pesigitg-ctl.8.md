@@ -95,6 +95,49 @@ require *status_socket* to be configured on the target daemon (see
       Health state isn't available offline, so only the declared
       *draining* flag is surfaced.
 
+**backend-config** *server-id-hex* [*target*] [**-r** *PATH* | **--route-config** *PATH*] [**--no-key**] [**--config-id** *N*]
+:   Emit per-backend QUIC-LB provisioning JSON for one *server_id*.
+    The output is a single document with **schema_version**, **source**
+    (file path or daemon target), and a **matches** array — one entry
+    per **config_id** that contains the server. During a key rollover
+    a *server_id* appears in two configs; both are emitted so the
+    backend QUIC stack can be configured to mint CIDs under each.
+
+    Each match carries the fields the backend's QUIC-LB encoder needs:
+    **config_id**, **server_id**, **server_id_length**, **nonce_length**,
+    **first_octet_encodes_cid_length**, **encryption** (one of
+    *plaintext*, *single_pass*, *four_pass*), **key** (hex; *null*
+    when redacted), **key_redacted**, **draining**, **address**, and
+    a precomputed **cid_total_length**. Consumers can iterate
+    **matches** and provision each entry directly.
+
+    Two modes:
+
+    - **Offline (--route-config).** Parses the route TOML directly,
+      so the **key** field carries the raw 16-byte AES key in hex.
+      Skips daemon discovery entirely; a *target* argument is rejected
+      when this flag is supplied. **SECURITY:** the output contains
+      cleartext key material — pipe it into a vault/secret store
+      rather than writing it to disk.
+    - **Online (default).** Fetches **GET /config** from the target
+      daemon's status socket. **/config** redacts encryption keys,
+      so encrypted configs come back as **key: null, key_redacted:
+      true**. Useful for "what's running right now" inspection;
+      cannot provision a fresh backend on its own.
+
+    **--no-key** strips the **key** field even on the offline path
+    (sets it to *null* and **key_redacted** to *true* for encrypted
+    configs). Use when the consumer only needs the configuration
+    shape, not the secret material.
+
+    **--config-id** *N* restricts the output to a single *config_id*
+    (0-6). Without the flag, every config containing the server_id
+    is emitted.
+
+    With no matches the **matches** array is empty and the exit code
+    is **0**; consumers should check **matches | length** rather than
+    relying on the exit code.
+
 **watch** [*target*] [**-n** *SECS* | **--interval** *SECS*]
 :   Poll **/stats** at a fixed interval and print rate deltas: rx/s,
     fwd/s, cid/s, fallback/s, unrt/s, retry_iss/s. Default interval is
@@ -230,6 +273,16 @@ encrypted schemes since the file holds the keys:
 
     pesigitg-ctl whoami 00241c811384fbcf91de00ff31d3c928af \
         --route-config /etc/pesigitg/lb.toml
+
+Extract per-backend QUIC-LB provisioning JSON for one *server_id* from
+a route TOML (output contains the AES key — pipe into a secret store):
+
+    pesigitg-ctl backend-config 000001 \
+        --route-config /etc/pesigitg/lb.toml
+
+Same query against a running daemon, with keys redacted server-side:
+
+    pesigitg-ctl backend-config 000001 eth0
 
 Sweep stale pidfiles after an unclean shutdown:
 
