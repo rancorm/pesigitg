@@ -135,8 +135,6 @@ struct ResolvedTarget {
     interface: String,
     pid: u32,
     status_socket: Option<PathBuf>,
-    #[allow(dead_code)]
-    pidfile: Option<PathBuf>,
 }
 
 /// Discover all pesigitgd instances on this host from pidfiles, status
@@ -384,7 +382,6 @@ fn to_resolved(i: &Instance) -> Option<ResolvedTarget> {
         interface: i.interface.clone()?,
         pid: i.pid?,
         status_socket: i.status_socket.clone(),
-        pidfile: i.pidfile.clone(),
     })
 }
 
