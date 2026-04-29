@@ -877,11 +877,23 @@ fn analyze_whoami(cid: &[u8], configs: &[Value]) -> Vec<String> {
                 .unwrap_or_else(|| "(unset)".into());
             let healthy = s.get("healthy").and_then(|b| b.as_bool()).unwrap_or(false);
             let draining = s.get("draining").and_then(|b| b.as_bool()).unwrap_or(false);
+            let transitions = s.get("transitions").and_then(|n| n.as_u64()).unwrap_or(0);
+            let state_since_secs = s.get("state_since_secs").and_then(|n| n.as_u64());
 
-            let mut state: Vec<&str> = Vec::new();
-            state.push(if healthy { "healthy" } else { "UNHEALTHY" });
+            let mut state: Vec<String> = Vec::new();
+            state.push(if healthy { "healthy" } else { "UNHEALTHY" }.into());
             if draining {
-                state.push("draining");
+                state.push("draining".into());
+            }
+            if let Some(secs) = state_since_secs {
+                state.push(format!("for {}", format_duration(secs)));
+            }
+            if transitions > 0 {
+                state.push(format!(
+                    "{} flap{}",
+                    transitions,
+                    if transitions == 1 { "" } else { "s" }
+                ));
             }
 
             out.push(format!("verdict:   routes to {} ({})", addr, mac));
@@ -2143,6 +2155,85 @@ mod tests {
         let v = find_line(&out, "verdict:");
         assert!(v.contains("no entry"));
         assert!(v.contains("cid_unroutable"));
+    }
+
+    #[test]
+    fn whoami_state_line_surfaces_transitions_and_age() {
+        // Server view from /config now carries transitions and
+        // state_since_secs. They should appear in whoami's state line
+        // when present.
+        let mut cid = vec![0x00];
+        cid.extend_from_slice(&[0x00, 0x00, 0x01]);
+        cid.extend_from_slice(&[0x00; 13]);
+        let configs = vec![plaintext_cfg(
+            0,
+            3,
+            13,
+            json!([{
+                "id": "000001",
+                "address": "10.0.1.10:443",
+                "mac": "aa:bb:cc:dd:ee:01",
+                "healthy": true,
+                "draining": false,
+                "transitions": 3,
+                "state_since_secs": 192,
+            }]),
+        )];
+        let out = analyze_whoami(&cid, &configs);
+        let state = find_line(&out, "state:");
+        assert!(state.contains("healthy"));
+        assert!(state.contains("for 3m12s"));
+        assert!(state.contains("3 flaps"));
+    }
+
+    #[test]
+    fn whoami_state_line_pluralizes_single_flap() {
+        let mut cid = vec![0x00];
+        cid.extend_from_slice(&[0x00, 0x00, 0x01]);
+        cid.extend_from_slice(&[0x00; 13]);
+        let configs = vec![plaintext_cfg(
+            0,
+            3,
+            13,
+            json!([{
+                "id": "000001",
+                "address": "10.0.1.10:443",
+                "mac": "aa:bb:cc:dd:ee:01",
+                "healthy": true,
+                "draining": false,
+                "transitions": 1,
+                "state_since_secs": 5,
+            }]),
+        )];
+        let out = analyze_whoami(&cid, &configs);
+        let state = find_line(&out, "state:");
+        assert!(state.contains("1 flap,") || state.ends_with("1 flap"));
+        assert!(!state.contains("1 flaps"));
+    }
+
+    #[test]
+    fn whoami_state_line_omits_counters_when_absent() {
+        // Older /config responses (or pesigitg-ctl pointed at a
+        // pre-update daemon) won't carry the new fields.
+        let mut cid = vec![0x00];
+        cid.extend_from_slice(&[0x00, 0x00, 0x01]);
+        cid.extend_from_slice(&[0x00; 13]);
+        let configs = vec![plaintext_cfg(
+            0,
+            3,
+            13,
+            json!([server(
+                "000001",
+                "10.0.1.10:443",
+                "aa:bb:cc:dd:ee:01",
+                true,
+                false
+            )]),
+        )];
+        let out = analyze_whoami(&cid, &configs);
+        let state = find_line(&out, "state:");
+        assert!(!state.contains("flap"));
+        assert!(!state.contains("for "));
     }
 
     #[test]

@@ -12,6 +12,7 @@
 use std::fmt;
 use std::net::IpAddr;
 use std::path::Path;
+use std::time::Instant;
 
 use aes::Aes128;
 use aes::cipher::{KeyInit, generic_array::GenericArray};
@@ -82,6 +83,14 @@ pub struct Server {
     /// Health probe status. Servers start unhealthy and are marked healthy
     /// once a QUIC probe succeeds.
     pub healthy: bool,
+    /// Number of healthy↔unhealthy transitions observed for this server
+    /// since daemon startup, excluding the initial warm-up flip from the
+    /// default-unhealthy state. Mirrored from the daemon's health state
+    /// after each probe cycle. Stays 0 in offline contexts.
+    pub transitions: u32,
+    /// Instant at which the server entered its current `healthy` state.
+    /// `None` until the first probe completes (or in offline contexts).
+    pub state_since: Option<Instant>,
 }
 
 #[derive(Debug)]
@@ -338,6 +347,8 @@ fn parse_server(raw: &RawServer, expected_id_len: u8) -> Result<Server, RouteCon
         mac,
         draining: raw.draining,
         healthy: false,
+        transitions: 0,
+        state_since: None,
     })
 }
 

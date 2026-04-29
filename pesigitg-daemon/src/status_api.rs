@@ -426,6 +426,11 @@ struct ServerView {
     mac: Option<String>,
     healthy: bool,
     draining: bool,
+    /// Healthy↔unhealthy flips since daemon startup, post-warmup.
+    transitions: u32,
+    /// Seconds since the server entered its current `healthy` state.
+    /// `None` until the first probe completes after startup or SIGHUP.
+    state_since_secs: Option<u64>,
 }
 
 fn encryption_name(e: &Encryption) -> &'static str {
@@ -438,12 +443,17 @@ fn encryption_name(e: &Encryption) -> &'static str {
 
 impl From<&Server> for ServerView {
     fn from(s: &Server) -> Self {
+        let now = Instant::now();
         ServerView {
             id: hex_encode(&s.id),
             address: s.address.to_string(),
             mac: s.mac.as_ref().map(format_mac),
             healthy: s.healthy,
             draining: s.draining,
+            transitions: s.transitions,
+            state_since_secs: s
+                .state_since
+                .map(|t| now.saturating_duration_since(t).as_secs()),
         }
     }
 }

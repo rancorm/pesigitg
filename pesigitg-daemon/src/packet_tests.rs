@@ -24,6 +24,8 @@ fn make_config() -> ConfigTable {
             mac: Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01]),
             draining: false,
             healthy: true,
+            transitions: 0,
+            state_since: None,
         }],
     }])
 }
@@ -42,6 +44,8 @@ fn make_config_two_servers() -> ConfigTable {
                 mac: Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01]),
                 draining: false,
                 healthy: true,
+                transitions: 0,
+                state_since: None,
             },
             Server {
                 id: vec![0x00, 0x00, 0x02],
@@ -49,6 +53,8 @@ fn make_config_two_servers() -> ConfigTable {
                 mac: Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x02]),
                 draining: false,
                 healthy: true,
+                transitions: 0,
+                state_since: None,
             },
         ],
     }])

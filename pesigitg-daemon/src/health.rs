@@ -64,6 +64,18 @@ struct ServerHealth {
     consecutive_failures: u32,
     healthy: bool,
     next_probe_at: Instant,
+    /// healthy↔unhealthy flips since startup, post-warmup. The very
+    /// first `unhealthy → healthy` transition for a freshly-discovered
+    /// backend isn't a flap, so it doesn't count; subsequent flips do.
+    transitions: u32,
+    /// Instant the current `healthy` state began. Set on creation and
+    /// re-stamped on every actual flip — successful probes against an
+    /// already-healthy server leave it alone, so "healthy for 3h" is
+    /// preserved.
+    state_since: Instant,
+    /// `true` once the backend has succeeded at least one probe. Gates
+    /// the warmup carve-out on `transitions`.
+    ever_healthy: bool,
 }
 
 pub struct HealthChecker {
@@ -194,6 +206,9 @@ impl HealthChecker {
                 consecutive_failures: 0,
                 healthy: false,
                 next_probe_at: now,
+                transitions: 0,
+                state_since: now,
+                ever_healthy: false,
             });
 
             if now >= s.next_probe_at {
@@ -289,6 +304,13 @@ fn apply_probe_results(
                 info!("{} is back up", addr);
 
                 s.healthy = true;
+                s.state_since = now;
+                // First-ever success after startup is warmup, not a
+                // flap; only later recoveries bump the transition count.
+                if s.ever_healthy {
+                    s.transitions += 1;
+                }
+                s.ever_healthy = true;
                 changed = true;
             }
         } else {
@@ -302,17 +324,24 @@ fn apply_probe_results(
                 );
 
                 s.healthy = false;
+                s.state_since = now;
+                s.transitions += 1;
                 changed = true;
             }
         }
     }
 
-    if changed {
-        for rc in config.configs_mut() {
-            for server in &mut rc.servers {
-                if let Some(s) = state.get(&server.address) {
-                    server.healthy = s.healthy;
-                }
+    // Mirror runtime health state onto every server entry, not just
+    // when something flipped. SIGHUP rebuilds the route table from
+    // disk with default `healthy: false, transitions: 0, state_since:
+    // None`, so an unconditional mirror restores those fields on the
+    // next probe tick rather than waiting for a real transition.
+    for rc in config.configs_mut() {
+        for server in &mut rc.servers {
+            if let Some(s) = state.get(&server.address) {
+                server.healthy = s.healthy;
+                server.transitions = s.transitions;
+                server.state_since = Some(s.state_since);
             }
         }
     }
@@ -395,6 +424,13 @@ address = "10.0.0.2"
                         consecutive_failures: failures,
                         healthy,
                         next_probe_at: now,
+                        transitions: 0,
+                        state_since: now,
+                        // Match real lifecycle: any entry that's
+                        // already healthy must have been healthy at
+                        // least once, so subsequent recoveries count
+                        // as flaps.
+                        ever_healthy: healthy,
                     },
                 )
             })
@@ -563,23 +599,110 @@ address = "10.0.0.2"
     }
 
     #[test]
-    fn no_transition_skips_config_mirror() {
+    fn mirror_runs_unconditionally_to_recover_from_sighup_rebuild() {
+        // SIGHUP rebuilds the route table from disk with `healthy:
+        // false`. The mirror must run on every probe tick (not just on
+        // transitions) so the freshly-parsed servers pick up runtime
+        // health on the next probe cycle rather than staying `false`
+        // until something flips.
         let addr = addr_v4(1);
         let mut state = fixture_state(&[(addr, 0, true)]);
         let probes: HashMap<IpAddr, bool> = [(addr, true)].into_iter().collect();
         let mut table = ConfigTable::from_str(SAMPLE_TOML).unwrap();
-        // server.healthy starts false; state has it true. If the mirror ran
-        // despite changed=false, it would flip the config's server to true.
+        // Pre-condition: parsed servers start unhealthy.
+        for rc in table.configs() {
+            for s in &rc.servers {
+                assert!(!s.healthy);
+            }
+        }
 
         let changed = apply_probe_results(&mut state, &probes, Instant::now(), &mut table);
 
+        // No transition occurred (state was already healthy), but the
+        // mirror still propagated runtime state to the rebuilt config.
         assert!(!changed);
-        for rc in table.configs() {
-            for s in &rc.servers {
-                if s.address == addr {
-                    assert!(!s.healthy, "config should not be mirrored when unchanged");
-                }
-            }
-        }
+        let mirrored = table
+            .configs()
+            .flat_map(|rc| rc.servers.iter())
+            .find(|s| s.address == addr)
+            .expect("server present in config");
+        assert!(mirrored.healthy);
+    }
+
+    // ---------- transitions / state_since ----------
+
+    #[test]
+    fn warmup_recovery_does_not_count_as_a_flap() {
+        // Fresh server: never healthy, then probes succeed. That's
+        // warmup, not a flap.
+        let addr = addr_v4(1);
+        let mut state = fixture_state(&[(addr, 0, false)]);
+        // fixture_state initializes ever_healthy from `healthy`, so
+        // this entry starts with ever_healthy = false (warmup state).
+        let probes: HashMap<IpAddr, bool> = [(addr, true)].into_iter().collect();
+        let mut table = ConfigTable::from_str(SAMPLE_TOML).unwrap();
+
+        apply_probe_results(&mut state, &probes, Instant::now(), &mut table);
+
+        assert!(state[&addr].healthy);
+        assert!(state[&addr].ever_healthy);
+        assert_eq!(
+            state[&addr].transitions, 0,
+            "first-ever recovery is warmup, not a flap"
+        );
+    }
+
+    #[test]
+    fn real_flap_increments_transitions() {
+        // Healthy server fails past threshold, then recovers. That's
+        // one down-flip plus one up-flip = 2 transitions.
+        let addr = addr_v4(1);
+        let mut state = fixture_state(&[(addr, FAILURE_THRESHOLD - 1, true)]);
+        let mut table = ConfigTable::from_str(SAMPLE_TOML).unwrap();
+
+        // Threshold-crossing failure: healthy → unhealthy.
+        let fail: HashMap<IpAddr, bool> = [(addr, false)].into_iter().collect();
+        apply_probe_results(&mut state, &fail, Instant::now(), &mut table);
+        assert!(!state[&addr].healthy);
+        assert_eq!(state[&addr].transitions, 1);
+
+        // Recovery: unhealthy → healthy. ever_healthy was true, so
+        // this counts.
+        let succ: HashMap<IpAddr, bool> = [(addr, true)].into_iter().collect();
+        apply_probe_results(&mut state, &succ, Instant::now(), &mut table);
+        assert!(state[&addr].healthy);
+        assert_eq!(state[&addr].transitions, 2);
+    }
+
+    #[test]
+    fn state_since_unchanged_when_state_does_not_flip() {
+        // Successful probes against an already-healthy server must
+        // leave state_since alone — operators want "healthy for 3h",
+        // not "healthy for 5s" because the last probe just succeeded.
+        let addr = addr_v4(1);
+        let mut state = fixture_state(&[(addr, 0, true)]);
+        let original_state_since = state[&addr].state_since;
+        let probes: HashMap<IpAddr, bool> = [(addr, true)].into_iter().collect();
+        let mut table = ConfigTable::from_str(SAMPLE_TOML).unwrap();
+
+        apply_probe_results(&mut state, &probes, Instant::now(), &mut table);
+
+        assert_eq!(state[&addr].state_since, original_state_since);
+    }
+
+    #[test]
+    fn state_since_resets_at_threshold_crossing_instant() {
+        let addr = addr_v4(1);
+        let mut state = fixture_state(&[(addr, FAILURE_THRESHOLD - 1, true)]);
+        let original_state_since = state[&addr].state_since;
+        let probes: HashMap<IpAddr, bool> = [(addr, false)].into_iter().collect();
+        let mut table = ConfigTable::from_str(SAMPLE_TOML).unwrap();
+        let probe_now = Instant::now();
+
+        apply_probe_results(&mut state, &probes, probe_now, &mut table);
+
+        assert!(!state[&addr].healthy);
+        assert_eq!(state[&addr].state_since, probe_now);
+        assert_ne!(state[&addr].state_since, original_state_since);
     }
 }
