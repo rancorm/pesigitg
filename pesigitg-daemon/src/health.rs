@@ -199,6 +199,11 @@ impl HealthChecker {
             .flat_map(|rc| rc.servers.iter().map(|s| s.address))
             .collect();
 
+        // Drop state for backends no longer in config (SIGHUP can
+        // remove servers); otherwise `state` grows unbounded across
+        // reloads.
+        evict_removed(&mut self.state, &all_addrs);
+
         let mut due: Vec<IpAddr> = Vec::with_capacity(all_addrs.len());
 
         for &addr in &all_addrs {
@@ -347,6 +352,19 @@ fn apply_probe_results(
     }
 
     changed
+}
+
+/// Drop health state for any address not present in `current`. Logs
+/// an `info` line per eviction so operators can correlate config
+/// reloads with state cleanup.
+fn evict_removed(state: &mut HashMap<IpAddr, ServerHealth>, current: &HashSet<IpAddr>) {
+    state.retain(|addr, _| {
+        let keep = current.contains(addr);
+        if !keep {
+            info!("{} removed from config; evicting health state", addr);
+        }
+        keep
+    });
 }
 
 /// Returns the delay until the next probe for a server with the
@@ -688,6 +706,43 @@ address = "10.0.0.2"
         apply_probe_results(&mut state, &probes, Instant::now(), &mut table);
 
         assert_eq!(state[&addr].state_since, original_state_since);
+    }
+
+    // ---------- evict_removed ----------
+
+    #[test]
+    fn evict_removes_addrs_not_in_current_set() {
+        let kept = addr_v4(1);
+        let removed = addr_v4(2);
+        let mut state = fixture_state(&[(kept, 0, true), (removed, 5, false)]);
+        let current: HashSet<IpAddr> = [kept].into_iter().collect();
+
+        evict_removed(&mut state, &current);
+
+        assert!(state.contains_key(&kept));
+        assert!(!state.contains_key(&removed));
+    }
+
+    #[test]
+    fn evict_is_a_noop_when_nothing_was_removed() {
+        let a = addr_v4(1);
+        let b = addr_v4(2);
+        let mut state = fixture_state(&[(a, 0, true), (b, 0, true)]);
+        let current: HashSet<IpAddr> = [a, b].into_iter().collect();
+
+        evict_removed(&mut state, &current);
+
+        assert_eq!(state.len(), 2);
+    }
+
+    #[test]
+    fn evict_clears_all_when_current_is_empty() {
+        let mut state = fixture_state(&[(addr_v4(1), 0, true), (addr_v4(2), 0, false)]);
+        let current: HashSet<IpAddr> = HashSet::new();
+
+        evict_removed(&mut state, &current);
+
+        assert!(state.is_empty());
     }
 
     #[test]
