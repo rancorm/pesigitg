@@ -52,6 +52,10 @@ const XDP_UMEM_PGOFF_COMPLETION_RING: libc::off_t = 0x1_8000_0000;
 /// dimensionally interchangeable.
 pub const DEFAULT_FRAME_COUNT: u32 = 4096;
 
+/// Initial capacity for `scratch_addrs`. Sized for the worker-loop
+/// `BATCH_SIZE` so steady-state refill/complete calls don't reallocate.
+const WORKER_BATCH_HINT: usize = 64;
+
 /// Default UMEM chunk size (bytes per frame slot). 2048 matches
 /// xsk-rs's default frame size and fits an MTU-1500 frame plus
 /// headroom.
@@ -192,6 +196,11 @@ pub struct AdoptedSocket {
     comp: Ring<u64>,
     ifindex: u32,
     queue_id: u32,
+    /// Reused per-batch staging buffer for converting between
+    /// `xdp_desc` (rx/tx rings) and bare `u64` UMEM addrs (fill/comp
+    /// rings). Held on the socket so the worker_socket adapter
+    /// doesn't allocate a fresh `Vec<u64>` per refill/complete call.
+    scratch_addrs: Vec<u64>,
 }
 
 impl AdoptedSocket {
@@ -269,6 +278,7 @@ impl AdoptedSocket {
             comp,
             ifindex,
             queue_id,
+            scratch_addrs: Vec::with_capacity(WORKER_BATCH_HINT),
         })
     }
 
@@ -319,6 +329,7 @@ impl AdoptedSocket {
             comp,
             ifindex,
             queue_id,
+            scratch_addrs: Vec::with_capacity(WORKER_BATCH_HINT),
         })
     }
 
@@ -415,21 +426,53 @@ impl AdoptedSocket {
     ///
     /// If the kernel asserts `XDP_RING_NEED_WAKEUP` on the fill ring
     /// after we produce, poke it via `recvfrom(MSG_DONTWAIT)`.
-    pub fn refill(&mut self, addrs: &[u64]) -> usize {
+    /// Refill the fill ring from a slice of `xdp_desc` (the worker
+    /// loop's native descriptor type). Reuses the per-socket
+    /// `scratch_addrs` buffer to extract the bare UMEM addrs the ring
+    /// expects, so steady-state refills allocate nothing.
+    pub fn refill_descs(&mut self, descs: &[xdp_desc]) -> usize {
+        self.scratch_addrs.clear();
+        self.scratch_addrs.extend(descs.iter().map(|d| d.addr));
         // SAFETY: we are the sole producer of the fill ring.
-        let n = unsafe { self.fill.produce(addrs) };
+        let n = unsafe { self.fill.produce(&self.scratch_addrs) };
         if n > 0 && self.fill.needs_wakeup() {
             let _ = wakeup_recvfrom(&self.fd);
         }
         n
     }
 
-    /// Drain completed TX frame addresses from the completion ring
-    /// into `scratch`. Returns the number of addresses consumed. The
-    /// caller is responsible for handing them back via [`refill`].
-    pub fn complete(&mut self, scratch: &mut [u64]) -> usize {
+    /// Drain the completion ring into `scratch_descs` and immediately
+    /// recycle the freed UMEM addrs back to the fill ring. Returns
+    /// `(consumed, refilled)`; orphans sit in
+    /// `scratch_descs[refilled..consumed]` for the caller to retry.
+    /// Allocation-free in steady state — uses the per-socket
+    /// `scratch_addrs` buffer for the addr/desc bridging.
+    pub fn complete_descs(&mut self, scratch_descs: &mut [xdp_desc]) -> (usize, usize) {
+        self.scratch_addrs.clear();
+        self.scratch_addrs.resize(scratch_descs.len(), 0);
         // SAFETY: we are the sole consumer of the comp ring.
-        unsafe { self.comp.consume(scratch) }
+        let consumed = unsafe { self.comp.consume(&mut self.scratch_addrs) };
+        for (slot, addr) in scratch_descs
+            .iter_mut()
+            .zip(self.scratch_addrs.iter().take(consumed))
+        {
+            *slot = xdp_desc {
+                addr: *addr,
+                len: 0,
+                options: 0,
+            };
+        }
+        let refilled = if consumed > 0 {
+            // SAFETY: we are the sole producer of the fill ring.
+            let n = unsafe { self.fill.produce(&self.scratch_addrs[..consumed]) };
+            if n > 0 && self.fill.needs_wakeup() {
+                let _ = wakeup_recvfrom(&self.fd);
+            }
+            n
+        } else {
+            0
+        };
+        (consumed, refilled)
     }
 }
 

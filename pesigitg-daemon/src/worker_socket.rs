@@ -138,31 +138,11 @@ impl AfXdpSocket for AdoptedSocket {
     }
 
     fn refill(&mut self, descs: &[Self::Frame]) -> usize {
-        // The fill ring takes raw UMEM addresses, not full descriptors.
-        let addrs: Vec<u64> = descs.iter().map(|d| d.addr).collect();
-        AdoptedSocket::refill(self, &addrs)
+        AdoptedSocket::refill_descs(self, descs)
     }
 
     fn complete(&mut self, scratch: &mut [Self::Frame]) -> (usize, usize) {
-        // Drain the completion ring (addresses) directly into a
-        // scratch Vec, then mirror them into the descriptor scratch
-        // and immediately refill via the fill ring. Mirrors the
-        // xsk-rs `complete` shape so the worker loop is identical.
-        let mut addrs = vec![0u64; scratch.len()];
-        let consumed = AdoptedSocket::complete(self, &mut addrs);
-        for (slot, addr) in scratch.iter_mut().zip(addrs.iter().take(consumed)) {
-            *slot = xdp_desc {
-                addr: *addr,
-                len: 0,
-                options: 0,
-            };
-        }
-        let refilled = if consumed > 0 {
-            AdoptedSocket::refill(self, &addrs[..consumed])
-        } else {
-            0
-        };
-        (consumed, refilled)
+        AdoptedSocket::complete_descs(self, scratch)
     }
 
     fn detach_for_fdstore(self) -> Option<(OwnedFd, OwnedFd)> {
