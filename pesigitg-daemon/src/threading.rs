@@ -570,24 +570,42 @@ fn worker_loop_generic<S: AfXdpSocket>(
             let action: Action = {
                 let mut data = unsafe { xsk.frame_view(desc) };
 
-                // Retry fast path: if the classifier emits a Retry
-                // packet in place of the Initial, ship it straight to
-                // TX. Otherwise fall through to the normal routing
-                // logic — Forward and Skip both defer to process_packet
-                // so the CID path still runs.
-                let (retry_outcome, retry_detail) =
-                    retry::datapath::try_handle(&mut data, config, local_mac, now_ms);
-                batch_stats.record_retry(retry_outcome, retry_detail);
-                match retry_outcome {
-                    retry::datapath::Outcome::Emitted => Action::Emitted,
-                    retry::datapath::Outcome::Forward | retry::datapath::Outcome::Skip => {
-                        Action::Verdict(packet::process_packet(
-                            data.contents_mut(),
-                            config,
-                            &mut conn,
-                            local_mac,
-                            now,
-                        ))
+                // Parse Eth/IP/UDP once and share the layout with both
+                // the retry classifier and the routing pipeline. On
+                // parse failure the retry path is a no-op (Skip+None)
+                // and the routing pipeline returns Pass.
+                match packet::parse_frame(data.contents()) {
+                    None => {
+                        batch_stats.record_retry(
+                            retry::datapath::Outcome::Skip,
+                            retry::datapath::Detail::None,
+                        );
+                        Action::Verdict(Verdict::Pass)
+                    }
+                    Some(parsed) => {
+                        // Retry fast path: if the classifier emits a
+                        // Retry packet in place of the Initial, ship it
+                        // straight to TX. Otherwise fall through to
+                        // the normal routing logic — Forward and Skip
+                        // both defer to process_packet_parsed so the
+                        // CID path still runs.
+                        let (retry_outcome, retry_detail) = retry::datapath::try_handle(
+                            &mut data, &parsed, config, local_mac, now_ms,
+                        );
+                        batch_stats.record_retry(retry_outcome, retry_detail);
+                        match retry_outcome {
+                            retry::datapath::Outcome::Emitted => Action::Emitted,
+                            retry::datapath::Outcome::Forward | retry::datapath::Outcome::Skip => {
+                                Action::Verdict(packet::process_packet_parsed(
+                                    data.contents_mut(),
+                                    &parsed,
+                                    config,
+                                    &mut conn,
+                                    local_mac,
+                                    now,
+                                ))
+                            }
+                        }
                     }
                 }
             };

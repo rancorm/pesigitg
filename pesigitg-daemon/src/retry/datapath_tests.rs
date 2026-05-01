@@ -4,6 +4,8 @@
 
 use super::*;
 use crate::config::route::ConfigTable;
+use crate::frame::FrameView;
+use crate::packet;
 use crate::retry::packet::INTEGRITY_TAG_LEN;
 use crate::retry::token::TOKEN_LEN;
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -76,112 +78,43 @@ impl TestFrame {
         }
     }
 
-    /// Analogue of `try_handle` that operates on plain slices so
-    /// tests don't need to stand up a real AF_XDP socket. The
-    /// production path is a thin wrapper around the same logic.
+    /// Drives the production [`try_handle`] entry point. Tests don't
+    /// need a real AF_XDP socket — `TestFrame` itself implements
+    /// [`FrameView`], and we share the same `parse_frame` the worker
+    /// uses on the hot path.
     fn try_handle_slice(
         &mut self,
         table: &ConfigTable,
         local_mac: &[u8; 6],
         now_ms: u64,
     ) -> (Outcome, Detail) {
-        let retry = match table.retry.as_ref() {
-            Some(r) if r.enabled => r,
-            _ => return (Outcome::Skip, Detail::None),
-        };
-        let layout = match parse_layout(&self.buf[..self.len]) {
-            Some(l) => l,
+        let parsed = match packet::parse_frame(&self.buf[..self.len]) {
+            Some(p) => p,
             None => return (Outcome::Skip, Detail::None),
         };
-        if !retry.ports.is_empty() && !retry.ports.contains(&layout.dst_port) {
-            return (Outcome::Skip, Detail::None);
-        }
-        let mut dcid_buf = [0u8; 20];
-        let mut scid_buf = [0u8; 20];
-        let dcid_len;
-        let scid_len;
-        let version;
-        let (decision, detail) = {
-            let quic = &self.buf[layout.quic_offset..self.len];
-            let initial = match initial::parse_strict(quic) {
-                Ok(i) => i,
-                Err(ParseError::NotLongHeader)
-                | Err(ParseError::NotInitial)
-                | Err(ParseError::FixedBitUnset)
-                | Err(ParseError::UnsupportedVersion(_))
-                | Err(ParseError::Truncated) => return (Outcome::Skip, Detail::None),
-                Err(_) => return (Outcome::Skip, Detail::ParseError),
-            };
-            dcid_len = initial.dcid.len();
-            scid_len = initial.scid.len();
-            version = initial.version;
-            dcid_buf[..dcid_len].copy_from_slice(initial.dcid);
-            scid_buf[..scid_len].copy_from_slice(initial.scid);
-            classify(&initial, layout.src_ip, retry, now_ms)
-        };
+        try_handle(self, &parsed, table, local_mac, now_ms)
+    }
+}
 
-        match decision {
-            Decision::Forward => (Outcome::Forward, detail),
-            Decision::Skip => (Outcome::Skip, detail),
-            Decision::Emit => {
-                let outcome = self.emit_slice(
-                    &layout,
-                    version,
-                    &dcid_buf[..dcid_len],
-                    &scid_buf[..scid_len],
-                    retry,
-                    local_mac,
-                    now_ms,
-                );
-                (outcome, detail)
-            }
-        }
+impl FrameView for TestFrame {
+    fn contents(&self) -> &[u8] {
+        &self.buf[..self.len]
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn emit_slice(
-        &mut self,
-        layout: &FrameLayout,
-        version: u32,
-        odcid: &[u8],
-        client_scid: &[u8],
-        retry: &RetryConfig,
-        local_mac: &[u8; 6],
-        now_ms: u64,
-    ) -> Outcome {
-        let token = match retry.token_key.mint(layout.src_ip, odcid, now_ms) {
-            Ok(t) => t,
-            Err(_) => return Outcome::Skip,
-        };
-        let mut retry_buf = [0u8; 128];
-        let n = match build_retry(&mut retry_buf, version, odcid, client_scid, odcid, &token) {
-            Ok(n) => n,
-            Err(_) => return Outcome::Skip,
-        };
-        let retry_bytes = &retry_buf[..n];
+    fn contents_mut(&mut self) -> &mut [u8] {
+        &mut self.buf[..self.len]
+    }
 
-        let mut hdr_buf = [0u8; 64];
-        let hdr_len = build_reflected_headers(&mut hdr_buf, layout, local_mac, retry_bytes.len());
+    fn capacity(&mut self) -> usize {
+        self.buf.len()
+    }
 
-        let total = hdr_len + retry_bytes.len();
-        if total > self.buf.len() {
-            return Outcome::Skip;
+    fn resize(&mut self, new_len: usize) -> Option<&mut [u8]> {
+        if new_len > self.buf.len() {
+            return None;
         }
-        self.buf[..hdr_len].copy_from_slice(&hdr_buf[..hdr_len]);
-        self.buf[hdr_len..total].copy_from_slice(retry_bytes);
-        self.len = total;
-
-        if layout.is_ipv4 {
-            write_ipv4_checksum(
-                &mut self.buf[..self.len],
-                layout.ip_offset,
-                layout.ip_hdr_len,
-            );
-        } else {
-            write_ipv6_udp_checksum(&mut self.buf[..self.len], layout);
-        }
-
-        Outcome::Emitted
+        self.len = new_len;
+        Some(&mut self.buf[..new_len])
     }
 }
 

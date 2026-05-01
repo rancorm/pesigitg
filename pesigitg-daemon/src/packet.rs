@@ -50,10 +50,35 @@ pub enum Verdict {
     Pass,
 }
 
-/// Parsed frame metadata returned by the frame parser.
-enum FrameMeta {
+/// Parsed L2/L3/L4 layout shared between the retry classifier and the
+/// CID/fallback pipeline. Built once per frame in the worker hot loop;
+/// each consumer reads only the fields it needs.
+pub(crate) struct ParsedFrame {
+    pub family: IpFamily,
+    /// Length of the outer IP header (including any IPv6 extension
+    /// headers walked to find the L4 protocol). Equals
+    /// `<l4-offset> - ETH_HDR_LEN`.
+    pub ip_hdr_len: usize,
+    pub src_mac: [u8; 6],
+    pub src_addr: IpAddr,
+    pub dst_addr: IpAddr,
+    pub l4: L4,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IpFamily {
+    Ipv4,
+    Ipv6,
+}
+
+pub(crate) enum L4 {
     /// Regular UDP/QUIC packet.
-    Udp { quic_offset: usize, flow: FlowKey },
+    Udp {
+        udp_offset: usize,
+        quic_offset: usize,
+        src_port: u16,
+        dst_port: u16,
+    },
     /// ICMP error containing an echoed UDP/QUIC packet.
     Icmp {
         inner_quic_offset: usize,
@@ -68,23 +93,50 @@ enum FrameMeta {
 /// 2. **Fallback path**: if the CID is unroutable (client-generated, wrong
 ///    config rotation), check the connection table (4-tuple then DCID),
 ///    then fall back to consistent hashing over the 4-tuple.
-pub fn process_packet(
+///
+/// Test-only entry point: production callers parse once at the worker
+/// loop and dispatch through [`process_packet_parsed`].
+#[cfg(test)]
+pub(crate) fn process_packet(
     frame: &mut [u8],
     table: &ConfigTable,
     conn: &mut ConnectionTable,
     local_mac: &[u8; 6],
     now: Instant,
 ) -> Verdict {
-    let meta = match parse_frame(frame) {
-        Some(m) => m,
-        None => return Verdict::Pass,
-    };
+    match parse_frame(frame) {
+        Some(parsed) => process_packet_parsed(frame, &parsed, table, conn, local_mac, now),
+        None => Verdict::Pass,
+    }
+}
 
-    match meta {
-        FrameMeta::Udp { quic_offset, flow } => {
+/// Variant of [`process_packet`] for callers that have already parsed
+/// the frame layout (e.g. the worker hot loop, which shares one parse
+/// between this pipeline and the Retry classifier).
+pub(crate) fn process_packet_parsed(
+    frame: &mut [u8],
+    parsed: &ParsedFrame,
+    table: &ConfigTable,
+    conn: &mut ConnectionTable,
+    local_mac: &[u8; 6],
+    now: Instant,
+) -> Verdict {
+    match parsed.l4 {
+        L4::Udp {
+            quic_offset,
+            src_port,
+            dst_port,
+            ..
+        } => {
+            let flow = FlowKey {
+                src_addr: parsed.src_addr,
+                dst_addr: parsed.dst_addr,
+                src_port,
+                dst_port,
+            };
             process_udp(frame, table, conn, quic_offset, flow, local_mac, now)
         }
-        FrameMeta::Icmp {
+        L4::Icmp {
             inner_quic_offset,
             reversed_flow,
         } => process_icmp(
@@ -222,22 +274,25 @@ fn fallback_mac(flow: &FlowKey, servers: &[Server]) -> Option<[u8; 6]> {
     servers[target].mac
 }
 
-/// Parse a raw Ethernet frame to extract the QUIC payload offset and 4-tuple.
-fn parse_frame(frame: &[u8]) -> Option<FrameMeta> {
+/// Parse a raw Ethernet frame to extract the L2/L3/L4 layout.
+pub(crate) fn parse_frame(frame: &[u8]) -> Option<ParsedFrame> {
     if frame.len() < ETH_HDR_LEN {
         return None;
     }
 
+    let mut src_mac = [0u8; 6];
+    src_mac.copy_from_slice(&frame[6..12]);
+
     let ethertype = u16::from_be_bytes([frame[12], frame[13]]);
 
     match ethertype {
-        ETH_P_IP => parse_frame_ipv4(frame),
-        ETH_P_IPV6 => parse_frame_ipv6(frame),
+        ETH_P_IP => parse_frame_ipv4(frame, src_mac),
+        ETH_P_IPV6 => parse_frame_ipv6(frame, src_mac),
         _ => None,
     }
 }
 
-fn parse_frame_ipv4(frame: &[u8]) -> Option<FrameMeta> {
+fn parse_frame_ipv4(frame: &[u8], src_mac: [u8; 6]) -> Option<ParsedFrame> {
     if frame.len() < ETH_HDR_LEN + IPV4_MIN_HDR_LEN {
         return None;
     }
@@ -249,6 +304,19 @@ fn parse_frame_ipv4(frame: &[u8]) -> Option<FrameMeta> {
 
     let protocol = frame[ETH_HDR_LEN + 9];
 
+    let src_addr = IpAddr::V4(Ipv4Addr::new(
+        frame[ETH_HDR_LEN + 12],
+        frame[ETH_HDR_LEN + 13],
+        frame[ETH_HDR_LEN + 14],
+        frame[ETH_HDR_LEN + 15],
+    ));
+    let dst_addr = IpAddr::V4(Ipv4Addr::new(
+        frame[ETH_HDR_LEN + 16],
+        frame[ETH_HDR_LEN + 17],
+        frame[ETH_HDR_LEN + 18],
+        frame[ETH_HDR_LEN + 19],
+    ));
+
     match protocol {
         IPPROTO_UDP => {
             let udp_offset = ETH_HDR_LEN + ihl;
@@ -257,38 +325,36 @@ fn parse_frame_ipv4(frame: &[u8]) -> Option<FrameMeta> {
                 return None;
             }
 
-            let src_addr = IpAddr::V4(Ipv4Addr::new(
-                frame[ETH_HDR_LEN + 12],
-                frame[ETH_HDR_LEN + 13],
-                frame[ETH_HDR_LEN + 14],
-                frame[ETH_HDR_LEN + 15],
-            ));
-            let dst_addr = IpAddr::V4(Ipv4Addr::new(
-                frame[ETH_HDR_LEN + 16],
-                frame[ETH_HDR_LEN + 17],
-                frame[ETH_HDR_LEN + 18],
-                frame[ETH_HDR_LEN + 19],
-            ));
             let src_port = u16::from_be_bytes([frame[udp_offset], frame[udp_offset + 1]]);
             let dst_port = u16::from_be_bytes([frame[udp_offset + 2], frame[udp_offset + 3]]);
 
-            Some(FrameMeta::Udp {
-                quic_offset,
-                flow: FlowKey {
-                    src_addr,
-                    dst_addr,
+            Some(ParsedFrame {
+                family: IpFamily::Ipv4,
+                ip_hdr_len: ihl,
+                src_mac,
+                src_addr,
+                dst_addr,
+                l4: L4::Udp {
+                    udp_offset,
+                    quic_offset,
                     src_port,
                     dst_port,
                 },
             })
         }
-        IPPROTO_ICMP => parse_frame_icmp_ipv4(frame, ihl),
+        IPPROTO_ICMP => parse_frame_icmp_ipv4(frame, src_mac, ihl, src_addr, dst_addr),
         _ => None,
     }
 }
 
 /// Parse an ICMP error packet with an echoed IPv4/UDP/QUIC inner packet.
-fn parse_frame_icmp_ipv4(frame: &[u8], outer_ihl: usize) -> Option<FrameMeta> {
+fn parse_frame_icmp_ipv4(
+    frame: &[u8],
+    src_mac: [u8; 6],
+    outer_ihl: usize,
+    src_addr: IpAddr,
+    dst_addr: IpAddr,
+) -> Option<ParsedFrame> {
     let icmp_offset = ETH_HDR_LEN + outer_ihl;
     if frame.len() < icmp_offset + ICMP_HDR_LEN {
         return None;
@@ -338,18 +404,25 @@ fn parse_frame_icmp_ipv4(frame: &[u8], outer_ihl: usize) -> Option<FrameMeta> {
     let inner_dst_port =
         u16::from_be_bytes([frame[inner_udp_offset + 2], frame[inner_udp_offset + 3]]);
 
-    Some(FrameMeta::Icmp {
-        inner_quic_offset,
-        reversed_flow: FlowKey {
-            src_addr: inner_dst,
-            dst_addr: inner_src,
-            src_port: inner_dst_port,
-            dst_port: inner_src_port,
+    Some(ParsedFrame {
+        family: IpFamily::Ipv4,
+        ip_hdr_len: outer_ihl,
+        src_mac,
+        src_addr,
+        dst_addr,
+        l4: L4::Icmp {
+            inner_quic_offset,
+            reversed_flow: FlowKey {
+                src_addr: inner_dst,
+                dst_addr: inner_src,
+                src_port: inner_dst_port,
+                dst_port: inner_src_port,
+            },
         },
     })
 }
 
-fn parse_frame_ipv6(frame: &[u8]) -> Option<FrameMeta> {
+fn parse_frame_ipv6(frame: &[u8], src_mac: [u8; 6]) -> Option<ParsedFrame> {
     if frame.len() < ETH_HDR_LEN + IPV6_HDR_LEN {
         return None;
     }
@@ -387,6 +460,8 @@ fn parse_frame_ipv6(frame: &[u8]) -> Option<FrameMeta> {
         }
     }
 
+    let ip_hdr_len = offset - ETH_HDR_LEN;
+
     match next_hdr {
         IPPROTO_UDP => {
             let udp_offset = offset;
@@ -398,23 +473,36 @@ fn parse_frame_ipv6(frame: &[u8]) -> Option<FrameMeta> {
             let src_port = u16::from_be_bytes([frame[udp_offset], frame[udp_offset + 1]]);
             let dst_port = u16::from_be_bytes([frame[udp_offset + 2], frame[udp_offset + 3]]);
 
-            Some(FrameMeta::Udp {
-                quic_offset,
-                flow: FlowKey {
-                    src_addr,
-                    dst_addr,
+            Some(ParsedFrame {
+                family: IpFamily::Ipv6,
+                ip_hdr_len,
+                src_mac,
+                src_addr,
+                dst_addr,
+                l4: L4::Udp {
+                    udp_offset,
+                    quic_offset,
                     src_port,
                     dst_port,
                 },
             })
         }
-        IPPROTO_ICMPV6 => parse_frame_icmpv6(frame, offset),
+        IPPROTO_ICMPV6 => {
+            parse_frame_icmpv6(frame, src_mac, ip_hdr_len, src_addr, dst_addr, offset)
+        }
         _ => None,
     }
 }
 
 /// Parse an ICMPv6 error packet with an echoed IPv6/UDP/QUIC inner packet.
-fn parse_frame_icmpv6(frame: &[u8], icmp_offset: usize) -> Option<FrameMeta> {
+fn parse_frame_icmpv6(
+    frame: &[u8],
+    src_mac: [u8; 6],
+    ip_hdr_len: usize,
+    src_addr: IpAddr,
+    dst_addr: IpAddr,
+    icmp_offset: usize,
+) -> Option<ParsedFrame> {
     if frame.len() < icmp_offset + ICMP_HDR_LEN {
         return None;
     }
@@ -479,13 +567,20 @@ fn parse_frame_icmpv6(frame: &[u8], icmp_offset: usize) -> Option<FrameMeta> {
     let inner_dst_port = u16::from_be_bytes([frame[inner_offset + 2], frame[inner_offset + 3]]);
     let inner_quic_offset = inner_offset + UDP_HDR_LEN;
 
-    Some(FrameMeta::Icmp {
-        inner_quic_offset,
-        reversed_flow: FlowKey {
-            src_addr: inner_dst_addr,
-            dst_addr: inner_src_addr,
-            src_port: inner_dst_port,
-            dst_port: inner_src_port,
+    Some(ParsedFrame {
+        family: IpFamily::Ipv6,
+        ip_hdr_len,
+        src_mac,
+        src_addr,
+        dst_addr,
+        l4: L4::Icmp {
+            inner_quic_offset,
+            reversed_flow: FlowKey {
+                src_addr: inner_dst_addr,
+                dst_addr: inner_src_addr,
+                src_port: inner_dst_port,
+                dst_port: inner_src_port,
+            },
         },
     })
 }
@@ -495,8 +590,8 @@ fn parse_frame_icmpv6(frame: &[u8], icmp_offset: usize) -> Option<FrameMeta> {
 mod tests;
 
 // Fuzz-only entry point. Lets the libFuzzer harness in `fuzz/` exercise
-// the frame parser without making `parse_frame` or `FrameMeta` part of
-// the crate's normal API surface.
+// the frame parser without making `parse_frame` or `ParsedFrame` part
+// of the crate's public API surface.
 #[cfg(fuzzing)]
 pub(crate) fn fuzz_parse_frame(frame: &[u8]) -> bool {
     parse_frame(frame).is_some()

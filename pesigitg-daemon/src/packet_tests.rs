@@ -602,11 +602,11 @@ fn parse_frame_ipv6_with_fragment_ext() {
 
     f.extend_from_slice(&quic_payload);
 
-    let meta = parse_frame(&f).unwrap();
-    match meta {
-        FrameMeta::Udp { quic_offset, .. } => {
+    let parsed = parse_frame(&f).unwrap();
+    match parsed.l4 {
+        L4::Udp { quic_offset, .. } => {
             assert_eq!(&f[quic_offset..], &quic_payload);
         }
-        _ => panic!("expected FrameMeta::Udp"),
+        _ => panic!("expected L4::Udp"),
     }
 }

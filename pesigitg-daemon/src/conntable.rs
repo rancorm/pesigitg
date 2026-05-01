@@ -35,7 +35,7 @@ const SWEEP_INTERVAL: Duration = Duration::from_secs(5);
 const INITIAL_CAPACITY: usize = 8192;
 
 /// 4-tuple flow identifier.
-#[derive(Hash, Eq, PartialEq)]
+#[derive(Hash, Eq, PartialEq, Clone, Copy)]
 pub struct FlowKey {
     pub src_addr: IpAddr,
     pub dst_addr: IpAddr,

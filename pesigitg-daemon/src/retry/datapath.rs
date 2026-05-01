@@ -34,6 +34,7 @@ use pesigitg_common::{
 use crate::config::retry::{RetryConfig, RetryMode};
 use crate::config::route::ConfigTable;
 use crate::frame::FrameView;
+use crate::packet::{IpFamily, L4, ParsedFrame};
 use crate::quic::initial::{self, Initial, ParseError};
 
 use super::packet::{INTEGRITY_TAG_LEN, build_retry};
@@ -82,6 +83,7 @@ pub enum Detail {
 /// response.
 pub fn try_handle<V: FrameView>(
     data: &mut V,
+    parsed: &ParsedFrame,
     table: &ConfigTable,
     local_mac: &[u8; 6],
     now_ms: u64,
@@ -91,10 +93,10 @@ pub fn try_handle<V: FrameView>(
         _ => return (Outcome::Skip, Detail::None),
     };
 
-    // Carve out a read-only view of the frame so we can parse and run
-    // the policy check before we touch anything. Resize happens via
-    // `data.cursor()` later, after we've committed to emitting.
-    let layout = match parse_layout(data.contents()) {
+    // Promote the shared `ParsedFrame` into the retry-specific layout,
+    // rejecting frames the rewrite path cannot handle (non-UDP, IPv6
+    // with extension headers).
+    let layout = match FrameLayout::from_parsed(parsed) {
         Some(l) => l,
         None => return (Outcome::Skip, Detail::None),
     };
@@ -153,11 +155,13 @@ pub fn try_handle<V: FrameView>(
     }
 }
 
-/// Frame offsets and 4-tuple extracted from the L2/L3/L4 headers.
+/// Frame offsets and 4-tuple extracted from the shared [`ParsedFrame`],
+/// narrowed to the subset the Retry rewrite path knows how to handle
+/// (UDP only, IPv6 without extension headers).
 ///
-/// Kept separate from `packet::FrameMeta` because the Retry path needs
-/// more fields (IP header length for checksum rewrite, the Ethernet
-/// source MAC for reflection) than the CID fast path does.
+/// Kept separate from [`ParsedFrame`] so emit/checksum helpers can
+/// pattern-match on `is_ipv4` without re-asserting "this is UDP" at
+/// every call site.
 #[derive(Debug, Clone, Copy)]
 struct FrameLayout {
     is_ipv4: bool,
@@ -172,109 +176,42 @@ struct FrameLayout {
     dst_port: u16,
 }
 
-fn parse_layout(frame: &[u8]) -> Option<FrameLayout> {
-    if frame.len() < ETH_HDR_LEN {
-        return None;
+impl FrameLayout {
+    fn from_parsed(parsed: &ParsedFrame) -> Option<Self> {
+        let (udp_offset, quic_offset, src_port, dst_port) = match parsed.l4 {
+            L4::Udp {
+                udp_offset,
+                quic_offset,
+                src_port,
+                dst_port,
+            } => (udp_offset, quic_offset, src_port, dst_port),
+            L4::Icmp { .. } => return None,
+        };
+        let is_ipv4 = match parsed.family {
+            IpFamily::Ipv4 => true,
+            IpFamily::Ipv6 => {
+                // Retry only touches Initials sent directly over IPv6
+                // — extension headers are rejected here to keep the
+                // rewrite path simple.
+                if parsed.ip_hdr_len > IPV6_HDR_LEN {
+                    return None;
+                }
+                false
+            }
+        };
+        Some(FrameLayout {
+            is_ipv4,
+            ip_offset: ETH_HDR_LEN,
+            ip_hdr_len: parsed.ip_hdr_len,
+            udp_offset,
+            quic_offset,
+            src_mac: parsed.src_mac,
+            src_ip: parsed.src_addr,
+            dst_ip: parsed.dst_addr,
+            src_port,
+            dst_port,
+        })
     }
-
-    let mut src_mac = [0u8; 6];
-    src_mac.copy_from_slice(&frame[6..12]);
-
-    let ethertype = u16::from_be_bytes([frame[12], frame[13]]);
-
-    match ethertype {
-        ETH_P_IP => parse_layout_ipv4(frame, src_mac),
-        ETH_P_IPV6 => parse_layout_ipv6(frame, src_mac),
-        _ => None,
-    }
-}
-
-fn parse_layout_ipv4(frame: &[u8], src_mac: [u8; 6]) -> Option<FrameLayout> {
-    let ip_offset = ETH_HDR_LEN;
-    if frame.len() < ip_offset + IPV4_MIN_HDR_LEN {
-        return None;
-    }
-    let ihl = ((frame[ip_offset] & 0x0F) as usize) * 4;
-    if ihl < IPV4_MIN_HDR_LEN {
-        return None;
-    }
-    if frame[ip_offset + 9] != IPPROTO_UDP {
-        return None;
-    }
-
-    let udp_offset = ip_offset + ihl;
-    let quic_offset = udp_offset + UDP_HDR_LEN;
-    if quic_offset > frame.len() {
-        return None;
-    }
-
-    let src_ip = IpAddr::from([
-        frame[ip_offset + 12],
-        frame[ip_offset + 13],
-        frame[ip_offset + 14],
-        frame[ip_offset + 15],
-    ]);
-    let dst_ip = IpAddr::from([
-        frame[ip_offset + 16],
-        frame[ip_offset + 17],
-        frame[ip_offset + 18],
-        frame[ip_offset + 19],
-    ]);
-    let src_port = u16::from_be_bytes([frame[udp_offset], frame[udp_offset + 1]]);
-    let dst_port = u16::from_be_bytes([frame[udp_offset + 2], frame[udp_offset + 3]]);
-
-    Some(FrameLayout {
-        is_ipv4: true,
-        ip_offset,
-        ip_hdr_len: ihl,
-        udp_offset,
-        quic_offset,
-        src_mac,
-        src_ip,
-        dst_ip,
-        src_port,
-        dst_port,
-    })
-}
-
-fn parse_layout_ipv6(frame: &[u8], src_mac: [u8; 6]) -> Option<FrameLayout> {
-    // Retry only touches v1 Initials sent directly over IPv6 — extension
-    // headers are rejected here to keep the rewrite path simple. The
-    // existing CID fast path still walks extensions for forwarding.
-    let ip_offset = ETH_HDR_LEN;
-    if frame.len() < ip_offset + IPV6_HDR_LEN {
-        return None;
-    }
-    if frame[ip_offset + 6] != IPPROTO_UDP {
-        return None;
-    }
-
-    let udp_offset = ip_offset + IPV6_HDR_LEN;
-    let quic_offset = udp_offset + UDP_HDR_LEN;
-    if quic_offset > frame.len() {
-        return None;
-    }
-
-    let mut src = [0u8; 16];
-    let mut dst = [0u8; 16];
-    src.copy_from_slice(&frame[ip_offset + 8..ip_offset + 24]);
-    dst.copy_from_slice(&frame[ip_offset + 24..ip_offset + 40]);
-
-    let src_port = u16::from_be_bytes([frame[udp_offset], frame[udp_offset + 1]]);
-    let dst_port = u16::from_be_bytes([frame[udp_offset + 2], frame[udp_offset + 3]]);
-
-    Some(FrameLayout {
-        is_ipv4: false,
-        ip_offset,
-        ip_hdr_len: IPV6_HDR_LEN,
-        udp_offset,
-        quic_offset,
-        src_mac,
-        src_ip: IpAddr::from(src),
-        dst_ip: IpAddr::from(dst),
-        src_port,
-        dst_port,
-    })
 }
 
 /// Outcome of the policy decision, before any bytes are rewritten.
