@@ -30,6 +30,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow, ensure};
+use arc_swap::ArcSwap;
 use log::{debug, error, info, warn};
 use pesigitg_common::{DEFAULT_ROUTE_CONFIG, current_pid, exit, pid_file};
 use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM, SIGUSR1, SIGUSR2};
@@ -154,7 +155,11 @@ fn main() -> Result<()> {
         route_config.fallback_servers.len()
     );
 
-    let route_config = Arc::new(RwLock::new(route_config));
+    // ArcSwap so the worker hot path reads the config table lock-free.
+    // Reload paths (SIGHUP, MAC resolution, health probes) build a new
+    // ConfigTable and atomically swap the Arc; readers in flight keep
+    // their snapshot until the next batch.
+    let route_config = Arc::new(ArcSwap::from_pointee(route_config));
 
     // Load XDP program and populate PORTS map.
     let ebpf = ebpf::load_ebpf(
@@ -216,10 +221,7 @@ fn main() -> Result<()> {
     debug!("worker pool spawned: T+{:.2?}", epoch.elapsed());
 
     // Notify systemd that we're ready with a live status string.
-    notify_ready(&build_status(
-        &args,
-        &route_config.read().expect("lock poisoned"),
-    ));
+    notify_ready(&build_status(&args, &route_config.load()));
 
     // Backends are probed on the first configured port only; see the
     // HEALTH CHECKING section of pesigitgd(8) for the rationale.
@@ -362,7 +364,7 @@ fn main() -> Result<()> {
         if delta.draining_forwarded > 0 {
             draining_had_traffic = true;
         } else if draining_had_traffic {
-            let rc = route_config.read().expect("lock poisoned");
+            let rc = route_config.load();
 
             if rc.has_draining_servers() {
                 info!("all draining servers fully drained — safe to remove from config");
@@ -378,7 +380,7 @@ fn main() -> Result<()> {
         // `systemctl status` reflects current health counts.
         if check_and_rebuild(&route_config, &mut health) {
             let a = args.read().expect("lock poisoned");
-            let rc = route_config.read().expect("lock poisoned");
+            let rc = route_config.load();
             let status = build_status(&a, &rc);
             systemd_notify!(sd_notify::NotifyState::Status(&status));
         }
@@ -415,8 +417,16 @@ fn main() -> Result<()> {
 
 /// Returns `true` if any backend state changed (MAC resolved, health
 /// flipped, etc.), i.e. the caller should refresh systemd's STATUS=.
-fn check_and_rebuild(route_config: &RwLock<ConfigTable>, health: &mut HealthChecker) -> bool {
-    let mut rc = route_config.write().expect("lock poisoned");
+///
+/// Clone-on-write: builds a fresh `ConfigTable` from the live snapshot,
+/// applies neighbor and health updates, and `store`s it back atomically
+/// only if anything actually changed. Workers see either the old or
+/// new table on the next batch; never a half-updated one.
+fn check_and_rebuild(route_config: &ArcSwap<ConfigTable>, health: &mut HealthChecker) -> bool {
+    let current = route_config.load();
+    let mut rc = ConfigTable::clone(&current);
+    drop(current);
+
     let mut rebuild = false;
 
     if rc.has_unresolved_macs() {
@@ -439,6 +449,7 @@ fn check_and_rebuild(route_config: &RwLock<ConfigTable>, health: &mut HealthChec
         info!("rebuild fallback servers");
 
         rc.rebuild_fallback_servers();
+        route_config.store(Arc::new(rc));
     }
 
     rebuild

@@ -14,6 +14,7 @@ path = "src/main.rs"
 pesigitg-common = { workspace = true, features = ["std"] }
 pesigitg-routing = { workspace = true }
 
+arc-swap = "1.7"
 aya = "0.13"
 aes = { workspace = true }
 aes-gcm = "0.10"

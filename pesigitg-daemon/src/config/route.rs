@@ -27,7 +27,13 @@ use super::retry::{RawRetry, RetryConfig};
 ///
 /// The config_id from a CID's first octet is a direct index into this table.
 /// Codepoint 7 is reserved for fallback/unroutable.
-#[derive(Debug)]
+///
+/// `Clone` so the periodic rebuild path (MAC resolution + health probes)
+/// can copy-on-write a fresh table and `ArcSwap::store` it without
+/// blocking workers on a write lock. `RetryConfig::load_tracker` is an
+/// `Arc<LoadRateTracker>`, so its accumulated rate state survives the
+/// clone untouched.
+#[derive(Clone, Debug)]
 pub struct ConfigTable {
     pub path: PathBuf,
     slots: [Option<RouteConfig>; 7],

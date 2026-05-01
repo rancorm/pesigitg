@@ -25,6 +25,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
+use arc_swap::ArcSwap;
 use log::{debug, info, warn};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -53,7 +54,7 @@ impl StatusApi {
     pub fn spawn(
         path: PathBuf,
         args: Arc<RwLock<Args>>,
-        route_config: Arc<RwLock<ConfigTable>>,
+        route_config: Arc<ArcSwap<ConfigTable>>,
         stats: Arc<StatsTable>,
         worker_health: Arc<WorkerHealth>,
         epoch: Instant,
@@ -150,7 +151,7 @@ fn accept_loop(
     listener: UnixListener,
     shutdown: Arc<AtomicBool>,
     args: Arc<RwLock<Args>>,
-    route_config: Arc<RwLock<ConfigTable>>,
+    route_config: Arc<ArcSwap<ConfigTable>>,
     stats: Arc<StatsTable>,
     worker_health: Arc<WorkerHealth>,
     epoch: Instant,
@@ -206,7 +207,7 @@ fn accept_loop(
 fn handle_connection(
     mut stream: UnixStream,
     args: &Arc<RwLock<Args>>,
-    route_config: &Arc<RwLock<ConfigTable>>,
+    route_config: &Arc<ArcSwap<ConfigTable>>,
     stats: &Arc<StatsTable>,
     worker_health: &Arc<WorkerHealth>,
     epoch: Instant,
@@ -476,10 +477,10 @@ fn path_str(p: &Path) -> String {
 
 fn build_config_response(
     args: &Arc<RwLock<Args>>,
-    route_config: &Arc<RwLock<ConfigTable>>,
+    route_config: &Arc<ArcSwap<ConfigTable>>,
 ) -> Value {
     let a = args.read().expect("lock poisoned");
-    let rc = route_config.read().expect("lock poisoned");
+    let rc = route_config.load();
 
     let daemon = DaemonView {
         interface: a.interface.clone(),
@@ -680,7 +681,7 @@ address = "2001:db8::1"
     #[test]
     fn config_response_serializes_args_and_route() {
         let args = Arc::new(RwLock::new(fixture_args()));
-        let table = Arc::new(RwLock::new(fixture_table()));
+        let table = Arc::new(ArcSwap::from_pointee(fixture_table()));
         let v = build_config_response(&args, &table);
 
         assert_eq!(v["daemon"]["interface"], "lo");
@@ -705,7 +706,7 @@ address = "2001:db8::1"
     fn drive_handle_connection(request: &[u8]) -> Value {
         let (server, client) = UnixStream::pair().unwrap();
         let args = Arc::new(RwLock::new(fixture_args()));
-        let table = Arc::new(RwLock::new(fixture_table()));
+        let table = Arc::new(ArcSwap::from_pointee(fixture_table()));
         let stats = Arc::new(StatsTable::new(1));
         let wh = worker_health(1, 1);
         let epoch = Instant::now();

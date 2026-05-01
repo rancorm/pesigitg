@@ -9,6 +9,7 @@ pub mod route;
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
+use arc_swap::ArcSwap;
 use log::{debug, error, info, warn};
 use pesigitg_common::DEFAULT_ROUTE_CONFIG;
 use sd_notify::NotifyState;
@@ -20,7 +21,7 @@ use crate::utils::{notify_ready, systemd_notify};
 use daemon::FileConfig;
 use route::ConfigTable;
 
-pub(crate) fn reload_config(args: &Arc<RwLock<Args>>, route_config: &Arc<RwLock<ConfigTable>>) {
+pub(crate) fn reload_config(args: &Arc<RwLock<Args>>, route_config: &Arc<ArcSwap<ConfigTable>>) {
     debug!("reload_config: starting");
     let reload_start = Instant::now();
 
@@ -73,7 +74,7 @@ pub(crate) fn reload_config(args: &Arc<RwLock<Args>>, route_config: &Arc<RwLock<
 
             log_draining_servers(&rc);
 
-            *route_config.write().expect("lock poisoned") = rc;
+            route_config.store(Arc::new(rc));
         }
         Err(e) => {
             error!(
@@ -85,7 +86,7 @@ pub(crate) fn reload_config(args: &Arc<RwLock<Args>>, route_config: &Arc<RwLock<
 
     notify_ready(&build_status(
         &args.read().expect("lock poisoned"),
-        &route_config.read().expect("lock poisoned"),
+        &route_config.load(),
     ));
 
     debug!("reload_config: complete in {:.2?}", reload_start.elapsed());

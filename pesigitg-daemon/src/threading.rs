@@ -8,7 +8,9 @@ use std::os::fd::{BorrowedFd, OwnedFd};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
+
+use arc_swap::ArcSwap;
 use std::thread::{self, JoinHandle};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -209,7 +211,7 @@ impl WorkerPool {
         threads: Vec<ThreadConfig>,
         interface: &str,
         local_mac: [u8; 6],
-        config: Arc<RwLock<ConfigTable>>,
+        config: Arc<ArcSwap<ConfigTable>>,
         ebpf: Arc<Mutex<EbpfHandle>>,
         shutdown: Arc<AtomicBool>,
         stats: Arc<StatsTable>,
@@ -378,7 +380,7 @@ fn worker_loop(
     interface: &str,
     queue_id: u32,
     local_mac: &[u8; 6],
-    config: &Arc<RwLock<ConfigTable>>,
+    config: &Arc<ArcSwap<ConfigTable>>,
     ebpf: &Arc<Mutex<EbpfHandle>>,
     shutdown: &AtomicBool,
     stats: &WorkerStats,
@@ -428,7 +430,7 @@ fn worker_loop_adopt(
     sockfd: OwnedFd,
     umem_fd: OwnedFd,
     local_mac: &[u8; 6],
-    config: &Arc<RwLock<ConfigTable>>,
+    config: &Arc<ArcSwap<ConfigTable>>,
     ebpf: &Arc<Mutex<EbpfHandle>>,
     shutdown: &AtomicBool,
     stats: &WorkerStats,
@@ -490,7 +492,7 @@ fn worker_loop_generic<S: AfXdpSocket>(
     mut xsk: S,
     queue_id: u32,
     local_mac: &[u8; 6],
-    config: &Arc<RwLock<ConfigTable>>,
+    config: &Arc<ArcSwap<ConfigTable>>,
     shutdown: &AtomicBool,
     stats: &WorkerStats,
 ) -> S {
@@ -546,7 +548,13 @@ fn worker_loop_generic<S: AfXdpSocket>(
             first_packet_logged = true;
         }
 
-        let config = config.read().expect("lock poisoned");
+        // Lock-free read of the current config snapshot. The Guard
+        // holds an Arc<ConfigTable> for the rest of the batch; reload
+        // paths swap a fresh Arc atomically and we pick it up next
+        // batch. Rebind through both Deref hops so callees take a
+        // plain `&ConfigTable` without per-call double-deref.
+        let snap = config.load();
+        let config: &ConfigTable = &snap;
 
         tx_batch.clear();
         recycle_batch.clear();
@@ -568,14 +576,14 @@ fn worker_loop_generic<S: AfXdpSocket>(
                 // logic — Forward and Skip both defer to process_packet
                 // so the CID path still runs.
                 let (retry_outcome, retry_detail) =
-                    retry::datapath::try_handle(&mut data, &config, local_mac, now_ms);
+                    retry::datapath::try_handle(&mut data, config, local_mac, now_ms);
                 batch_stats.record_retry(retry_outcome, retry_detail);
                 match retry_outcome {
                     retry::datapath::Outcome::Emitted => Action::Emitted,
                     retry::datapath::Outcome::Forward | retry::datapath::Outcome::Skip => {
                         Action::Verdict(packet::process_packet(
                             data.contents_mut(),
-                            &config,
+                            config,
                             &mut conn,
                             local_mac,
                             now,
@@ -621,7 +629,7 @@ fn worker_loop_generic<S: AfXdpSocket>(
 
         batch_stats.flush(stats);
 
-        drop(config);
+        drop(snap);
 
         let sent = xsk.transmit(&tx_batch);
         if sent < tx_batch.len() {
