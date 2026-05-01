@@ -497,7 +497,11 @@ fn worker_loop_generic<S: AfXdpSocket>(
     let mut rx_descs = vec![S::zero_frame(); BATCH_SIZE];
     let mut comp_descs = vec![S::zero_frame(); BATCH_SIZE];
     let mut conn = ConnectionTable::new();
-    let mut pending_fill: Vec<S::Frame> = Vec::new();
+    // Worst-case backlog in one iteration: comp leftovers + tx leftovers
+    // + recycle leftovers, each up to BATCH_SIZE. Sizing for 2*BATCH_SIZE
+    // keeps the common overflow case (one of those three stalls) from
+    // reallocating, while a sustained NIC stall will still grow it.
+    let mut pending_fill: Vec<S::Frame> = Vec::with_capacity(BATCH_SIZE * 2);
     let mut tx_batch: Vec<S::Frame> = Vec::with_capacity(BATCH_SIZE);
     let mut recycle_batch: Vec<S::Frame> = Vec::with_capacity(BATCH_SIZE);
 
