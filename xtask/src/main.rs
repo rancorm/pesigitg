@@ -54,6 +54,12 @@ fn main() {
             run_fuzz(&args[1..]);
             eprintln!("[x] fuzz total: {}", fmt_duration(total.elapsed()));
         }
+        Some("clean") => {
+            release = false;
+            let total = Instant::now();
+            run_clean();
+            eprintln!("[x] clean total: {}", fmt_duration(total.elapsed()));
+        }
         _ => {
             eprintln!(
                 "Usage: cargo xtask <COMMAND>\n\n\
@@ -61,6 +67,7 @@ fn main() {
                    build        Build the eBPF program and daemon\n  \
                    build-ebpf   Build only the eBPF program\n  \
                    build-man    Render man pages from man/*.md via pandoc\n  \
+                   clean        Remove every target/ tree (workspace + ebpf + fuzz)\n  \
                    fuzz         Build a libFuzzer target (workaround for cargo-fuzz \
                                  + LLVM ≥ 16, see fn run_fuzz)\n  \
                    lint         Run cargo fmt --check + clippy -D warnings\n  \
@@ -269,6 +276,86 @@ fn fmt_duration(d: std::time::Duration) -> String {
         format!("{}m {:02}s", secs / 60, secs % 60)
     } else {
         format!("{}.{:02}s", secs, d.subsec_millis() / 10)
+    }
+}
+
+/// Sweep every `target/` directory we maintain. The eBPF crate lives
+/// outside the workspace (its own pinned-nightly toolchain) and
+/// `cargo fuzz` writes to a separate `target/` even though the fuzz
+/// crate is a workspace member, so each tree needs an explicit
+/// `cargo clean` against its own manifest.
+fn run_clean() {
+    let root = workspace_root();
+    let targets = [
+        ("workspace", root.join("Cargo.toml")),
+        ("ebpf", root.join("pesigitg-ebpf/Cargo.toml")),
+        ("fuzz", root.join("pesigitg-daemon/fuzz/Cargo.toml")),
+    ];
+
+    for (label, manifest) in targets {
+        let target_dir = manifest
+            .parent()
+            .expect("manifest has no parent")
+            .join("target");
+        let before = dir_size_bytes(&target_dir);
+
+        let t = Instant::now();
+        let status = Command::new(cargo())
+            .arg("clean")
+            .arg("--manifest-path")
+            .arg(&manifest)
+            .status()
+            .expect("failed to spawn cargo clean");
+
+        if !status.success() {
+            eprintln!("[*] cargo clean ({}) failed", label);
+            process::exit(status.code().unwrap_or(1));
+        }
+
+        eprintln!(
+            "[x] {}: {} freed in {}",
+            label,
+            fmt_bytes(before),
+            fmt_duration(t.elapsed()),
+        );
+    }
+}
+
+/// Recursive byte total for a directory, or 0 if it doesn't exist /
+/// can't be read. Best-effort: silent on per-entry stat errors so a
+/// permission glitch doesn't abort the cleanup report.
+fn dir_size_bytes(path: &std::path::Path) -> u64 {
+    let entries = match std::fs::read_dir(path) {
+        Ok(it) => it,
+        Err(_) => return 0,
+    };
+
+    let mut total = 0u64;
+    for entry in entries.flatten() {
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        if meta.is_dir() {
+            total += dir_size_bytes(&entry.path());
+        } else {
+            total += meta.len();
+        }
+    }
+    total
+}
+
+fn fmt_bytes(n: u64) -> String {
+    const UNITS: &[&str] = &["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut v = n as f64;
+    let mut i = 0;
+    while v >= 1024.0 && i + 1 < UNITS.len() {
+        v /= 1024.0;
+        i += 1;
+    }
+    if i == 0 {
+        format!("{} {}", n, UNITS[0])
+    } else {
+        format!("{:.1} {}", v, UNITS[i])
     }
 }
 
