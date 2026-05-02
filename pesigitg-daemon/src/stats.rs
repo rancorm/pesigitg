@@ -277,6 +277,42 @@ impl Snapshot {
     pub fn cid_unroutable(&self) -> u64 {
         self.cid_unroutable_no_server + self.cid_unroutable_bad_server_id
     }
+
+    /// Fraction of presented Retry tokens whose HMAC failed, over all
+    /// tokens we ran through `verify` (valid + invalid + expired).
+    /// Returns `0.0` when no tokens have been presented.
+    ///
+    /// Operational meaning: a baseline of zero or low-single-digits is
+    /// normal (race against rotation, packet corruption); a sustained
+    /// double-digit rate is a forgery signal worth investigating.
+    pub fn retry_forgery_rate(&self) -> f64 {
+        let denom =
+            self.retry_token_validated + self.retry_token_invalid + self.retry_token_expired;
+        ratio(self.retry_token_invalid, denom)
+    }
+
+    /// Fraction of CIDs that matched a real config but decrypted to an
+    /// unknown server_id, over all CIDs that matched a config (routed +
+    /// no_server + bad_server_id). Returns `0.0` when no CIDs have
+    /// matched a config.
+    ///
+    /// Distinct from [`Self::retry_forgery_rate`]: this catches
+    /// attackers (or buggy clients) feeding the LB CIDs whose first
+    /// octet hits a live config_id by chance. A nonzero rate without a
+    /// recent backend removal is the QUIC-LB probing signal.
+    pub fn cid_probing_rate(&self) -> f64 {
+        let denom =
+            self.cid_routed + self.cid_unroutable_no_server + self.cid_unroutable_bad_server_id;
+        ratio(self.cid_unroutable_bad_server_id, denom)
+    }
+}
+
+/// `n / d` as `f64`, returning `0.0` when `d == 0`. Counters that fit
+/// in `u53` are exact in `f64`; rotation-decision telemetry doesn't
+/// need more precision.
+#[allow(clippy::cast_precision_loss)]
+fn ratio(n: u64, d: u64) -> f64 {
+    if d == 0 { 0.0 } else { n as f64 / d as f64 }
 }
 
 impl Snapshot {
@@ -701,6 +737,47 @@ mod tests {
         assert!(out.contains("cid_unroutable=12"));
         assert!(out.contains("no_srv=5"));
         assert!(out.contains("bad_id=7"));
+    }
+
+    #[test]
+    fn retry_forgery_rate_is_zero_when_no_tokens() {
+        let s = Snapshot::default();
+        assert_eq!(s.retry_forgery_rate(), 0.0);
+    }
+
+    #[test]
+    fn retry_forgery_rate_includes_expired_in_denominator() {
+        // Expired tokens (valid HMAC, just stale) are not forgeries —
+        // but they ARE tokens we successfully verified, so they belong
+        // in the denominator. Numerator: invalid only.
+        let s = Snapshot {
+            retry_token_validated: 90,
+            retry_token_invalid: 5,
+            retry_token_expired: 5,
+            ..Snapshot::default()
+        };
+        // 5 / (90 + 5 + 5) = 0.05
+        assert!((s.retry_forgery_rate() - 0.05).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn cid_probing_rate_is_zero_when_no_cids_matched_a_config() {
+        let s = Snapshot::default();
+        assert_eq!(s.cid_probing_rate(), 0.0);
+    }
+
+    #[test]
+    fn cid_probing_rate_excludes_drain_signal_from_numerator() {
+        // 50 routed + 30 no-server (drain) + 20 bad-id (forgery).
+        // Probing rate = bad_id / (routed + no_server + bad_id)
+        //              = 20 / 100 = 0.20.
+        let s = Snapshot {
+            cid_routed: 50,
+            cid_unroutable_no_server: 30,
+            cid_unroutable_bad_server_id: 20,
+            ..Snapshot::default()
+        };
+        assert!((s.cid_probing_rate() - 0.20).abs() < f64::EPSILON);
     }
 
     #[test]

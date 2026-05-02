@@ -295,6 +295,11 @@ struct SnapshotView {
     /// CID matched a config but decryption produced an unknown
     /// server_id. Forgery / probing signal under a live config.
     cid_unroutable_bad_server_id: u64,
+    /// Fraction of CIDs that matched a real config but decrypted to an
+    /// unknown server_id, relative to all CIDs that matched a config.
+    /// QUIC-LB probing signal; pair with `cid_unroutable_bad_server_id`
+    /// when deciding whether to rotate the LB key.
+    cid_probing_rate: f64,
     draining_forwarded: u64,
     icmp_forwarded: u64,
     passed: u64,
@@ -310,6 +315,10 @@ struct RetryView {
     token_invalid: u64,
     token_expired: u64,
     parse_error: u64,
+    /// Fraction of presented tokens whose HMAC failed, relative to
+    /// every token verify() processed. Forgery signal — pair with
+    /// `token_invalid` when deciding whether to rotate the retry key.
+    forgery_rate: f64,
 }
 
 impl From<&Snapshot> for SnapshotView {
@@ -329,6 +338,7 @@ impl From<&Snapshot> for SnapshotView {
             cid_unroutable: s.cid_unroutable(),
             cid_unroutable_no_server: s.cid_unroutable_no_server,
             cid_unroutable_bad_server_id: s.cid_unroutable_bad_server_id,
+            cid_probing_rate: s.cid_probing_rate(),
             draining_forwarded: s.draining_forwarded,
             icmp_forwarded: s.icmp_forwarded,
             passed: s.passed,
@@ -340,6 +350,7 @@ impl From<&Snapshot> for SnapshotView {
                 token_invalid: s.retry_token_invalid,
                 token_expired: s.retry_token_expired,
                 parse_error: s.retry_parse_error,
+                forgery_rate: s.retry_forgery_rate(),
             },
         }
     }
