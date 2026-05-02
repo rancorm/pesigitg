@@ -562,6 +562,11 @@ fn worker_loop_generic<S: AfXdpSocket>(
         stats.record_rx(n as u64);
 
         let mut batch_stats = BatchStats::new();
+        // Per-batch tally of Retry classifier Initials under
+        // RetryMode::Load. Flushed once at end-of-batch into the
+        // shared LoadRateTracker via record_batch — avoids a shared
+        // fetch_add per Initial. Stays at 0 in Always/Observe modes.
+        let mut pending_load_initials: u64 = 0;
 
         for desc in rx_descs[..n].iter_mut() {
             // Compute the dispatch decision in an inner scope so the
@@ -590,7 +595,12 @@ fn worker_loop_generic<S: AfXdpSocket>(
                         // both defer to process_packet_parsed so the
                         // CID path still runs.
                         let (retry_outcome, retry_detail) = retry::datapath::try_handle(
-                            &mut data, &parsed, config, local_mac, now_ms,
+                            &mut data,
+                            &parsed,
+                            config,
+                            local_mac,
+                            now_ms,
+                            &mut pending_load_initials,
                         );
                         batch_stats.record_retry(retry_outcome, retry_detail);
                         match retry_outcome {
@@ -650,6 +660,15 @@ fn worker_loop_generic<S: AfXdpSocket>(
         }
 
         batch_stats.flush(stats);
+
+        // Flush this batch's per-Initial tally into the shared
+        // LoadRateTracker. One fetch_add(count) per worker per batch
+        // instead of one fetch_add(1) per Initial — replaces the
+        // cross-worker cache-line bounce with a single coalesced
+        // update. Skip when retry is disabled or not in Load mode.
+        if let Some(tracker) = config.retry.as_ref().and_then(|r| r.load_tracker.as_ref()) {
+            tracker.record_batch(pending_load_initials, now_ms);
+        }
 
         drop(snap);
 

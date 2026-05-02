@@ -14,6 +14,19 @@ const LOCAL_MAC: [u8; 6] = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66];
 const CLIENT_MAC: [u8; 6] = [0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa];
 const KEY_HEX: &str = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20";
 
+/// Test wrapper that absorbs `classify`'s `pending_load_initials`
+/// out-param. The tracker's own tests cover `record_batch`, so most
+/// classifier tests don't care about the per-batch tally.
+fn classify_t(
+    initial: &Initial<'_>,
+    src_ip: std::net::IpAddr,
+    retry: &RetryConfig,
+    now_ms: u64,
+) -> (Decision, Detail) {
+    let mut pending = 0u64;
+    classify(initial, src_ip, retry, now_ms, &mut pending)
+}
+
 fn make_table(retry_toml: &str) -> ConfigTable {
     let toml = format!(
         r#"
@@ -92,7 +105,10 @@ impl TestFrame {
             Some(p) => p,
             None => return (Outcome::Skip, Detail::None),
         };
-        try_handle(self, &parsed, table, local_mac, now_ms)
+        // Tests don't validate the per-batch Load tally — the tracker's
+        // own tests cover record_batch — so a throwaway local works.
+        let mut pending = 0u64;
+        try_handle(self, &parsed, table, local_mac, now_ms, &mut pending)
     }
 }
 
@@ -192,7 +208,7 @@ fn classify_always_mode_no_token_emits() {
     let initial = initial::parse_strict(&quic).unwrap();
     let src = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1));
     assert_eq!(
-        classify(&initial, src, retry, 1_000),
+        classify_t(&initial, src, retry, 1_000),
         (Decision::Emit, Detail::Issued),
     );
 }
@@ -209,7 +225,7 @@ fn classify_valid_token_forwards() {
     let quic = build_v1_initial(&dcid, &[0xbb; 4], &tok);
     let initial = initial::parse_strict(&quic).unwrap();
     assert_eq!(
-        classify(&initial, src, retry, 1_100),
+        classify_t(&initial, src, retry, 1_100),
         (Decision::Forward, Detail::TokenValid),
     );
 }
@@ -228,7 +244,7 @@ fn classify_expired_token_reissues() {
     let initial = initial::parse_strict(&quic).unwrap();
     // Lifetime = 1000 ms, verify at +5s → expired → re-Retry.
     assert_eq!(
-        classify(&initial, src, retry, 6_000),
+        classify_t(&initial, src, retry, 6_000),
         (Decision::Emit, Detail::TokenExpired),
     );
 }
@@ -246,7 +262,7 @@ fn classify_wrong_client_reissues() {
     let quic = build_v1_initial(&dcid, &[0xbb; 4], &tok);
     let initial = initial::parse_strict(&quic).unwrap();
     assert_eq!(
-        classify(&initial, attacker, retry, 1_100),
+        classify_t(&initial, attacker, retry, 1_100),
         (Decision::Emit, Detail::TokenInvalid),
     );
 }
@@ -261,23 +277,21 @@ fn classify_observe_never_emits() {
     let initial = initial::parse_strict(&quic).unwrap();
     let src = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1));
     assert_eq!(
-        classify(&initial, src, retry, 1_000),
+        classify_t(&initial, src, retry, 1_000),
         (Decision::Skip, Detail::Observed),
     );
 }
 
-/// Seed the load tracker so `observe_and_rate` reports `rate` from
-/// the last completed window. The shared-atomic tracker only
-/// publishes once a window flips, so this walks two windows.
+/// Seed the load tracker so [`LoadRateTracker::rate`] reports `rate`
+/// from the last completed window. The tracker only publishes once a
+/// window flips, so this walks two windows.
 fn seed_load_rate(retry: &RetryConfig, rate: u64) {
     let tracker = retry.load_tracker.as_ref().expect("load tracker present");
-    // Window 0 at t=0 accumulates `rate` ticks...
-    for _ in 0..rate {
-        tracker.observe_and_rate(0);
-    }
-    // ...then a single observation at t=1s flips us into window 1
-    // and publishes the window-0 count as `last_rate`.
-    tracker.observe_and_rate(1_000);
+    // Window 0 at t=0 accumulates `rate` ticks in one batch, then a
+    // zero-count batch at t=1s flips us into window 1 and publishes
+    // the window-0 count as `last_rate`.
+    tracker.record_batch(rate, 0);
+    tracker.record_batch(0, 1_000);
     assert_eq!(tracker.rate(), rate);
 }
 
@@ -295,7 +309,7 @@ fn classify_load_below_trigger_skips() {
     let initial = initial::parse_strict(&quic).unwrap();
     let src = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1));
     assert_eq!(
-        classify(&initial, src, retry, 1_500),
+        classify_t(&initial, src, retry, 1_500),
         (Decision::Skip, Detail::Observed),
     );
 }
@@ -314,7 +328,7 @@ fn classify_load_at_trigger_emits() {
     let initial = initial::parse_strict(&quic).unwrap();
     let src = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1));
     assert_eq!(
-        classify(&initial, src, retry, 1_500),
+        classify_t(&initial, src, retry, 1_500),
         (Decision::Emit, Detail::Issued),
     );
 }
@@ -338,14 +352,14 @@ fn classify_load_invalid_token_gated_by_rate() {
 
     // Below trigger: Skip + TokenInvalid.
     assert_eq!(
-        classify(&initial, attacker, retry, 1_100),
+        classify_t(&initial, attacker, retry, 1_100),
         (Decision::Skip, Detail::TokenInvalid),
     );
 
     // Now bump the rate above the trigger.
     seed_load_rate(retry, 200);
     assert_eq!(
-        classify(&initial, attacker, retry, 1_500),
+        classify_t(&initial, attacker, retry, 1_500),
         (Decision::Emit, Detail::TokenInvalid),
     );
 }
@@ -682,7 +696,7 @@ fn v2_valid_token_forwards() {
     let quic = build_v2_initial(&dcid, &[0xbb; 4], &tok);
     let initial = initial::parse_strict(&quic).unwrap();
     assert_eq!(
-        classify(&initial, src, retry, 1_100),
+        classify_t(&initial, src, retry, 1_100),
         (Decision::Forward, Detail::TokenValid),
     );
 }

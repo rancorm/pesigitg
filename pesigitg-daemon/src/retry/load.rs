@@ -4,12 +4,12 @@
 
 //! Shared rate tracker for [`crate::config::retry::RetryMode::Load`].
 //!
-//! Workers call [`LoadRateTracker::observe_and_rate`] once per Initial
-//! that reaches the Retry classifier in Load mode. The tracker maintains
-//! a fixed one-second sliding window across every worker using plain
-//! atomics — concurrent observations race but the race is bounded by a
-//! single counter reset per second, so the rate estimate stays within a
-//! handful of packets of the true count.
+//! Workers count Initial classifications locally inside the batch loop,
+//! then flush each batch's tally into a shared one-second sliding window
+//! via a single [`LoadRateTracker::record_batch`] call. Per-Initial code
+//! reads the current decision rate via [`LoadRateTracker::rate`] (a plain
+//! relaxed load) — never a `fetch_add` — so the cross-worker cache line
+//! is touched once per batch instead of once per packet.
 //!
 //! The returned value is the count from the **most recently completed**
 //! window, so callers compare it against the configured trigger rate to
@@ -27,8 +27,8 @@ pub struct LoadRateTracker {
     /// Events observed so far in the current window.
     window_count: AtomicU64,
     /// Count from the most recently completed window. This is what
-    /// [`observe_and_rate`](Self::observe_and_rate) returns — the rate
-    /// decision lags one window, which is the price of not locking.
+    /// [`rate`](Self::rate) returns — the decision lags one window,
+    /// which is the price of not locking.
     last_rate: AtomicU64,
 }
 
@@ -41,12 +41,19 @@ impl LoadRateTracker {
         }
     }
 
-    /// Record one observation and return the last completed window's rate.
+    /// Read the most recently completed window's rate without touching
+    /// the shared counter. Used per-Initial in the hot path.
+    #[inline(always)]
+    pub fn rate(&self) -> u64 {
+        self.last_rate.load(Ordering::Relaxed)
+    }
+
+    /// Flush a batch's tally into the shared window and rotate windows
+    /// if the wall-clock second has advanced.
     ///
-    /// `now_ms` is the current wall-clock time in milliseconds. Callers
-    /// already sample it once per batch for the token path, so threading
-    /// it through here costs nothing extra.
-    pub fn observe_and_rate(&self, now_ms: u64) -> u64 {
+    /// `count == 0` is still useful to drive window rotation when a
+    /// worker observes the second-tick boundary in an idle batch.
+    pub fn record_batch(&self, count: u64, now_ms: u64) {
         let now_sec = now_ms / 1000;
         let cur = self.window_sec.load(Ordering::Relaxed);
 
@@ -64,15 +71,9 @@ impl LoadRateTracker {
             }
         }
 
-        self.window_count.fetch_add(1, Ordering::Relaxed);
-        self.last_rate.load(Ordering::Relaxed)
-    }
-
-    /// Inspect the last completed window's rate without counting an event.
-    /// Used by stats dumps and tests.
-    #[allow(dead_code)]
-    pub fn rate(&self) -> u64 {
-        self.last_rate.load(Ordering::Relaxed)
+        if count > 0 {
+            self.window_count.fetch_add(count, Ordering::Relaxed);
+        }
     }
 }
 
@@ -92,52 +93,57 @@ mod tests {
         // at zero for every observation inside the first second.
         let t = LoadRateTracker::new();
         for _ in 0..100 {
-            assert_eq!(t.observe_and_rate(0), 0);
+            t.record_batch(1, 0);
+            assert_eq!(t.rate(), 0);
         }
     }
 
     #[test]
     fn completed_window_publishes_count() {
         let t = LoadRateTracker::new();
-        // Seed one observation in window 0 so window_sec is non-zero.
-        t.observe_and_rate(0);
-        for _ in 0..49 {
-            t.observe_and_rate(500);
-        }
-        // Roll into window 1 — returned rate should now be the 50 events
-        // from window 0.
-        assert_eq!(t.observe_and_rate(1_000), 50);
+        // Seed window 0 with 50 observations across two batches.
+        t.record_batch(1, 0);
+        t.record_batch(49, 500);
+        // Roll into window 1 — rate should now reflect window 0's 50.
+        t.record_batch(0, 1_000);
+        assert_eq!(t.rate(), 50);
     }
 
     #[test]
     fn rate_tracks_across_successive_windows() {
         let t = LoadRateTracker::new();
-        // Window 0: 3 events
-        for _ in 0..3 {
-            t.observe_and_rate(100);
-        }
+        // Window 0: 3 events.
+        t.record_batch(3, 100);
         // Roll to window 1 and add 10 events.
-        t.observe_and_rate(1_000);
-        for _ in 0..9 {
-            t.observe_and_rate(1_500);
-        }
+        t.record_batch(10, 1_500);
         // During window 1 we should see window 0's rate (=3).
         assert_eq!(t.rate(), 3);
         // Roll to window 2 — now window 1's rate (=10) is published.
-        t.observe_and_rate(2_100);
+        t.record_batch(0, 2_100);
         assert_eq!(t.rate(), 10);
     }
 
     #[test]
     fn idle_gap_publishes_last_full_window() {
         let t = LoadRateTracker::new();
-        for _ in 0..7 {
-            t.observe_and_rate(100);
-        }
-        // Jump five seconds forward with one observation — the prior
-        // window's 7 events are the rate we now report.
-        t.observe_and_rate(5_000);
+        t.record_batch(7, 100);
+        // Jump five seconds forward — the prior window's 7 events are
+        // the rate we now report.
+        t.record_batch(0, 5_000);
         assert_eq!(t.rate(), 7);
+    }
+
+    #[test]
+    fn record_batch_zero_is_a_noop_on_count() {
+        // Window 0 stays empty, so when we roll into window 1 the
+        // published rate is 0 — the all-zero record_batch did not
+        // accidentally bump the counter.
+        let t = LoadRateTracker::new();
+        for _ in 0..10 {
+            t.record_batch(0, 100);
+        }
+        t.record_batch(1, 1_000);
+        assert_eq!(t.rate(), 0);
     }
 
     #[test]
@@ -147,7 +153,7 @@ mod tests {
 
         let t = Arc::new(LoadRateTracker::new());
         // Seed window 0.
-        t.observe_and_rate(0);
+        t.record_batch(1, 0);
 
         let threads = 8;
         let per_thread = 1_000;
@@ -156,7 +162,8 @@ mod tests {
                 let t = Arc::clone(&t);
                 thread::spawn(move || {
                     for _ in 0..per_thread {
-                        t.observe_and_rate(500);
+                        // Worst case: every "batch" is one event.
+                        t.record_batch(1, 500);
                     }
                 })
             })
@@ -166,7 +173,7 @@ mod tests {
         }
 
         // Roll into window 1 so the accumulated count is published.
-        t.observe_and_rate(1_000);
+        t.record_batch(0, 1_000);
         let reported = t.rate();
         let expected = threads * per_thread + 1;
         // Allow for the narrow window where the CAS winner swaps count to

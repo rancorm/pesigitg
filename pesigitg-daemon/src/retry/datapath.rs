@@ -87,6 +87,7 @@ pub fn try_handle<V: FrameView>(
     table: &ConfigTable,
     local_mac: &[u8; 6],
     now_ms: u64,
+    pending_load_initials: &mut u64,
 ) -> (Outcome, Detail) {
     let retry = match table.retry.as_ref() {
         Some(r) if r.enabled => r,
@@ -133,7 +134,13 @@ pub fn try_handle<V: FrameView>(
         version = initial.version;
         dcid_buf[..dcid_len].copy_from_slice(initial.dcid);
         scid_buf[..scid_len].copy_from_slice(initial.scid);
-        classify(&initial, layout.src_ip, retry, now_ms)
+        classify(
+            &initial,
+            layout.src_ip,
+            retry,
+            now_ms,
+            pending_load_initials,
+        )
     };
 
     match decision {
@@ -234,6 +241,7 @@ fn classify(
     src_ip: IpAddr,
     retry: &RetryConfig,
     now_ms: u64,
+    pending_load_initials: &mut u64,
 ) -> (Decision, Detail) {
     // A client that already has a valid token skips Retry in every mode.
     // An invalid/expired token is treated as "no token" — re-Retry so
@@ -248,10 +256,16 @@ fn classify(
         ) {
             Ok(()) => return (Decision::Forward, Detail::TokenValid),
             Err(VerifyError::Invalid) => {
-                return (load_gated_decision(retry, now_ms), Detail::TokenInvalid);
+                return (
+                    load_gated_decision(retry, pending_load_initials),
+                    Detail::TokenInvalid,
+                );
             }
             Err(VerifyError::Expired) => {
-                return (load_gated_decision(retry, now_ms), Detail::TokenExpired);
+                return (
+                    load_gated_decision(retry, pending_load_initials),
+                    Detail::TokenExpired,
+                );
             }
         }
     }
@@ -262,7 +276,7 @@ fn classify(
         // reflect real decisions, but never emits.
         RetryMode::Observe => (Decision::Skip, Detail::Observed),
         RetryMode::Load => {
-            if load_over_trigger(retry, now_ms) {
+            if load_over_trigger(retry, pending_load_initials) {
                 (Decision::Emit, Detail::Issued)
             } else {
                 (Decision::Skip, Detail::Observed)
@@ -274,12 +288,12 @@ fn classify(
 /// Collapse `(mode, trigger)` into an Emit/Skip decision for the
 /// invalid/expired-token branches. Always → Emit, Observe → Skip, Load
 /// → Emit iff the Initial-rate is over the configured trigger.
-fn load_gated_decision(retry: &RetryConfig, now_ms: u64) -> Decision {
+fn load_gated_decision(retry: &RetryConfig, pending_load_initials: &mut u64) -> Decision {
     match retry.mode {
         RetryMode::Always => Decision::Emit,
         RetryMode::Observe => Decision::Skip,
         RetryMode::Load => {
-            if load_over_trigger(retry, now_ms) {
+            if load_over_trigger(retry, pending_load_initials) {
                 Decision::Emit
             } else {
                 Decision::Skip
@@ -288,10 +302,13 @@ fn load_gated_decision(retry: &RetryConfig, now_ms: u64) -> Decision {
     }
 }
 
-/// Tick the shared rate counter and compare against the configured
-/// trigger. Precondition: `retry.mode == RetryMode::Load` — the
-/// `expect`s are validated at config load time.
-fn load_over_trigger(retry: &RetryConfig, now_ms: u64) -> bool {
+/// Bump the per-batch local Initial counter and compare the last
+/// completed window's rate against the configured trigger. The shared
+/// counter is **not** touched here — `record_batch` flushes the
+/// per-batch tally at end-of-batch in the worker loop. Precondition:
+/// `retry.mode == RetryMode::Load` — `expect`s are validated at config
+/// load time.
+fn load_over_trigger(retry: &RetryConfig, pending_load_initials: &mut u64) -> bool {
     let tracker = retry
         .load_tracker
         .as_ref()
@@ -299,7 +316,8 @@ fn load_over_trigger(retry: &RetryConfig, now_ms: u64) -> bool {
     let trigger = retry
         .load_trigger_rate
         .expect("load_trigger_rate is Some when mode is Load");
-    tracker.observe_and_rate(now_ms) >= trigger
+    *pending_load_initials += 1;
+    tracker.rate() >= trigger
 }
 
 /// Write the Retry response into the frame's UMEM buffer and update the
