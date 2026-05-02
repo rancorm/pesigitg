@@ -99,9 +99,9 @@ fn resolve_config(path: &str, server_id_hex: &str) -> Result<CidGenParams> {
 
                 let sum = raw.server_id_length as u16 + raw.nonce_length as u16;
                 if sum == 16 {
-                    Encryption::SinglePass { key }
+                    Encryption::single_pass(key)
                 } else {
-                    Encryption::FourPass { key }
+                    Encryption::four_pass(key)
                 }
             }
         };

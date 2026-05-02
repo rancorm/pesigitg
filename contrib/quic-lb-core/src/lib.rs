@@ -22,12 +22,59 @@ use aes::Aes128;
 use aes::cipher::{BlockEncrypt, KeyInit, generic_array::GenericArray};
 use rand::RngCore;
 
-/// CID encryption mode, mirroring pesigitgd's `Encryption` enum.
-#[derive(Debug, Clone)]
+/// CID encryption mode.
+///
+/// The pre-computed [`Aes128`] cipher avoids a key schedule per encode
+/// (~1500 cycles), mirroring the daemon-side decoder in
+/// `pesigitg-routing::route::Encryption`. Use [`Self::single_pass`] /
+/// [`Self::four_pass`] to construct — both fields stay public so callers
+/// can `match enc { Encryption::SinglePass { key, .. } => ... }`.
 pub enum Encryption {
     Plaintext,
-    SinglePass { key: [u8; 16] },
-    FourPass { key: [u8; 16] },
+    SinglePass { key: [u8; 16], cipher: Aes128 },
+    FourPass { key: [u8; 16], cipher: Aes128 },
+}
+
+impl Encryption {
+    /// Build a single-pass AES-128-ECB encryption mode (used when
+    /// `server_id_length + nonce_length == 16`).
+    pub fn single_pass(key: [u8; 16]) -> Self {
+        Self::SinglePass {
+            cipher: Aes128::new(GenericArray::from_slice(&key)),
+            key,
+        }
+    }
+
+    /// Build a four-pass Feistel encryption mode (used when
+    /// `server_id_length + nonce_length != 16` and ≤ 19).
+    pub fn four_pass(key: [u8; 16]) -> Self {
+        Self::FourPass {
+            cipher: Aes128::new(GenericArray::from_slice(&key)),
+            key,
+        }
+    }
+}
+
+impl Clone for Encryption {
+    fn clone(&self) -> Self {
+        // `Aes128` doesn't impl `Clone`; rebuild from the raw key.
+        // Cold path — encoders aren't cloned per packet.
+        match self {
+            Self::Plaintext => Self::Plaintext,
+            Self::SinglePass { key, .. } => Self::single_pass(*key),
+            Self::FourPass { key, .. } => Self::four_pass(*key),
+        }
+    }
+}
+
+impl std::fmt::Debug for Encryption {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Plaintext => write!(f, "Plaintext"),
+            Self::SinglePass { .. } => write!(f, "SinglePass"),
+            Self::FourPass { .. } => write!(f, "FourPass"),
+        }
+    }
 }
 
 /// QUIC-LB CID encoder for a single server identity.
@@ -91,17 +138,17 @@ impl QuicLbEncoder {
         payload[..sid_len].copy_from_slice(&self.server_id);
         rand::rng().fill_bytes(&mut payload[sid_len..payload_len]);
 
-        // Encrypt in place.
+        // Encrypt in place using the pre-computed cipher.
         match &self.encryption {
             Encryption::Plaintext => {}
-            Encryption::SinglePass { key } => {
+            Encryption::SinglePass { cipher, .. } => {
                 let mut block = [0u8; 16];
                 block[..payload_len].copy_from_slice(&payload[..payload_len]);
-                Self::encrypt_single_pass(&mut block, key);
+                Self::encrypt_single_pass(&mut block, cipher);
                 payload[..16].copy_from_slice(&block);
             }
-            Encryption::FourPass { key } => {
-                Self::encrypt_four_pass(&mut payload[..payload_len], sid_len, nonce_len, key);
+            Encryption::FourPass { cipher, .. } => {
+                Self::encrypt_four_pass(&mut payload[..payload_len], sid_len, nonce_len, cipher);
             }
         }
 
@@ -137,17 +184,14 @@ impl QuicLbEncoder {
     }
 
     /// Encrypt the plaintext block (server_id || nonce) using AES-128-ECB.
-    fn encrypt_single_pass(payload: &mut [u8; 16], key: &[u8; 16]) {
-        let cipher = Aes128::new(GenericArray::from_slice(key));
+    fn encrypt_single_pass(payload: &mut [u8; 16], cipher: &Aes128) {
         let mut block = *GenericArray::from_slice(&payload[..]);
         cipher.encrypt_block(&mut block);
         payload.copy_from_slice(&block);
     }
 
     /// Four-pass Feistel encryption per Section 5.6 of the spec.
-    fn encrypt_four_pass(buf: &mut [u8], sid_len: usize, nonce_len: usize, key: &[u8; 16]) {
-        let cipher = Aes128::new(GenericArray::from_slice(key));
-
+    fn encrypt_four_pass(buf: &mut [u8], sid_len: usize, nonce_len: usize, cipher: &Aes128) {
         for i in 0..4u8 {
             let mut block = [0u8; 16];
 
@@ -193,7 +237,7 @@ mod tests {
             0,
             vec![0x00, 0x00, 0x01],
             13,
-            Encryption::SinglePass { key: TEST_KEY },
+            Encryption::single_pass(TEST_KEY),
             true,
         );
         let cid = enc.encode_to_vec();
@@ -220,8 +264,7 @@ mod tests {
     fn encrypted_cid_differs_from_plaintext() {
         let sid = vec![0x00, 0x00, 0x01];
         let plain_enc = QuicLbEncoder::new(0, sid.clone(), 13, Encryption::Plaintext, true);
-        let aes_enc =
-            QuicLbEncoder::new(0, sid, 13, Encryption::SinglePass { key: TEST_KEY }, true);
+        let aes_enc = QuicLbEncoder::new(0, sid, 13, Encryption::single_pass(TEST_KEY), true);
 
         let plain = plain_enc.encode_to_vec();
         let aes = aes_enc.encode_to_vec();
@@ -237,7 +280,7 @@ mod tests {
             1,
             vec![0x00, 0x00, 0x01],
             4,
-            Encryption::FourPass { key: TEST_KEY },
+            Encryption::four_pass(TEST_KEY),
             true,
         );
         let cid = enc.encode_to_vec();
@@ -251,7 +294,7 @@ mod tests {
             0,
             vec![0x00, 0x00, 0x01],
             13,
-            Encryption::SinglePass { key: TEST_KEY },
+            Encryption::single_pass(TEST_KEY),
             true,
         );
         let a = enc.encode_to_vec();

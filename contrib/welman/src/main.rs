@@ -95,9 +95,9 @@ fn make_encryption(key_hex: &Option<String>, sid_len: u8, nonce_len: u8) -> Resu
             key.copy_from_slice(&key_bytes);
 
             if sid_len as u16 + nonce_len as u16 == 16 {
-                Ok(Encryption::SinglePass { key })
+                Ok(Encryption::single_pass(key))
             } else {
-                Ok(Encryption::FourPass { key })
+                Ok(Encryption::four_pass(key))
             }
         }
     }

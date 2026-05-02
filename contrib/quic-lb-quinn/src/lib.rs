@@ -84,7 +84,7 @@ mod tests {
             0,
             vec![0x00, 0x00, 0x01],
             13,
-            Encryption::SinglePass { key: TEST_KEY },
+            Encryption::single_pass(TEST_KEY),
             true,
         );
         let cid = cid_gen.generate_cid();
