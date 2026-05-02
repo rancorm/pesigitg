@@ -42,10 +42,16 @@ pub enum Verdict {
     FallbackForward,
     /// ICMP error routed back to the originating backend server.
     IcmpForward,
-    /// CID matched a config but could not be routed (decryption produced an
-    /// unknown server_id, server has no MAC, or the server was removed).
-    /// Frame is not modified; passed through to the kernel stack.
-    CidUnroutable,
+    /// CID matched a config and decrypted to a known server slot, but
+    /// the server is unhealthy / removed / has no MAC. Drain-completion
+    /// signal: drops to zero once stale clients catch up after a
+    /// backend removal. Frame is not modified.
+    CidUnroutableNoServer,
+    /// CID matched a config but decryption produced an unknown
+    /// server_id. Forgery / probing signal under a live config — a
+    /// sustained nonzero rate without a recent server removal means
+    /// someone is feeding the LB junk CIDs. Frame is not modified.
+    CidUnroutableBadServerId,
     /// Packet not modified; pass through to the kernel stack.
     Pass,
 }
@@ -165,8 +171,9 @@ fn process_udp(
 
     // Fast path: CID-based routing via config table lookup.
     if let Some((dcid, config)) = cid::lookup_config(quic, table) {
-        if let Some(server_idx) = cid::resolve_server_idx(dcid, config) {
-            let server = &config.servers[server_idx];
+        let server_idx = cid::resolve_server_idx(dcid, config);
+        if let Some(idx) = server_idx {
+            let server = &config.servers[idx];
             if server.healthy
                 && let Some(mac) = server.mac
             {
@@ -185,8 +192,16 @@ fn process_udp(
         // length for this config. A too-short CID means this is a
         // client-generated Initial whose random first byte happened to
         // match our config_id bits — fall through to fallback routing.
+        //
+        // Split by reason: a known server slot that's gone is a drain
+        // signal (recovers as clients reconnect), while an unknown
+        // server_id under a valid config is a forgery / probing signal.
         if dcid.len() > config.cid_payload_length() as usize {
-            return Verdict::CidUnroutable;
+            return if server_idx.is_some() {
+                Verdict::CidUnroutableNoServer
+            } else {
+                Verdict::CidUnroutableBadServerId
+            };
         }
     }
 

@@ -282,7 +282,19 @@ struct SnapshotView {
     cid_routed: u64,
     cid_by_config: BTreeMap<u8, u64>,
     fallback_routed: u64,
+    /// Sum of [`Self::cid_unroutable_no_server`] and
+    /// [`Self::cid_unroutable_bad_server_id`]. Kept so existing
+    /// dashboards / `snapshot.sh` consumers don't break when those two
+    /// component fields landed.
     cid_unroutable: u64,
+    /// CID matched a config and decrypted to a known server slot,
+    /// but the slot's server is gone / unhealthy. Drain-completion
+    /// signal: drops to zero after a backend removal as stale clients
+    /// reconnect.
+    cid_unroutable_no_server: u64,
+    /// CID matched a config but decryption produced an unknown
+    /// server_id. Forgery / probing signal under a live config.
+    cid_unroutable_bad_server_id: u64,
     draining_forwarded: u64,
     icmp_forwarded: u64,
     passed: u64,
@@ -314,7 +326,9 @@ impl From<&Snapshot> for SnapshotView {
             cid_routed: s.cid_routed,
             cid_by_config,
             fallback_routed: s.fallback_routed,
-            cid_unroutable: s.cid_unroutable,
+            cid_unroutable: s.cid_unroutable(),
+            cid_unroutable_no_server: s.cid_unroutable_no_server,
+            cid_unroutable_bad_server_id: s.cid_unroutable_bad_server_id,
             draining_forwarded: s.draining_forwarded,
             icmp_forwarded: s.icmp_forwarded,
             passed: s.passed,
@@ -640,7 +654,8 @@ address = "2001:db8::1"
             forwarded: 9,
             cid_routed: 4,
             fallback_routed: 3,
-            cid_unroutable: 1,
+            cid_unroutable_no_server: 1,
+            cid_unroutable_bad_server_id: 0,
             draining_forwarded: 1,
             icmp_forwarded: 0,
             passed: 1,

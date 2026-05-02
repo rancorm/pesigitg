@@ -634,8 +634,12 @@ fn worker_loop_generic<S: AfXdpSocket>(
                     batch_stats.record_icmp_forward();
                     tx_batch.push(*desc);
                 }
-                Verdict::CidUnroutable => {
-                    batch_stats.record_cid_unroutable();
+                Verdict::CidUnroutableNoServer => {
+                    batch_stats.record_cid_unroutable_no_server();
+                    recycle_batch.push(*desc);
+                }
+                Verdict::CidUnroutableBadServerId => {
+                    batch_stats.record_cid_unroutable_bad_server_id();
                     recycle_batch.push(*desc);
                 }
                 Verdict::Pass => {

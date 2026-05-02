@@ -172,18 +172,19 @@ fn process_ipv6_long_header_rewrites_mac() {
 }
 
 #[test]
-fn process_unknown_server_passes() {
+fn process_unknown_server_id_classifies_as_bad_server_id() {
     let config = make_config();
     let quic = build_quic_long_header(0, &[0xff, 0xff, 0xff], &[0x00; 13]);
     let mut frame = build_ipv4_frame(&quic);
     let mut conn = ConnectionTable::new();
 
     // CID is routable (config_id matches) but server_id is unknown
-    // after decryption — this is a stale/removed server, not a new
-    // client, so we do NOT fall back to consistent hash.
+    // after decryption — bucketed as BadServerId so a sustained nonzero
+    // rate of these acts as a forgery / probing signal under a live
+    // config (distinct from a backend that's just been removed).
     assert!(matches!(
         process_packet(&mut frame, &config, &mut conn, &LOCAL_MAC, now()),
-        Verdict::CidUnroutable
+        Verdict::CidUnroutableBadServerId
     ));
     assert_eq!(&frame[..6], &[0xff; 6]);
 }

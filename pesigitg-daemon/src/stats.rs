@@ -22,7 +22,12 @@ pub struct WorkerStats {
     cid_routed: AtomicU64,
     cid_by_config: [AtomicU64; 7],
     fallback_routed: AtomicU64,
-    cid_unroutable: AtomicU64,
+    /// CID matched a config and decrypted to a known server slot that's
+    /// since become unhealthy or been removed. Drain-completion signal.
+    cid_unroutable_no_server: AtomicU64,
+    /// CID matched a config but decryption produced an unknown
+    /// server_id. Forgery / probing signal under a live config.
+    cid_unroutable_bad_server_id: AtomicU64,
     draining_forwarded: AtomicU64,
     icmp_forwarded: AtomicU64,
     passed: AtomicU64,
@@ -47,7 +52,8 @@ impl WorkerStats {
             forwarded: AtomicU64::new(0),
             cid_routed: AtomicU64::new(0),
             cid_by_config: std::array::from_fn(|_| AtomicU64::new(0)),
-            cid_unroutable: AtomicU64::new(0),
+            cid_unroutable_no_server: AtomicU64::new(0),
+            cid_unroutable_bad_server_id: AtomicU64::new(0),
             fallback_routed: AtomicU64::new(0),
             draining_forwarded: AtomicU64::new(0),
             icmp_forwarded: AtomicU64::new(0),
@@ -85,7 +91,8 @@ pub struct BatchStats {
     cid_routed: u64,
     cid_by_config: [u64; 7],
     fallback_routed: u64,
-    cid_unroutable: u64,
+    cid_unroutable_no_server: u64,
+    cid_unroutable_bad_server_id: u64,
     draining_forwarded: u64,
     icmp_forwarded: u64,
     passed: u64,
@@ -105,7 +112,8 @@ impl BatchStats {
             cid_routed: 0,
             cid_by_config: [0; 7],
             fallback_routed: 0,
-            cid_unroutable: 0,
+            cid_unroutable_no_server: 0,
+            cid_unroutable_bad_server_id: 0,
             draining_forwarded: 0,
             icmp_forwarded: 0,
             passed: 0,
@@ -143,8 +151,13 @@ impl BatchStats {
     }
 
     #[inline(always)]
-    pub fn record_cid_unroutable(&mut self) {
-        self.cid_unroutable += 1;
+    pub fn record_cid_unroutable_no_server(&mut self) {
+        self.cid_unroutable_no_server += 1;
+    }
+
+    #[inline(always)]
+    pub fn record_cid_unroutable_bad_server_id(&mut self) {
+        self.cid_unroutable_bad_server_id += 1;
     }
 
     #[inline(always)]
@@ -187,8 +200,17 @@ impl BatchStats {
         if self.fallback_routed > 0 {
             add(&target.fallback_routed, self.fallback_routed);
         }
-        if self.cid_unroutable > 0 {
-            add(&target.cid_unroutable, self.cid_unroutable);
+        if self.cid_unroutable_no_server > 0 {
+            add(
+                &target.cid_unroutable_no_server,
+                self.cid_unroutable_no_server,
+            );
+        }
+        if self.cid_unroutable_bad_server_id > 0 {
+            add(
+                &target.cid_unroutable_bad_server_id,
+                self.cid_unroutable_bad_server_id,
+            );
         }
         if self.draining_forwarded > 0 {
             add(&target.draining_forwarded, self.draining_forwarded);
@@ -227,7 +249,14 @@ pub struct Snapshot {
     pub forwarded: u64,
     pub cid_routed: u64,
     pub cid_by_config: [u64; 7],
-    pub cid_unroutable: u64,
+    /// Drain-completion bucket: CID resolved to a known server slot
+    /// that's since become unhealthy / no MAC / removed. Drops to zero
+    /// once stale clients reconnect.
+    pub cid_unroutable_no_server: u64,
+    /// Forgery / probing bucket: CID matched a config but decryption
+    /// produced an unknown server_id. Sustained nonzero rate without a
+    /// recent server removal means someone is feeding the LB junk CIDs.
+    pub cid_unroutable_bad_server_id: u64,
     pub fallback_routed: u64,
     pub draining_forwarded: u64,
     pub icmp_forwarded: u64,
@@ -239,6 +268,15 @@ pub struct Snapshot {
     pub retry_token_invalid: u64,
     pub retry_token_expired: u64,
     pub retry_parse_error: u64,
+}
+
+impl Snapshot {
+    /// Sum of the two cid-unroutable buckets. Kept as a derived helper
+    /// so callers ("snapshot.sh", logs, dashboards) that don't care
+    /// about the drain-vs-forgery split can still read a single number.
+    pub fn cid_unroutable(&self) -> u64 {
+        self.cid_unroutable_no_server + self.cid_unroutable_bad_server_id
+    }
 }
 
 impl Snapshot {
@@ -254,7 +292,12 @@ impl Snapshot {
             forwarded: self.forwarded.wrapping_sub(prev.forwarded),
             cid_routed: self.cid_routed.wrapping_sub(prev.cid_routed),
             cid_by_config,
-            cid_unroutable: self.cid_unroutable.wrapping_sub(prev.cid_unroutable),
+            cid_unroutable_no_server: self
+                .cid_unroutable_no_server
+                .wrapping_sub(prev.cid_unroutable_no_server),
+            cid_unroutable_bad_server_id: self
+                .cid_unroutable_bad_server_id
+                .wrapping_sub(prev.cid_unroutable_bad_server_id),
             fallback_routed: self.fallback_routed.wrapping_sub(prev.fallback_routed),
             draining_forwarded: self
                 .draining_forwarded
@@ -313,8 +356,16 @@ impl fmt::Display for Snapshot {
 
         self.format_cid_by_config(f)?;
 
-        if self.cid_unroutable > 0 {
-            write!(f, " cid_unroutable={}", self.cid_unroutable)?;
+        let no_server = self.cid_unroutable_no_server;
+        let bad_id = self.cid_unroutable_bad_server_id;
+        if no_server > 0 || bad_id > 0 {
+            write!(f, " cid_unroutable={}", no_server + bad_id)?;
+            if bad_id > 0 {
+                // Highlight the forgery/probing component since it's the
+                // operational signal — no_server alone usually just
+                // means a recent backend removal still draining.
+                write!(f, "(no_srv={no_server} bad_id={bad_id})")?;
+            }
         }
 
         if self.draining_forwarded > 0 {
@@ -384,7 +435,9 @@ impl StatsTable {
                 total.cid_by_config[i] += slot.cid_by_config[i].load(Ordering::Relaxed);
             }
 
-            total.cid_unroutable += slot.cid_unroutable.load(Ordering::Relaxed);
+            total.cid_unroutable_no_server += slot.cid_unroutable_no_server.load(Ordering::Relaxed);
+            total.cid_unroutable_bad_server_id +=
+                slot.cid_unroutable_bad_server_id.load(Ordering::Relaxed);
             total.fallback_routed += slot.fallback_routed.load(Ordering::Relaxed);
             total.draining_forwarded += slot.draining_forwarded.load(Ordering::Relaxed);
             total.icmp_forwarded += slot.icmp_forwarded.load(Ordering::Relaxed);
@@ -415,7 +468,8 @@ mod tests {
             forwarded: 1,
             cid_routed: 1,
             cid_by_config: [1; 7],
-            cid_unroutable: 1,
+            cid_unroutable_no_server: 1,
+            cid_unroutable_bad_server_id: 1,
             fallback_routed: 1,
             draining_forwarded: 1,
             icmp_forwarded: 1,
@@ -438,7 +492,9 @@ mod tests {
         assert_eq!(d.forwarded, 0);
         assert_eq!(d.cid_routed, 0);
         assert_eq!(d.cid_by_config, [0; 7]);
-        assert_eq!(d.cid_unroutable, 0);
+        assert_eq!(d.cid_unroutable_no_server, 0);
+        assert_eq!(d.cid_unroutable_bad_server_id, 0);
+        assert_eq!(d.cid_unroutable(), 0);
         assert_eq!(d.fallback_routed, 0);
         assert_eq!(d.draining_forwarded, 0);
         assert_eq!(d.icmp_forwarded, 0);
@@ -603,7 +659,9 @@ mod tests {
         batch.record_fallback_forward();
         batch.record_icmp_forward();
         batch.record_draining_forward();
-        batch.record_cid_unroutable();
+        batch.record_cid_unroutable_no_server();
+        batch.record_cid_unroutable_bad_server_id();
+        batch.record_cid_unroutable_bad_server_id();
         batch.record_pass();
         batch.flush(t.slot(0));
 
@@ -615,8 +673,34 @@ mod tests {
         assert_eq!(agg.fallback_routed, 1);
         assert_eq!(agg.icmp_forwarded, 1);
         assert_eq!(agg.draining_forwarded, 1);
-        assert_eq!(agg.cid_unroutable, 1);
+        assert_eq!(agg.cid_unroutable_no_server, 1);
+        assert_eq!(agg.cid_unroutable_bad_server_id, 2);
+        assert_eq!(agg.cid_unroutable(), 3);
         assert_eq!(agg.passed, 1);
+    }
+
+    #[test]
+    fn display_highlights_bad_server_id_when_present() {
+        // No-server-only goes in the headline number; bad_server_id
+        // adds the breakdown so a forgery signal pops in logs.
+        let s = Snapshot {
+            cid_unroutable_no_server: 5,
+            cid_unroutable_bad_server_id: 0,
+            ..Snapshot::default()
+        };
+        let out = format!("{}", s);
+        assert!(out.contains("cid_unroutable=5"));
+        assert!(!out.contains("bad_id"));
+
+        let s = Snapshot {
+            cid_unroutable_no_server: 5,
+            cid_unroutable_bad_server_id: 7,
+            ..Snapshot::default()
+        };
+        let out = format!("{}", s);
+        assert!(out.contains("cid_unroutable=12"));
+        assert!(out.contains("no_srv=5"));
+        assert!(out.contains("bad_id=7"));
     }
 
     #[test]
