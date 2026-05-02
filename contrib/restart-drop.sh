@@ -63,7 +63,7 @@
 #   2 — bad arguments / missing prerequisites
 #   3 — assertion failed (--max-post-fail or --max-overall-fail exceeded)
 #
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: GPL-3.0-or-later OR Commercial
 # Copyright (c) 2026 Jonathan Cormier
 # This file is part of Pesigitg.
 

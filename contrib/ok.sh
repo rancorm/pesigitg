@@ -17,7 +17,7 @@
 # Requires: nc, timeout (coreutils). Requires read access to the socket
 # (mode 0660 by default — run as root or add your user to its group).
 #
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: GPL-3.0-or-later OR Commercial
 # Copyright (c) 2026 Jonathan Cormier
 # This file is part of Pesigitg.
 

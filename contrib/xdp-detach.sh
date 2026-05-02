@@ -2,7 +2,7 @@
 #
 # xdp-detach.sh — Detach BPF-linked XDP programs from an interface.
 #
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: GPL-3.0-or-later OR Commercial
 # Copyright (c) 2026 Jonathan Cormier
 # This file is part of Pesigitg.
 

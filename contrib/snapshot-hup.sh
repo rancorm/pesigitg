@@ -19,7 +19,7 @@
 #   2 — bad arguments
 #   non-zero — propagated from snapshot.sh / hup.sh on failure
 #
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: GPL-3.0-or-later OR Commercial
 # Copyright (c) 2026 Jonathan Cormier
 # This file is part of Pesigitg.
 
