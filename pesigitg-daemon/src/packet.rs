@@ -13,8 +13,9 @@
 //! rotation mismatches), falls back to consistent hashing over the 4-tuple
 //! with a per-worker connection table for stickiness.
 
-use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+
+use rustc_hash::FxHasher;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::Instant;
 
@@ -282,7 +283,11 @@ fn fallback_mac(flow: &FlowKey, servers: &[Server]) -> Option<[u8; 6]> {
         return None;
     }
 
-    let mut hasher = DefaultHasher::new();
+    // FxHasher (~1 cycle/byte) over the stdlib SipHasher (~5 cycle/byte).
+    // The 4-tuple is already adversary-chosen; SipHash's DoS resistance
+    // doesn't add anything past the consistent-hash modulo, and fallback
+    // is the slow path we'd most like to keep cheap.
+    let mut hasher = FxHasher::default();
     flow.hash(&mut hasher);
     let target = (hasher.finish() as usize) % servers.len();
 
