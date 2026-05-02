@@ -2,20 +2,24 @@
 // Copyright (c) 2026 Jonathan Cormier
 // This file is part of Pesigitg.
 
-//! QUIC-LB compliant Connection ID generator for Quinn.
+//! QUIC-LB Connection ID encoder, free of any QUIC stack dependency.
 //!
-//! Implements the server-side CID generation per draft-ietf-quic-load-balancers-21
-//! Section 5.4: the server writes its config_id and server_id into the CID, fills
-//! the nonce with random bytes, then encrypts the payload block.
+//! Implements server-side CID generation per draft-ietf-quic-load-balancers-21
+//! Section 5.4: write `config_id` and `server_id` into the CID, fill the nonce
+//! with random bytes, then encrypt the payload block.
 //!
-//! Supports all three modes:
+//! Three modes, derived from `server_id_length + nonce_length`:
 //! - Plaintext (no key)
-//! - Single-pass AES-128-ECB (server_id_length + nonce_length == 16)
-//! - Four-pass Feistel (server_id_length + nonce_length != 16)
+//! - Single-pass AES-128-ECB (sum == 16)
+//! - Four-pass Feistel (sum != 16, ≤ 19)
+//!
+//! Bindings: [`quic-lb-quinn`](https://docs.rs/quic-lb-quinn) wraps this in
+//! Quinn's `ConnectionIdGenerator` trait. For other QUIC stacks (lsquic,
+//! msquic, quiche) the encoder is `&self` after construction, so a
+//! 30-line shim against any stack's CID hook is straightforward.
 
 use aes::Aes128;
 use aes::cipher::{BlockEncrypt, KeyInit, generic_array::GenericArray};
-use quinn::ConnectionIdGenerator;
 use rand::RngCore;
 
 /// CID encryption mode, mirroring pesigitgd's `Encryption` enum.
@@ -26,12 +30,12 @@ pub enum Encryption {
     FourPass { key: [u8; 16] },
 }
 
-/// Generates QUIC-LB compliant Connection IDs for a single server identity.
+/// QUIC-LB CID encoder for a single server identity.
 ///
-/// Thread-safety: Quinn requires `Send + Sync`. The AES key and server config
-/// are immutable after construction; only the RNG state mutates, which is
-/// handled by interior mutability through `rand`.
-pub struct QuicLbCidGenerator {
+/// Construction validates field ranges via `assert!`; the encoder itself
+/// is `&self` thereafter — only the thread-local RNG mutates per encode,
+/// so the type is `Send + Sync` and cheap to share across tasks.
+pub struct QuicLbEncoder {
     config_id: u8,
     server_id: Vec<u8>,
     nonce_length: u8,
@@ -40,7 +44,7 @@ pub struct QuicLbCidGenerator {
     encode_cid_length: bool,
 }
 
-impl QuicLbCidGenerator {
+impl QuicLbEncoder {
     pub fn new(
         config_id: u8,
         server_id: Vec<u8>,
@@ -63,8 +67,56 @@ impl QuicLbCidGenerator {
     }
 
     /// Total CID length: 1 (first octet) + server_id_length + nonce_length.
-    fn cid_length(&self) -> usize {
+    pub fn cid_length(&self) -> usize {
         1 + self.server_id.len() + self.nonce_length as usize
+    }
+
+    /// Encode one CID into `buf[..cid_length()]`. Returns the number of
+    /// bytes written. Panics if `buf.len() < cid_length()`.
+    pub fn encode_into(&self, buf: &mut [u8]) -> usize {
+        let cid_len = self.cid_length();
+        assert!(
+            buf.len() >= cid_len,
+            "buf too small: have {}, need {}",
+            buf.len(),
+            cid_len,
+        );
+
+        let sid_len = self.server_id.len();
+        let nonce_len = self.nonce_length as usize;
+        let payload_len = sid_len + nonce_len;
+
+        // Build plaintext payload: server_id || nonce.
+        let mut payload = [0u8; 19];
+        payload[..sid_len].copy_from_slice(&self.server_id);
+        rand::rng().fill_bytes(&mut payload[sid_len..payload_len]);
+
+        // Encrypt in place.
+        match &self.encryption {
+            Encryption::Plaintext => {}
+            Encryption::SinglePass { key } => {
+                let mut block = [0u8; 16];
+                block[..payload_len].copy_from_slice(&payload[..payload_len]);
+                Self::encrypt_single_pass(&mut block, key);
+                payload[..16].copy_from_slice(&block);
+            }
+            Encryption::FourPass { key } => {
+                Self::encrypt_four_pass(&mut payload[..payload_len], sid_len, nonce_len, key);
+            }
+        }
+
+        buf[0] = self.first_octet();
+        buf[1..cid_len].copy_from_slice(&payload[..payload_len]);
+        cid_len
+    }
+
+    /// Convenience wrapper around [`Self::encode_into`] that allocates
+    /// a fresh `Vec`. Quinn's API takes the bytes by reference anyway,
+    /// so the owned form costs the same allocation either way.
+    pub fn encode_to_vec(&self) -> Vec<u8> {
+        let mut buf = vec![0u8; self.cid_length()];
+        self.encode_into(&mut buf);
+        buf
     }
 
     /// Build the first octet per Section 3 of the spec.
@@ -126,59 +178,6 @@ impl QuicLbCidGenerator {
     }
 }
 
-impl ConnectionIdGenerator for QuicLbCidGenerator {
-    fn cid_len(&self) -> usize {
-        self.cid_length()
-    }
-
-    fn cid_lifetime(&self) -> Option<std::time::Duration> {
-        None
-    }
-
-    fn generate_cid(&mut self) -> quinn::ConnectionId {
-        let sid_len = self.server_id.len();
-        let nonce_len = self.nonce_length as usize;
-        let payload_len = sid_len + nonce_len;
-
-        // Build plaintext payload: server_id || nonce.
-        let mut payload = [0u8; 19];
-        payload[..sid_len].copy_from_slice(&self.server_id);
-        rand::rng().fill_bytes(&mut payload[sid_len..payload_len]);
-
-        // Encrypt in place.
-        match &self.encryption {
-            Encryption::Plaintext => {}
-            Encryption::SinglePass { key } => {
-                let mut block = [0u8; 16];
-                block[..payload_len].copy_from_slice(&payload[..payload_len]);
-                Self::encrypt_single_pass(&mut block, key);
-                payload[..16].copy_from_slice(&block);
-            }
-            Encryption::FourPass { key } => {
-                Self::encrypt_four_pass(&mut payload[..payload_len], sid_len, nonce_len, key);
-            }
-        }
-
-        // Assemble CID: [first_octet][encrypted_payload].
-        let cid_len = self.cid_length();
-        let mut cid = vec![0u8; cid_len];
-        cid[0] = self.first_octet();
-        cid[1..].copy_from_slice(&payload[..payload_len]);
-
-        quinn::ConnectionId::new(&cid)
-    }
-
-    fn validate(&self, id: &quinn::ConnectionId) -> Result<(), quinn_proto::InvalidCid> {
-        // Accept any CID with the correct length — the LB will route by
-        // decrypting the payload, so validation here is just a sanity check.
-        if id.len() == self.cid_length() {
-            Ok(())
-        } else {
-            Err(quinn_proto::InvalidCid)
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -190,80 +189,90 @@ mod tests {
 
     #[test]
     fn cid_has_correct_length() {
-        let mut cid_gen = QuicLbCidGenerator::new(
+        let enc = QuicLbEncoder::new(
             0,
             vec![0x00, 0x00, 0x01],
             13,
             Encryption::SinglePass { key: TEST_KEY },
             true,
         );
-        let cid = cid_gen.generate_cid();
+        let cid = enc.encode_to_vec();
         assert_eq!(cid.len(), 17); // 1 + 3 + 13
     }
 
     #[test]
     fn config_id_encoded_in_top_bits() {
-        let mut cid_gen =
-            QuicLbCidGenerator::new(3, vec![0x00, 0x01], 5, Encryption::Plaintext, true);
-        let cid = cid_gen.generate_cid();
-        let bytes: &[u8] = cid.as_ref();
-        assert_eq!(bytes[0] >> 5, 3);
+        let enc = QuicLbEncoder::new(3, vec![0x00, 0x01], 5, Encryption::Plaintext, true);
+        let cid = enc.encode_to_vec();
+        assert_eq!(cid[0] >> 5, 3);
     }
 
     #[test]
     fn plaintext_server_id_readable() {
         let sid = vec![0xde, 0xad, 0xbe];
-        let mut cid_gen = QuicLbCidGenerator::new(0, sid.clone(), 4, Encryption::Plaintext, true);
-        let cid = cid_gen.generate_cid();
+        let enc = QuicLbEncoder::new(0, sid.clone(), 4, Encryption::Plaintext, true);
+        let cid = enc.encode_to_vec();
         // In plaintext mode, server_id is at bytes [1..4].
-        let bytes: &[u8] = cid.as_ref();
-        assert_eq!(&bytes[1..4], &sid[..]);
+        assert_eq!(&cid[1..4], &sid[..]);
     }
 
     #[test]
     fn encrypted_cid_differs_from_plaintext() {
         let sid = vec![0x00, 0x00, 0x01];
-        let mut cid_gen_plain =
-            QuicLbCidGenerator::new(0, sid.clone(), 13, Encryption::Plaintext, true);
-        let mut cid_gen_enc =
-            QuicLbCidGenerator::new(0, sid, 13, Encryption::SinglePass { key: TEST_KEY }, true);
+        let plain_enc = QuicLbEncoder::new(0, sid.clone(), 13, Encryption::Plaintext, true);
+        let aes_enc =
+            QuicLbEncoder::new(0, sid, 13, Encryption::SinglePass { key: TEST_KEY }, true);
 
-        let plain = cid_gen_plain.generate_cid();
-        let enc = cid_gen_enc.generate_cid();
+        let plain = plain_enc.encode_to_vec();
+        let aes = aes_enc.encode_to_vec();
 
         // Encrypted payload should (almost certainly) differ from plaintext.
         // The first octet may match, but the payload won't.
-        let plain_bytes: &[u8] = plain.as_ref();
-        let enc_bytes: &[u8] = enc.as_ref();
-        assert_ne!(plain_bytes[1..], enc_bytes[1..]);
+        assert_ne!(plain[1..], aes[1..]);
     }
 
     #[test]
     fn four_pass_generates_valid_length() {
-        let mut cid_gen = QuicLbCidGenerator::new(
+        let enc = QuicLbEncoder::new(
             1,
             vec![0x00, 0x00, 0x01],
             4,
             Encryption::FourPass { key: TEST_KEY },
             true,
         );
-        let cid = cid_gen.generate_cid();
+        let cid = enc.encode_to_vec();
         assert_eq!(cid.len(), 8); // 1 + 3 + 4
-        let bytes: &[u8] = cid.as_ref();
-        assert_eq!(bytes[0] >> 5, 1);
+        assert_eq!(cid[0] >> 5, 1);
     }
 
     #[test]
     fn unique_cids_generated() {
-        let mut cid_gen = QuicLbCidGenerator::new(
+        let enc = QuicLbEncoder::new(
             0,
             vec![0x00, 0x00, 0x01],
             13,
             Encryption::SinglePass { key: TEST_KEY },
             true,
         );
-        let a = cid_gen.generate_cid();
-        let b = cid_gen.generate_cid();
+        let a = enc.encode_to_vec();
+        let b = enc.encode_to_vec();
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn encode_into_writes_to_caller_buffer() {
+        let enc = QuicLbEncoder::new(0, vec![0xab, 0xcd], 4, Encryption::Plaintext, true);
+        let mut buf = [0u8; 7];
+        let written = enc.encode_into(&mut buf);
+        assert_eq!(written, 7);
+        assert_eq!(&buf[1..3], &[0xab, 0xcd]);
+    }
+
+    #[test]
+    #[should_panic(expected = "buf too small")]
+    fn encode_into_panics_on_short_buffer() {
+        let enc = QuicLbEncoder::new(0, vec![0xab, 0xcd], 4, Encryption::Plaintext, true);
+        let mut buf = [0u8; 3];
+        enc.encode_into(&mut buf);
     }
 }

@@ -1,0 +1,17 @@
+[package]
+name = "quic-lb-core"
+description = "QUIC-LB Connection ID encoder (draft-ietf-quic-load-balancers-21)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+# CID encryption
+aes = { workspace = true }
+
+# RNG for nonce generation. Not using the workspace-wide pin: the daemon
+# is on rand 0.10 but bumping crosses an API break that warrants its
+# own audit.
+rand = "0.9"

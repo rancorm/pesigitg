@@ -78,25 +78,30 @@ Schema is documented under `pesigitg-ctl backend-config` in `pesigitg-ctl(8)`.
 
 Rust drop-in for Quinn's EndpointConfig.
 
-`contrib/quic-lb-cid` is a `quinn::ConnectionIdGenerator` impl. Wire it
+`contrib/quic-lb-quinn` is a `quinn::ConnectionIdGenerator` impl over
+the QUIC-stack-agnostic encoder in `contrib/quic-lb-core`. Wire it
 into your `EndpointConfig`:
 
 ```rust
-let gen = QuicLbCidGenerator::new(
+use quic_lb_quinn::{Encryption, QuicLbCidGenerator};
+
+let cid_gen = QuicLbCidGenerator::new(
     config_id,
     server_id_bytes,
     nonce_length,
     Encryption::SinglePass { key: aes_key },
     /* encode_cid_length = */ true,
 );
-endpoint_config.cid_generator(move || Box::new(gen.clone()));
+endpoint_config.cid_generator(move || Box::new(cid_gen.clone()));
 ```
 
-This is the reference implementation.
+For non-Quinn stacks, depend on `quic-lb-core` directly and call
+`encoder.encode_into(&mut buf)` from whatever CID-generation hook
+your stack exposes — no Quinn types are pulled in.
 
-Round-trip and per-mode tests live in `contrib/quic-lb-cid/src/lib.rs` and
-`pesigitg-routing` shares the decoder, so a CID minted by the generator and
-decoded by the LB are tested against the same byte layout.
+Round-trip and per-mode tests live in `contrib/quic-lb-core/src/lib.rs`,
+and `pesigitg-routing` shares the decoder, so a CID minted by the
+encoder and decoded by the LB are tested against the same byte layout.
 
 ### Nginx
 
@@ -122,8 +127,8 @@ Practical setup:
 3. Build via a `make patch-nginx NGINX_VERSION=...` target so anyone
    can rebuild against a fresh tarball.
 4. Encoding logic itself is ~150 lines — port from
-   `contrib/quic-lb-cid/src/lib.rs` (single-pass and four-pass) or
-   wrap the Rust crate as a `cdylib` and link it.
+   `contrib/quic-lb-core/src/lib.rs` (single-pass and four-pass) or
+   wrap the core crate as a `cdylib` and link it.
 
 Rebase tax is the main cost: Nginx's QUIC code is still moving, so
 every minor release you'll diff `src/event/quic/`.
@@ -233,5 +238,6 @@ key, then un-drain.
 - `pesigitg-lb.toml(5)` — full route-config schema
 - `pesigitg-ctl(8)` — `whoami`, `backend-config` subcommands
 - `SCENARIOS.md` — operator-side rollover walkthrough
-- `contrib/quic-lb-cid/` — reference Quinn integration
+- `contrib/quic-lb-core/` — QUIC-stack-agnostic CID encoder
+- `contrib/quic-lb-quinn/` — Quinn `ConnectionIdGenerator` binding
 - draft-ietf-quic-load-balancers-21 — the spec this all implements

@@ -7,7 +7,8 @@ members = [
 	"pesigitg-control",
 	"pesigitg-routing",
 	"xtask",
-	"contrib/quic-lb-cid",
+	"contrib/quic-lb-core",
+	"contrib/quic-lb-quinn",
 	"contrib/quic-echo",
 	"contrib/welman"
 ]
@@ -26,7 +27,8 @@ repository = "https://github.com/rancorm/pesigitg"
 # path deps) and to enable a future publish without churn.
 pesigitg-common = { path = "pesigitg-common", version = "0.1.0" }
 pesigitg-routing = { path = "pesigitg-routing", version = "0.1.0" }
-quic-lb-cid = { path = "contrib/quic-lb-cid", version = "0.1.0" }
+quic-lb-core = { path = "contrib/quic-lb-core", version = "0.1.0" }
+quic-lb-quinn = { path = "contrib/quic-lb-quinn", version = "0.1.0" }
 
 # Crypto
 aes = "0.8"

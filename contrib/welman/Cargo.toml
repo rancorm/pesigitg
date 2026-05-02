@@ -27,7 +27,7 @@ bytes = "1"
 rcgen = { workspace = true }
 
 # QUIC-LB CID generation
-quic-lb-cid = { workspace = true }
+quic-lb-quinn = { workspace = true }
 
 # Shared helpers (hex encode/decode, etc.)
 pesigitg-common = { workspace = true, features = ["std"] }

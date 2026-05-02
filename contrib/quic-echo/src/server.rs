@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use pesigitg_common::hex;
-use quic_lb_cid::{Encryption, QuicLbCidGenerator};
+use quic_lb_quinn::{Encryption, QuicLbCidGenerator};
 use quinn::Endpoint;
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use tokio::signal;

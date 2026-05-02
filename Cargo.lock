@@ -1196,7 +1196,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "pesigitg-common",
- "quic-lb-cid",
+ "quic-lb-quinn",
  "quinn",
  "quinn-proto",
  "rcgen",
@@ -1207,13 +1207,20 @@ dependencies = [
 ]
 
 [[package]]
-name = "quic-lb-cid"
+name = "quic-lb-core"
 version = "0.1.0"
 dependencies = [
  "aes",
+ "rand 0.9.4",
+]
+
+[[package]]
+name = "quic-lb-quinn"
+version = "0.1.0"
+dependencies = [
+ "quic-lb-core",
  "quinn",
  "quinn-proto",
- "rand 0.9.4",
 ]
 
 [[package]]
@@ -2079,7 +2086,7 @@ dependencies = [
  "h3-quinn",
  "http",
  "pesigitg-common",
- "quic-lb-cid",
+ "quic-lb-quinn",
  "quinn",
  "quinn-proto",
  "rcgen",
