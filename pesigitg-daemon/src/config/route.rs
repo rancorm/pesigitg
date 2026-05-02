@@ -13,6 +13,7 @@
 
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 // `pub use` so existing `crate::config::route::*` callers keep working.
 // Marked `allow(unused_imports)` because the fuzz crate `#[path]`-includes
@@ -37,6 +38,13 @@ use super::retry::{RawRetry, RetryConfig};
 pub struct ConfigTable {
     pub path: PathBuf,
     slots: [Option<RouteConfig>; 7],
+    /// Wall-clock instant each populated slot's QUIC-LB key was loaded.
+    /// `None` for empty slots. Stamped at parse time and preserved
+    /// across SIGHUP reloads when the encryption key bytes don't change
+    /// (see [`Self::inherit_ages_from`]). Drives the `key_age_secs`
+    /// field surfaced at `/config` so operators can pace rotation
+    /// against a calendar without recording deploys externally.
+    loaded_at: [Option<Instant>; 7],
     /// Merged, deduplicated server list for fallback consistent hashing.
     pub fallback_servers: Vec<Server>,
     /// Optional QUIC Retry service settings. `None` = no `[retry]` section
@@ -73,10 +81,13 @@ impl ConfigTable {
     pub fn from_str(text: &str) -> Result<Self, RouteConfigError> {
         let configs = pesigitg_routing::route::parse_routes(text)?;
 
+        let now = Instant::now();
         let mut slots: [Option<RouteConfig>; 7] = Default::default();
+        let mut loaded_at: [Option<Instant>; 7] = [None; 7];
         for config in configs {
             let id = config.config_id as usize;
             slots[id] = Some(config);
+            loaded_at[id] = Some(now);
         }
 
         let wrapper: RawRetryWrapper = toml::from_str(text).map_err(RouteConfigError::Parse)?;
@@ -85,9 +96,39 @@ impl ConfigTable {
         Ok(ConfigTable {
             path: PathBuf::new(),
             slots,
+            loaded_at,
             fallback_servers: Vec::new(),
             retry,
         })
+    }
+
+    /// Carry per-slot `loaded_at` over from `prev` for any slot whose
+    /// QUIC-LB encryption key bytes are unchanged. Also delegates retry
+    /// inheritance via [`RetryConfig::inherit_age_from`].
+    ///
+    /// Called once per SIGHUP reload, after a fresh table has been
+    /// parsed but before it's stored. A non-key reload (server
+    /// add/remove, MAC change, draining flag flip) leaves the timestamps
+    /// alone; only an actual key rotation moves them forward.
+    pub fn inherit_ages_from(&mut self, prev: &ConfigTable) {
+        for i in 0..7 {
+            let (Some(new_cfg), Some(old_cfg)) = (self.slots[i].as_ref(), prev.slots[i].as_ref())
+            else {
+                continue;
+            };
+            if new_cfg.encryption.same_key(&old_cfg.encryption) {
+                self.loaded_at[i] = prev.loaded_at[i];
+            }
+        }
+        if let (Some(new_retry), Some(old_retry)) = (self.retry.as_mut(), prev.retry.as_ref()) {
+            new_retry.inherit_age_from(old_retry);
+        }
+    }
+
+    /// Wall-clock instant the QUIC-LB key in slot `config_id` was
+    /// loaded, or `None` if the slot is empty.
+    pub fn loaded_at(&self, config_id: u8) -> Option<Instant> {
+        self.loaded_at.get(config_id as usize).copied().flatten()
     }
 
     /// Look up a config by config_id (0-6).
@@ -162,16 +203,20 @@ impl ConfigTable {
     /// Construct a ConfigTable directly from configs (for tests).
     #[cfg(test)]
     pub(crate) fn with_configs(configs: Vec<RouteConfig>) -> Self {
+        let now = Instant::now();
         let mut slots: [Option<RouteConfig>; 7] = Default::default();
+        let mut loaded_at: [Option<Instant>; 7] = [None; 7];
 
         for config in configs {
             let id = config.config_id as usize;
             slots[id] = Some(config);
+            loaded_at[id] = Some(now);
         }
 
         let mut table = ConfigTable {
             path: PathBuf::new(),
             slots,
+            loaded_at,
             fallback_servers: Vec::new(),
             retry: None,
         };
@@ -305,5 +350,106 @@ mode = "always"
     fn missing_retry_section_leaves_none() {
         let table = ConfigTable::from_str(SAMPLE_TOML).unwrap();
         assert!(table.retry.is_none());
+    }
+
+    #[test]
+    fn from_str_stamps_loaded_at_for_populated_slots_only() {
+        let table = ConfigTable::from_str(SAMPLE_TOML).unwrap();
+        assert!(table.loaded_at(0).is_some());
+        assert!(table.loaded_at(1).is_none());
+    }
+
+    #[test]
+    fn inherit_ages_from_preserves_unchanged_qlb_key() {
+        // Two parses of the same TOML produce the same key bytes; the
+        // second table inherits the first's timestamp.
+        let prev = ConfigTable::from_str(SAMPLE_TOML).unwrap();
+        let prev_t = prev.loaded_at(0).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let mut next = ConfigTable::from_str(SAMPLE_TOML).unwrap();
+        assert!(
+            next.loaded_at(0).unwrap() > prev_t,
+            "fresh stamp before inherit"
+        );
+
+        next.inherit_ages_from(&prev);
+        assert_eq!(next.loaded_at(0), Some(prev_t));
+    }
+
+    #[test]
+    fn inherit_ages_from_resets_when_qlb_key_changes() {
+        let toml_b = r#"
+[[configs]]
+config_id = 0
+first_octet_encodes_cid_length = true
+server_id_length = 3
+nonce_length = 13
+key = "ffeeddccbbaa99887766554433221100"
+
+[[configs.servers]]
+id = "000001"
+address = "10.0.1.10"
+"#;
+        let prev = ConfigTable::from_str(SAMPLE_TOML).unwrap();
+        let mut next = ConfigTable::from_str(toml_b).unwrap();
+        let next_t = next.loaded_at(0).unwrap();
+
+        next.inherit_ages_from(&prev);
+        // Different key => keep the freshly-stamped time.
+        assert_eq!(next.loaded_at(0), Some(next_t));
+    }
+
+    #[test]
+    fn inherit_ages_from_carries_retry_key_age_when_unchanged() {
+        let toml = r#"
+[[configs]]
+config_id = 0
+server_id_length = 3
+nonce_length = 13
+
+[retry]
+enabled = true
+token_key = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+mode = "always"
+"#;
+        let prev = ConfigTable::from_str(toml).unwrap();
+        let prev_t = prev.retry.as_ref().unwrap().loaded_at;
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let mut next = ConfigTable::from_str(toml).unwrap();
+
+        next.inherit_ages_from(&prev);
+        assert_eq!(next.retry.as_ref().unwrap().loaded_at, prev_t);
+    }
+
+    #[test]
+    fn inherit_ages_from_resets_retry_when_key_changes() {
+        let toml_a = r#"
+[[configs]]
+config_id = 0
+server_id_length = 3
+nonce_length = 13
+
+[retry]
+enabled = true
+token_key = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+mode = "always"
+"#;
+        let toml_b = r#"
+[[configs]]
+config_id = 0
+server_id_length = 3
+nonce_length = 13
+
+[retry]
+enabled = true
+token_key = "ffffffff0405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+mode = "always"
+"#;
+        let prev = ConfigTable::from_str(toml_a).unwrap();
+        let mut next = ConfigTable::from_str(toml_b).unwrap();
+        let next_t = next.retry.as_ref().unwrap().loaded_at;
+
+        next.inherit_ages_from(&prev);
+        assert_eq!(next.retry.as_ref().unwrap().loaded_at, next_t);
     }
 }

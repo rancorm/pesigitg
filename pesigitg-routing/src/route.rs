@@ -58,6 +58,20 @@ impl Clone for Encryption {
     }
 }
 
+impl Encryption {
+    /// True if `self` and `other` would produce identical CID encryption.
+    /// Used by the daemon to detect "same key across reload" so key-age
+    /// telemetry doesn't reset on unrelated SIGHUPs.
+    pub fn same_key(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Plaintext, Self::Plaintext) => true,
+            (Self::SinglePass { key: a, .. }, Self::SinglePass { key: b, .. }) => a == b,
+            (Self::FourPass { key: a, .. }, Self::FourPass { key: b, .. }) => a == b,
+            _ => false,
+        }
+    }
+}
+
 impl fmt::Debug for Encryption {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

@@ -90,6 +90,15 @@ impl TokenKey {
         Self { key }
     }
 
+    /// True if this key was derived from the same bytes as `other`.
+    /// Used by the daemon to detect "same key across reload" so key-age
+    /// telemetry doesn't reset on unrelated SIGHUPs. Plain `==` is fine
+    /// here — both keys are already in our process memory; this is a
+    /// config-equality check, not a secret-vs-attacker comparison.
+    pub fn same_key(&self, other: &Self) -> bool {
+        self.key == other.key
+    }
+
     /// Mint a token binding `(client, odcid)` to `now_ms`.
     ///
     /// `now_ms` is the millisecond UNIX timestamp at which the token

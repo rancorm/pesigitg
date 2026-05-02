@@ -9,6 +9,7 @@
 
 use std::fmt;
 use std::sync::Arc;
+use std::time::Instant;
 
 use pesigitg_common::hex;
 use serde::Deserialize;
@@ -67,6 +68,23 @@ pub struct RetryConfig {
     /// the read-lock on [`super::route::ConfigTable`] hands out the same
     /// counter to every worker without an extra round of cloning.
     pub load_tracker: Option<Arc<LoadRateTracker>>,
+    /// Wall-clock instant the current `token_key` was loaded. Set to
+    /// `Instant::now()` at validate-time and preserved across SIGHUP
+    /// reloads when the key bytes don't change (see
+    /// [`Self::inherit_age_from`]). Surfaced as `key_age_secs` in the
+    /// status API so operators can pace rotation against a calendar.
+    pub loaded_at: Instant,
+}
+
+impl RetryConfig {
+    /// Carry `loaded_at` over from `prev` if the signing key bytes
+    /// match. A SIGHUP that touches an unrelated field (mode, ports,
+    /// trigger rate) shouldn't look like a key rotation.
+    pub fn inherit_age_from(&mut self, prev: &RetryConfig) {
+        if self.token_key.same_key(&prev.token_key) {
+            self.loaded_at = prev.loaded_at;
+        }
+    }
 }
 
 impl fmt::Display for RetryConfig {
@@ -206,6 +224,7 @@ impl RetryConfig {
             ports,
             load_trigger_rate,
             load_tracker,
+            loaded_at: Instant::now(),
         })
     }
 }

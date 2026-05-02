@@ -34,6 +34,7 @@ use pesigitg_common::hex::encode as hex_encode;
 use pesigitg_common::mac::format as format_mac;
 
 use crate::args::Args;
+use crate::config::retry::{RetryConfig, RetryMode};
 use crate::config::route::{ConfigTable, Encryption, RouteConfig, Server};
 use crate::stats::{Snapshot, StatsTable};
 use crate::threading::WorkerHealth;
@@ -409,6 +410,10 @@ struct RouteView {
     path: String,
     configs: Vec<RouteConfigView>,
     fallback_pool: Vec<String>,
+    /// QUIC Retry service settings, including key age. Absent when the
+    /// route config has no `[retry]` section.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retry: Option<RetryConfigView>,
 }
 
 #[derive(Serialize)]
@@ -417,7 +422,23 @@ struct RouteConfigView {
     encryption: &'static str,
     server_id_length: u8,
     nonce_length: u8,
+    /// Seconds since this slot's QUIC-LB encryption key was loaded.
+    /// `None` for [`Encryption::Plaintext`] (no key to age) and during
+    /// the brief window before the first reload finishes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    key_age_secs: Option<u64>,
     servers: Vec<ServerView>,
+}
+
+#[derive(Serialize)]
+struct RetryConfigView {
+    enabled: bool,
+    mode: &'static str,
+    ports: Vec<u16>,
+    token_lifetime_secs: u64,
+    /// Seconds since the current `token_key` was loaded. Preserved
+    /// across reloads when the key bytes don't change.
+    key_age_secs: u64,
 }
 
 #[derive(Serialize)]
@@ -442,6 +463,26 @@ fn encryption_name(e: &Encryption) -> &'static str {
     }
 }
 
+fn retry_mode_name(m: RetryMode) -> &'static str {
+    match m {
+        RetryMode::Observe => "observe",
+        RetryMode::Always => "always",
+        RetryMode::Load => "load",
+    }
+}
+
+impl RetryConfigView {
+    fn from_retry(rc: &RetryConfig, now: Instant) -> Self {
+        RetryConfigView {
+            enabled: rc.enabled,
+            mode: retry_mode_name(rc.mode),
+            ports: rc.ports.clone(),
+            token_lifetime_secs: rc.token_lifetime_ms / 1_000,
+            key_age_secs: now.saturating_duration_since(rc.loaded_at).as_secs(),
+        }
+    }
+}
+
 impl From<&Server> for ServerView {
     fn from(s: &Server) -> Self {
         let now = Instant::now();
@@ -459,13 +500,22 @@ impl From<&Server> for ServerView {
     }
 }
 
-impl From<&RouteConfig> for RouteConfigView {
-    fn from(rc: &RouteConfig) -> Self {
+impl RouteConfigView {
+    fn from_route(rc: &RouteConfig, loaded_at: Option<Instant>, now: Instant) -> Self {
+        // Plaintext slots have no key to age. For encrypted slots,
+        // report seconds since `loaded_at` (preserved across reloads
+        // that don't change the key bytes — see
+        // `ConfigTable::inherit_ages_from`).
+        let key_age_secs = match rc.encryption {
+            Encryption::Plaintext => None,
+            _ => loaded_at.map(|t| now.saturating_duration_since(t).as_secs()),
+        };
         RouteConfigView {
             config_id: rc.config_id,
             encryption: encryption_name(&rc.encryption),
             server_id_length: rc.server_id_length,
             nonce_length: rc.nonce_length,
+            key_age_secs,
             servers: rc.servers.iter().map(ServerView::from).collect(),
         }
     }
@@ -492,14 +542,22 @@ fn build_config_response(
         foreground: a.foreground,
     };
 
+    let now = Instant::now();
     let route = RouteView {
         path: rc.path.display().to_string(),
-        configs: rc.configs().map(RouteConfigView::from).collect(),
+        configs: rc
+            .configs()
+            .map(|cfg| RouteConfigView::from_route(cfg, rc.loaded_at(cfg.config_id), now))
+            .collect(),
         fallback_pool: rc
             .fallback_servers
             .iter()
             .map(|s| s.address.to_string())
             .collect(),
+        retry: rc
+            .retry
+            .as_ref()
+            .map(|r| RetryConfigView::from_retry(r, now)),
     };
 
     serde_json::to_value(ConfigResponse { daemon, route }).unwrap_or(Value::Null)

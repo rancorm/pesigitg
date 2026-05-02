@@ -69,6 +69,12 @@ pub(crate) fn reload_config(args: &Arc<RwLock<Args>>, route_config: &Arc<ArcSwap
 
             rc.rebuild_fallback_servers();
 
+            // Carry forward per-key load timestamps from the table we're
+            // about to replace so a non-key reload (server change,
+            // retry-mode tweak) doesn't make `key_age_secs` look like a
+            // rotation.
+            rc.inherit_ages_from(&route_config.load());
+
             info!("route config reloaded: {}", rc.path.display());
             info!("{}", rc);
 
