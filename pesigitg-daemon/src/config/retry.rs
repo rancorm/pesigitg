@@ -74,6 +74,10 @@ pub struct RetryConfig {
     /// [`Self::inherit_age_from`]). Surfaced as `key_age_secs` in the
     /// status API so operators can pace rotation against a calendar.
     pub loaded_at: Instant,
+    /// Optional rotation policy: when `Some(secs)`, the daemon emits a
+    /// one-shot warning log line once `loaded_at` is older than `secs`.
+    /// `None` disables the nag. Validated `> 0` at parse time.
+    pub max_key_age_secs: Option<u64>,
 }
 
 impl RetryConfig {
@@ -121,6 +125,7 @@ pub(super) struct RawRetry {
     #[serde(default)]
     ports: Vec<u16>,
     load: Option<RawRetryLoad>,
+    max_key_age_secs: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -216,6 +221,14 @@ impl RetryConfig {
             _ => None,
         };
 
+        // 0 would mean "warn immediately on any reload", which is just
+        // noise; reject so a typo can't suppress the actual policy.
+        if let Some(0) = raw.max_key_age_secs {
+            return Err(RouteConfigError::Validation(
+                "retry.max_key_age_secs must be > 0 when set".into(),
+            ));
+        }
+
         Ok(RetryConfig {
             enabled: raw.enabled,
             token_key,
@@ -225,6 +238,7 @@ impl RetryConfig {
             load_trigger_rate,
             load_tracker,
             loaded_at: Instant::now(),
+            max_key_age_secs: raw.max_key_age_secs,
         })
     }
 }

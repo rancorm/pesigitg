@@ -220,6 +220,7 @@ mod tests {
             server_id_length: sid_len,
             nonce_length: nonce_len,
             encryption,
+            max_key_age_secs: None,
             servers: vec![
                 Server {
                     id: vec![0x00, 0x00, 0x01],

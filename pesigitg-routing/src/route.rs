@@ -28,6 +28,11 @@ pub struct RouteConfig {
     pub nonce_length: u8,
     pub encryption: Encryption,
     pub servers: Vec<Server>,
+    /// Optional rotation policy: when `Some(secs)`, the daemon emits a
+    /// one-shot warning log line once the QUIC-LB key has been live
+    /// longer than `secs`. `None` disables the nag. Validated `> 0` at
+    /// parse time.
+    pub max_key_age_secs: Option<u64>,
 }
 
 /// Encryption mode derived from `server_id_length + nonce_length`.
@@ -157,6 +162,7 @@ struct RawConfig {
     key: Option<String>,
     #[serde(default)]
     servers: Vec<RawServer>,
+    max_key_age_secs: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -224,6 +230,15 @@ impl RouteConfig {
             .map(|s| parse_server(s, raw.server_id_length))
             .collect::<Result<Vec<_>, _>>()?;
 
+        // 0 would warn immediately on every reload — reject so a typo
+        // can't suppress the actual rotation policy.
+        if let Some(0) = raw.max_key_age_secs {
+            return Err(RouteConfigError::Validation(format!(
+                "max_key_age_secs must be > 0 when set (config_id={})",
+                raw.config_id,
+            )));
+        }
+
         Ok(RouteConfig {
             config_id: raw.config_id,
             first_octet_encodes_cid_length: raw.first_octet_encodes_cid_length,
@@ -231,6 +246,7 @@ impl RouteConfig {
             nonce_length: raw.nonce_length,
             encryption,
             servers,
+            max_key_age_secs: raw.max_key_age_secs,
         })
     }
 

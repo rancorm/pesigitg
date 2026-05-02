@@ -18,6 +18,7 @@ fn make_config() -> ConfigTable {
         server_id_length: 3,
         nonce_length: 13,
         encryption: Encryption::Plaintext,
+        max_key_age_secs: None,
         servers: vec![Server {
             id: vec![0x00, 0x00, 0x01],
             address: "10.0.1.10".parse().unwrap(),
@@ -37,6 +38,7 @@ fn make_config_two_servers() -> ConfigTable {
         server_id_length: 3,
         nonce_length: 13,
         encryption: Encryption::Plaintext,
+        max_key_age_secs: None,
         servers: vec![
             Server {
                 id: vec![0x00, 0x00, 0x01],

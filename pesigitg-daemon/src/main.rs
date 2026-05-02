@@ -39,6 +39,7 @@ use signal_hook::iterator::exfiltrator::WithOrigin;
 use signal_hook::low_level::siginfo::Origin;
 
 use args::parse_args;
+use config::key_age::KeyAgeWarner;
 use config::route::ConfigTable;
 use config::{build_status, log_draining_servers, reload_config};
 use health::HealthChecker;
@@ -255,6 +256,7 @@ fn main() -> Result<()> {
     // Poll for signals with a timeout to allow watchdog keepalives
     let mut prev_stats = Snapshot::default();
     let mut draining_had_traffic = false;
+    let mut key_age_warner = KeyAgeWarner::new();
 
     debug!("entering main loop: T+{:.2?}", epoch.elapsed());
 
@@ -384,6 +386,10 @@ fn main() -> Result<()> {
             let status = build_status(&a, &rc);
             systemd_notify!(sd_notify::NotifyState::Status(&status));
         }
+
+        // Nag once per generation when a key has outlived its
+        // configured `max_key_age_secs`. No-op when no policy is set.
+        key_age_warner.check(&route_config.load());
 
         // Detect unexpected worker thread exits. If any AF_XDP worker
         // has terminated without the shutdown flag being set, the

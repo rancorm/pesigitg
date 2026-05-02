@@ -3,6 +3,7 @@
 // This file is part of Pesigitg.
 
 pub mod daemon;
+pub mod key_age;
 pub mod retry;
 pub mod route;
 

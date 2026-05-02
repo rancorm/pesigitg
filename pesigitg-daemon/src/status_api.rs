@@ -452,6 +452,11 @@ struct RouteConfigView {
     /// the brief window before the first reload finishes.
     #[serde(skip_serializing_if = "Option::is_none")]
     key_age_secs: Option<u64>,
+    /// Operator-configured rotation policy for this slot's key. When
+    /// `key_age_secs` exceeds this value the daemon emits a one-shot
+    /// warning per key generation. Absent when the TOML does not set it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_key_age_secs: Option<u64>,
     servers: Vec<ServerView>,
 }
 
@@ -464,6 +469,11 @@ struct RetryConfigView {
     /// Seconds since the current `token_key` was loaded. Preserved
     /// across reloads when the key bytes don't change.
     key_age_secs: u64,
+    /// Operator-configured rotation policy for the retry token key.
+    /// When `key_age_secs` exceeds this value the daemon nags via log.
+    /// Absent when `[retry] max_key_age_secs` is not set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_key_age_secs: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -504,6 +514,7 @@ impl RetryConfigView {
             ports: rc.ports.clone(),
             token_lifetime_secs: rc.token_lifetime_ms / 1_000,
             key_age_secs: now.saturating_duration_since(rc.loaded_at).as_secs(),
+            max_key_age_secs: rc.max_key_age_secs,
         }
     }
 }
@@ -541,6 +552,7 @@ impl RouteConfigView {
             server_id_length: rc.server_id_length,
             nonce_length: rc.nonce_length,
             key_age_secs,
+            max_key_age_secs: rc.max_key_age_secs,
             servers: rc.servers.iter().map(ServerView::from).collect(),
         }
     }
